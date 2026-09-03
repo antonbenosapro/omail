@@ -156,42 +156,65 @@ Item {
       anchors.topMargin: backBar.visible ? Style.space(14) : 0
       spacing: Style.space(4)
 
-      Text {
+      // The header reads as text, so it is text you can take: an address is
+      // the thing most often wanted out of a message, and a label you cannot
+      // select is a retype. TextEdit rather than Text for the selection, held
+      // read-only so it stays a header and not a field — and left out of the
+      // focus chain so tabbing through the reader is unchanged.
+      TextEdit {
         width: parent.width
+        readOnly: true
+        selectByMouse: true
+        activeFocusOnTab: false
         // A stranger wrote this. Qt's default AutoText switches a string that
         // looks like markup into rich text, and rich text with an <img> in it is
         // a fetch — the same beacon the message body is stripped of.
-        textFormat: Text.PlainText
+        textFormat: TextEdit.PlainText
         text: root.summary ? root.summary.subject : ""
         color: root.textColor
+        selectionColor: Style.selectionFillFor(root.textColor, root.accentColor)
+        selectedTextColor: root.textColor
         font.family: root.panelFontFamily
         font.pixelSize: Style.font.subtitle
         font.bold: true
-        wrapMode: Text.WordWrap
+        wrapMode: TextEdit.Wrap
       }
 
-      Text {
+      // The address is the line this exists for, so it wraps rather than
+      // elides: a selection can only reach the characters that are drawn, and
+      // an elided address copies as far as the ellipsis.
+      TextEdit {
         width: parent.width
-        textFormat: Text.PlainText
+        readOnly: true
+        selectByMouse: true
+        activeFocusOnTab: false
+        textFormat: TextEdit.PlainText
         text: root.summary
           ? root.summary.from.display + "  <" + root.summary.from.email + ">"
           : ""
         color: root.textColor
+        selectionColor: Style.selectionFillFor(root.textColor, root.accentColor)
+        selectedTextColor: root.textColor
         font.family: root.panelFontFamily
         font.pixelSize: Style.font.bodySmall
-        elide: Text.ElideRight
+        wrapMode: TextEdit.Wrap
       }
 
-      Text {
+      TextEdit {
         width: parent.width
-        textFormat: Text.PlainText
+        readOnly: true
+        selectByMouse: true
+        activeFocusOnTab: false
+        textFormat: TextEdit.PlainText
         text: root.summary
           ? "to " + Mail.formatAddressList(root.summary.to, 3) + " · " + root.summary.fullTime
           : ""
         color: root.dimColor
+        selectionColor: Style.selectionFillFor(root.textColor, root.accentColor)
+        selectedTextColor: root.dimColor
         font.family: root.panelFontFamily
         font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
+        wrapMode: TextEdit.Wrap
       }
     }
   }
