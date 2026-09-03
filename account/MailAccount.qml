@@ -459,8 +459,13 @@ Item {
 
     var now = new Date()
     var restored = Cache.hydrate(entry.summaries)
-    for (var i = 0; i < restored.length; i++)
+    for (var i = 0; i < restored.length; i++) {
       restored[i].time = Mail.relativeTime(restored[i].date, now)
+      // Stamped like every other summary. These are freshly hydrated and
+      // nothing else holds them yet, so they can be written in place — and a
+      // cache from before this field existed gains it on the way in.
+      restored[i].accountId = root.accountId
+    }
 
     messages = restored
     resultEstimate = entry.estimate
@@ -550,7 +555,33 @@ Item {
     }, listHandle)
   }
 
-  function applySummaries(summaries, append) {
+  // Every summary is stamped with the mailbox it came from, because a unified
+  // list holds several and neither provider's id is unique across them. This
+  // is the one place summaries enter the list, so it is the one place that has
+  // to know.
+  function tagOwnership(summaries) {
+    var list = Array.isArray(summaries) ? summaries : []
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      var summary = list[i]
+      if (!summary) continue
+      if (String(summary.accountId || "") === root.accountId) {
+        out.push(summary)
+        continue
+      }
+      // Copied rather than mutated: a summary may still be referenced by the
+      // list that is on screen, and rewriting it in place would change a row
+      // Qt has already been told is unchanged.
+      var copy = {}
+      for (var key in summary) copy[key] = summary[key]
+      copy.accountId = root.accountId
+      out.push(copy)
+    }
+    return out
+  }
+
+  function applySummaries(rawSummaries, append) {
+    var summaries = tagOwnership(rawSummaries)
     var merged = append ? root.messages.concat(summaries) : summaries
     var arrivals = append ? [] : Model.newArrivals(summaries, seenIds, notificationsPrimed)
 
@@ -873,7 +904,7 @@ Item {
   function act(id, action, quiet) {
     var messageId = String(id || "")
     if (!ready || messageId === "") return
-    var index = Model.indexById(messages, messageId)
+    var index = Model.indexById(messages, messageId, root.accountId)
     if (index < 0) return
     var before = messages[index]
     var updated = Model.applyLabelChange(before, action)
@@ -890,7 +921,7 @@ Item {
     var keepOpen = quiet === true && selectedId === messageId
     var removed = !survives && !keepOpen
 
-    if (removed) messages = Model.removeById(messages, messageId)
+    if (removed) messages = Model.removeById(messages, messageId, root.accountId)
     else messages = Model.replaceById(messages, updated)
     if (selectedId === messageId) {
       if (removed) clearSelection()
@@ -941,13 +972,13 @@ Item {
   }
 
   function toggleStar(id) {
-    var index = Model.indexById(messages, id)
+    var index = Model.indexById(messages, id, root.accountId)
     if (index < 0) return
     act(id, messages[index].starred ? "unstar" : "star")
   }
 
   function toggleRead(id) {
-    var index = Model.indexById(messages, id)
+    var index = Model.indexById(messages, id, root.accountId)
     if (index < 0) return
     act(id, messages[index].unread ? "markRead" : "markUnread")
   }

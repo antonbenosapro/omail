@@ -184,11 +184,34 @@ function showListFooter(messageCount) {
   return Math.max(0, Number(messageCount) || 0) > 0
 }
 
-function removeById(list, id) {
+// A message is addressed by its id *and* the mailbox it came from.
+//
+// An IMAP UID is unique only inside one folder and a Gmail id only inside one
+// account, so neither is unique across the several accounts a unified list
+// merges. Two mailboxes on one server really do collide: the pair that
+// prompted this had overlapping UID ranges, and fetching one account's UID
+// against the other answered with a bare protocol preamble rather than a
+// message. Matching on the id alone would archive or trash whichever of the
+// two happened to be first in the list.
+//
+// A summary carries `accountId` from `applySummaries`. Where the caller has no
+// account in mind it passes "", which matches any — that is the single-account
+// list, where the id is unambiguous by construction and every summary agrees.
+function sameMessage(summary, id, accountId) {
+  if (!summary || summary.id !== id) return false
+  var wanted = String(accountId || "")
+  if (wanted === "") return true
+  var owner = String(summary.accountId || "")
+  // A summary from before the account was tagged answers to any account, so a
+  // cache written by an older version stays usable rather than going inert.
+  return owner === "" || owner === wanted
+}
+
+function removeById(list, id, accountId) {
   var source = Array.isArray(list) ? list : []
   var out = []
   for (var i = 0; i < source.length; i++) {
-    if (source[i] && source[i].id === id) continue
+    if (sameMessage(source[i], id, accountId)) continue
     out.push(source[i])
   }
   return out
@@ -196,17 +219,19 @@ function removeById(list, id) {
 
 function replaceById(list, summary) {
   var source = Array.isArray(list) ? list : []
+  if (!summary) return source.slice()
   var out = []
   for (var i = 0; i < source.length; i++) {
-    out.push(source[i] && summary && source[i].id === summary.id ? summary : source[i])
+    out.push(sameMessage(source[i], summary.id, summary.accountId)
+      ? summary : source[i])
   }
   return out
 }
 
-function indexById(list, id) {
+function indexById(list, id, accountId) {
   var source = Array.isArray(list) ? list : []
   for (var i = 0; i < source.length; i++) {
-    if (source[i] && source[i].id === id) return i
+    if (sameMessage(source[i], id, accountId)) return i
   }
   return -1
 }

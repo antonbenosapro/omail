@@ -31,6 +31,48 @@ assert.strictEqual(accounts.hasSavedAccounts({ accounts: [
 assert.strictEqual(accounts.active(accounts.emptyList()), null)
 assert.strictEqual(accounts.find(accounts.emptyList(), "a@example.com"), null)
 
+// ---------------------------------------------------------------- colours
+//
+// The stripe down a row in a unified list, so the mailbox a message arrived in
+// is visible without a second column of text. Chosen rather than generated: a
+// theme supplies one accent, and hues derived from it land arbitrarily close
+// to each other and to the foreground on a theme that never expected several.
+
+assert.strictEqual(accounts.normalizeColor("#abc"), "#abc")
+assert.strictEqual(accounts.normalizeColor("#AABBCC"), "#aabbcc", "stored lower case")
+assert.strictEqual(accounts.normalizeColor("  #ABC  "), "#abc", "trimmed")
+// Only the two hex forms. This value reaches a QML `color`, where a string it
+// cannot parse is an error rather than a default.
+assert.strictEqual(accounts.normalizeColor("red"), "", "a colour name is not accepted")
+assert.strictEqual(accounts.normalizeColor("#gg0000"), "")
+assert.strictEqual(accounts.normalizeColor("#abcd"), "")
+assert.strictEqual(accounts.normalizeColor(""), "")
+assert.strictEqual(accounts.normalizeColor(null), "")
+assert.strictEqual(accounts.normalizeColor(undefined), "")
+
+// A colour survives the trip to disk and back.
+let painted = accounts.add(accounts.emptyList(), account("ada@example.com", { color: "#FF0000" }))
+assert.strictEqual(painted.accounts[0].color, "#ff0000")
+assert.strictEqual(accounts.load(accounts.serialize(painted)).accounts[0].color, "#ff0000")
+
+// A hand-edited file cannot put an unparseable colour in front of QML.
+assert.strictEqual(
+  accounts.load(JSON.stringify({
+    version: accounts.VERSION,
+    accounts: [{ email: "ada@example.com", color: "javascript:alert(1)" }],
+    activeId: "ada@example.com"
+  })).accounts[0].color, "")
+
+assert.strictEqual(accounts.colorFor(painted, "ada@example.com"), "#ff0000")
+assert.strictEqual(accounts.colorFor(painted, "nobody@example.com"), "",
+  "an account that is not there has no colour")
+assert.strictEqual(accounts.colorFor(accounts.emptyList(), ""), "")
+
+// An account with no colour chosen is the ordinary case, and says so with an
+// empty string rather than a default nobody picked.
+let plain = accounts.add(accounts.emptyList(), account("bob@example.com"))
+assert.strictEqual(plain.accounts[0].color, "")
+
 // --------------------------------------------------------------- addresses
 
 assert.strictEqual(accounts.isValidEmail("a@example.com"), true)

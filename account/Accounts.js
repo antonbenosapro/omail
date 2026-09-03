@@ -120,7 +120,8 @@ function makeAccount(account) {
     clientId: trimmed(raw.clientId),
     clientSecret: trimmed(raw.clientSecret),
     imap: makeImapSettings(raw.imap),
-    label: trimmed(raw.label)
+    label: trimmed(raw.label),
+    color: normalizeColor(raw.color)
   }
 }
 
@@ -182,6 +183,29 @@ function label(account) {
   if (name) return name
   var local = trimmed(raw.email).split("@")[0]
   return local || "New account"
+}
+
+// The stripe down the left of every row this account owns, so a merged list
+// says which mailbox a message arrived in without a second column of text.
+//
+// Chosen by the user rather than generated: a theme supplies one accent, and
+// hues derived from it land arbitrarily close to each other and to the
+// foreground on a theme that never anticipated several of them. An empty
+// string is "no colour", which is what every account has until asked.
+//
+// Only `#rgb` and `#rrggbb` are accepted. QML would take a colour name too,
+// but this value reaches a `color` property where a string it cannot parse is
+// an error rather than a default, so anything unrecognised becomes "" here.
+var COLOR_PATTERN = /^#([0-9a-f]{3}|[0-9a-f]{6})$/
+
+function normalizeColor(value) {
+  var text = trimmed(value).toLowerCase()
+  return COLOR_PATTERN.test(text) ? text : ""
+}
+
+function colorFor(list, id) {
+  var entry = find(list, id)
+  return entry ? normalizeColor(entry.color) : ""
 }
 
 // ------------------------------------------------------------------ edits

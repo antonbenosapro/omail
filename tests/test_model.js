@@ -357,3 +357,48 @@ assert.strictEqual(model.clampZoom(null), 1)
 assert.strictEqual(model.clampZoom("nonsense"), 1)
 assert.strictEqual(model.clampZoom(0), 0.6, "but zero is a number, and clamps")
 assert.strictEqual(model.clampZoom("1.5"), 1.5, "including one written as text")
+
+// ------------------------------------------------- identity across accounts
+//
+// An IMAP UID is unique only within a folder and a Gmail id only within an
+// account, so a unified list holding several accounts can hold the same id
+// twice. The pair that prompted this were two mailboxes on one server with
+// overlapping UID ranges — fetching one account's UID against the other
+// answered with a protocol preamble instead of a message. Matching on the id
+// alone would act on whichever row came first.
+
+const collide = [
+  { id: "12100:INBOX", accountId: "imap:a@example.org", subject: "theirs" },
+  { id: "12100:INBOX", accountId: "imap:b@example.org", subject: "mine" }
+]
+
+assert.strictEqual(model.indexById(collide, "12100:INBOX", "imap:b@example.org"), 1,
+  "the account decides which of two identical ids is meant")
+assert.strictEqual(model.indexById(collide, "12100:INBOX", "imap:a@example.org"), 0)
+assert.strictEqual(model.indexById(collide, "12100:INBOX", "imap:c@example.org"), -1,
+  "an id that exists under another account is not a match")
+
+// Removing one leaves the other alone. This is the archive-the-wrong-message
+// case, and the one worth being certain about.
+const left = model.removeById(collide, "12100:INBOX", "imap:a@example.org")
+assert.strictEqual(left.length, 1)
+assert.strictEqual(left[0].accountId, "imap:b@example.org")
+assert.strictEqual(left[0].subject, "mine")
+
+// Replacing one likewise.
+const swapped = model.replaceById(collide,
+  { id: "12100:INBOX", accountId: "imap:b@example.org", subject: "changed" })
+assert.strictEqual(swapped[0].subject, "theirs", "the other account is untouched")
+assert.strictEqual(swapped[1].subject, "changed")
+
+// No account named means the single-account list, where the id is unambiguous
+// by construction: it matches the first of that id, as it always did.
+assert.strictEqual(model.indexById(collide, "12100:INBOX"), 0)
+assert.strictEqual(model.indexById(collide, "12100:INBOX", ""), 0)
+
+// A summary cached before the field existed answers to whatever account asks,
+// so an upgrade keeps working from the cache it already has rather than
+// showing a list nothing can act on.
+const untagged = [{ id: "7:INBOX", subject: "old cache" }]
+assert.strictEqual(model.indexById(untagged, "7:INBOX", "imap:a@example.org"), 0)
+assert.strictEqual(model.removeById(untagged, "7:INBOX", "imap:a@example.org").length, 0)
