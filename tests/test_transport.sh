@@ -59,7 +59,17 @@ if [ -n "${CURL_STUB_HEADER:-}" ] && [ -n "$header_file" ]; then
   cat >/dev/null
   printf '%s' "${CURL_STUB_BODY:-}"
 else
-  cat
+  # The config names the SMTP body's file, which the script's trap removes as
+  # soon as it exits. Copying it aside from in here is the only moment the
+  # bytes curl would have uploaded can be read.
+  if [ -n "${CURL_STUB_UPLOAD:-}" ]; then
+    config=$(cat)
+    upload=$(printf '%s' "$config" | sed -n 's/^upload-file = "\(.*\)"$/\1/p' | head -1)
+    [ -z "$upload" ] || cp "$upload" "$CURL_STUB_UPLOAD" 2>/dev/null || true
+    printf '%s' "$config"
+  else
+    cat
+  fi
 fi
 exit "${CURL_STUB_EXIT:-0}"
 STUB
@@ -100,6 +110,24 @@ check_absent() {
   if printf '%s' "$haystack" | grep -qF -- "$needle"; then
     printf '  FAIL %s\n' "$description"
     printf '       did not expect: %s\n' "$needle"
+    failures=$(( failures + 1 ))
+  else
+    printf '  ok   %s\n' "$description"
+  fi
+}
+
+# Injection is about lines, not substrings. A stripped newline leaves its tail
+# folded into the value it came from — inert, quoted and escaped — where a
+# surviving one would start a config line of its own. So the assertion is that
+# no line of the config *begins* with the smuggled directive.
+check_no_directive() {
+  description=$1
+  haystack=$2
+  directive=$3
+  if printf '%s' "$haystack" | grep -q "^$directive"; then
+    printf '  FAIL %s\n' "$description"
+    printf '       a config line begins with: %s\n' "$directive"
+    printf '       in:\n%s\n' "$haystack"
     failures=$(( failures + 1 ))
   else
     printf '  ok   %s\n' "$description"
@@ -176,6 +204,114 @@ check_absent "the raw unescaped quote does not survive" "$config" 'said "hi" \ a
 config=$(config_for "imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 'jane:pw') $(b64 'UID COPY 4 "Sent Items"')")
 check "a quoted folder name survives into the command" "$config" 'UID COPY 4 \"Sent Items\"'
 
+# ------------------------------------------------- config-directive injection
+#
+# curl's config parser is line-oriented, and quoting does not span a line
+# break: a CR or an LF inside a value ends the directive it sits in and the
+# rest of the value is read as another directive. A password holding a newline
+# would therefore be able to add `upload-file` or `output` to the request that
+# carries it — a config-injection primitive on the one process that holds the
+# credential.
+#
+# Every caller strips or encodes CR/LF before the field is base64-encoded, so
+# nothing today can reach this. That is exactly the assumption the transport
+# must not make on its own behalf: it is the last thing between a value and
+# curl.
+
+injected='pw
+upload-file = "/etc/passwd"'
+config=$(config_for "imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 "jane:$injected") $(b64 'NOOP')")
+check_no_directive "an LF in a password cannot add a config directive" "$config" 'upload-file'
+check "the credential line survives, with the newline removed" "$config" 'user = "jane:pwupload-file'
+lines=$(printf '%s' "$config" | grep -c '^user = ' || true)
+if [ "$lines" = "1" ]; then
+  printf '  ok   an injected password is still one config line\n'
+else
+  printf '  FAIL an injected password produced %s user lines\n' "$lines"
+  failures=$(( failures + 1 ))
+fi
+
+# A CR alone splits a line for the same parser, and is the one a header-style
+# injection reaches for.
+injected_cr=$(printf 'pw\routput = "/tmp/stolen"')
+config=$(config_for "imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 "jane:$injected_cr") $(b64 'NOOP')")
+# grep sees a CR as an ordinary character, so a line-anchored match would miss
+# a value that carries one. The assertion is on the raw bytes: no CR reaches
+# the config at all.
+if printf '%s' "$config" | od -An -c | grep -q '\\r'; then
+  printf '  FAIL a CR in a password reached the config\n'
+  printf '       in:\n%s\n' "$(printf '%s' "$config" | od -c)"
+  failures=$(( failures + 1 ))
+else
+  printf '  ok   a CR in a password cannot add a config directive\n'
+fi
+check "the credential is still one value, CR removed" "$config" 'user = "jane:pwoutput'
+
+# An IMAP command is composed by Imap.js, but the transport does not get to
+# assume that: a folder name arrives from the server's own LIST reply.
+injected_cmd='NOOP
+request = "UID EXPUNGE 1:*"'
+config=$(config_for "imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 'jane:pw') $(b64 "$injected_cmd")")
+check_no_directive "an LF in a command cannot add a second request" "$config" 'request = "UID EXPUNGE'
+requests=$(printf '%s' "$config" | grep -c '^request = ' || true)
+if [ "$requests" = "1" ]; then
+  printf '  ok   an injected command is still one request\n'
+else
+  printf '  FAIL an injected command produced %s request lines\n' "$requests"
+  failures=$(( failures + 1 ))
+fi
+
+# The URL passes the scheme guard and then goes into the config like anything
+# else, so it gets the same treatment.
+injected_url=$(printf 'imaps://imap.example.org/INBOX\nnoproxy = ""')
+config=$(config_for "imap $(b64 "$injected_url") $(b64 'jane:pw') $(b64 'NOOP')")
+check "and the proxy bypass is still the one the script wrote" "$config" 'noproxy = "*"'
+# One `url` line, one `noproxy` line: an injected LF would have made the URL
+# span two and put a second option among them.
+url_lines=$(printf '%s' "$config" | grep -c '^url = ' || true)
+proxy_lines=$(printf '%s' "$config" | grep -c '^noproxy = ' || true)
+if [ "$url_lines" = "1" ] && [ "$proxy_lines" = "1" ]; then
+  printf '  ok   an LF in the URL cannot rewrite another option\n'
+else
+  printf '  FAIL an injected URL produced %s url and %s noproxy lines\n' "$url_lines" "$proxy_lines"
+  printf '       in:\n%s\n' "$config"
+  failures=$(( failures + 1 ))
+fi
+
+# The sender and every recipient are addresses from a draft, and reach the
+# config the same way.
+injected_send="smtp $(b64 'smtps://smtp.example.org:465') $(b64 'jane:pw') $(b64 'jane@example.org
+upload-file = "/etc/shadow"') $(b64 'Subject: hi
+
+body') $(b64 'friend@example.com
+mail-rcpt = "attacker@example.com"')"
+config=$(config_for "$injected_send")
+# SMTP writes one `upload-file` of its own, for the message. The injected one
+# must not become a second: a directive curl reads later wins over an earlier
+# one, so an added `upload-file` would replace the message being sent.
+uploads=$(printf '%s' "$config" | grep -c '^upload-file = ' || true)
+if [ "$uploads" = "1" ]; then
+  printf '  ok   an LF in the sender cannot add a second upload-file\n'
+else
+  printf '  FAIL an injected sender produced %s upload-file lines\n' "$uploads"
+  failures=$(( failures + 1 ))
+fi
+froms=$(printf '%s' "$config" | grep -c '^mail-from = ' || true)
+if [ "$froms" = "1" ]; then
+  printf '  ok   an injected sender is still one mail-from\n'
+else
+  printf '  FAIL an injected sender produced %s mail-from lines\n' "$froms"
+  failures=$(( failures + 1 ))
+fi
+check_absent "an LF in a recipient cannot add another recipient" "$config" 'mail-rcpt = "attacker@example.com"'
+rcpts=$(printf '%s' "$config" | grep -c '^mail-rcpt = ' || true)
+if [ "$rcpts" = "1" ]; then
+  printf '  ok   an injected recipient is still one recipient\n'
+else
+  printf '  FAIL an injected recipient produced %s mail-rcpt lines\n' "$rcpts"
+  failures=$(( failures + 1 ))
+fi
+
 # ------------------------------------------------------------ scheme guard
 #
 # The second gate. Imap.js validated the host; this is what stops a
@@ -213,6 +349,65 @@ check "every recipient is set" "$config" 'mail-rcpt = "other@example.com"'
 check "the body is uploaded from a file, not passed as an argument" "$config" 'upload-file = "'
 check_absent "SMTP does not emit --next sections" "$config" 'next'
 
+# The message itself is legitimately multi-line — a header block, a blank line,
+# then a body — and it is the one value that does not go through the config at
+# all. It is written to a file and named by `upload-file`, so the CR/LF strip
+# that guards every config directive must not reach it. This asserts on the
+# bytes curl would have uploaded rather than on the config.
+uploaded="$work/uploaded"
+rm -f "$uploaded"
+crlf_message=$(printf 'Subject: hi\r\nFrom: jane@example.org\r\n\r\nfirst line\r\nsecond line\r\n')
+send_multiline="smtp $(b64 'smtps://smtp.example.org:465') $(b64 'jane:pw') $(b64 'jane@example.org') $(b64 "$crlf_message") $(b64 'friend@example.com')"
+printf '%s\n' "$send_multiline" \
+  | CURL_STUB_UPLOAD="$uploaded" XDG_CACHE_HOME="$work/cache" \
+    PATH="$work/bin:$PATH" sh "$script" >/dev/null
+if [ "$(cat "$uploaded" 2>/dev/null)" = "$crlf_message" ]; then
+  printf '  ok   a CRLF message body is uploaded byte for byte\n'
+else
+  printf '  FAIL the outbound message was altered on its way to the file\n'
+  printf '       expected:\n%s\n' "$crlf_message" | od -c | tail -5
+  printf '       got:\n%s\n' "$(cat "$uploaded" 2>/dev/null)" | od -c | tail -5
+  failures=$(( failures + 1 ))
+fi
+# Four CRLF-terminated lines: two headers, the blank separator, and two body
+# lines. A strip applied to the message would collapse them into one.
+body_lines=$(wc -l < "$uploaded" | tr -d ' ')
+if [ "$body_lines" = "4" ]; then
+  printf '  ok   and keeps every one of its lines\n'
+else
+  printf '  FAIL the uploaded message has %s lines, not 4\n' "$body_lines"
+  failures=$(( failures + 1 ))
+fi
+carriage=$(od -An -c < "$uploaded" | grep -c '\\r' || true)
+if [ "$carriage" != "0" ]; then
+  printf '  ok   and its CRs, which SMTP requires\n'
+else
+  printf '  FAIL the CRs were stripped out of the outbound message\n'
+  failures=$(( failures + 1 ))
+fi
+
+
+# `login-options` is the one config directive that does not pass through
+# `escape()`, and it carries a value derived from what the *server* said. It is
+# safe for a different reason: `choose_mechanism` only ever emits one of five
+# hardcoded literals, so a hostile CAPABILITY line cannot reach the config
+# through it. That is a property of the function rather than of the escaping,
+# so it is asserted here — an edit that made the mechanism pass-through would
+# otherwise reintroduce the injection this file just closed.
+rm -rf "$work/cache"
+hostile='* CAPABILITY IMAP4rev1 AUTH=CRAM-MD5"
+upload-file = "/etc/passwd'
+config=$(printf '%s\n' "imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 'jane:pw') $(b64 'NOOP')" \
+  | CURL_STUB_CAPABILITY="$hostile" XDG_CACHE_HOME="$work/cache" \
+    PATH="$work/bin:$PATH" sh "$script" | sed -n '2p' | base64 -d)
+check_absent "a server cannot smuggle a directive through the mechanism" "$config" '/etc/passwd'
+uploads=$(printf '%s' "$config" | grep -c '^upload-file' || true)
+if [ "$uploads" = "0" ]; then
+  printf '  ok   and no upload-file line appears in an IMAP config\n'
+else
+  printf '  FAIL a hostile CAPABILITY line added %s upload-file line(s)\n' "$uploads"
+  failures=$(( failures + 1 ))
+fi
 
 # -------------------------------------------------- SASL mechanism selection
 #

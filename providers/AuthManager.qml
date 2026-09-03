@@ -224,9 +224,18 @@ Item {
     }
     lookupHandled = false
     triedLegacyLookup = false
+    // An unnamed account has no keyed entry of its own, so `keyringAttributes`
+    // hands back nothing and the account-keyed stage has nothing to ask for.
+    // Skipping straight to the legacy stages is what lets the first mailbox
+    // still adopt the pre-accounts token; running the lookup with no
+    // attributes would instead match every token this plugin ever stored.
     secretLookupStage = 0
-    secretLookup.command = ["secret-tool", "lookup"].concat(
-      Credentials.keyringAttributes(clientId, accountId))
+    var attributes = Credentials.keyringAttributes(clientId, accountId)
+    if (attributes.length === 0) {
+      startNextSecretLookup()
+      return
+    }
+    secretLookup.command = ["secret-tool", "lookup"].concat(attributes)
     secretLookup.running = true
   }
 
@@ -288,7 +297,7 @@ Item {
   property string unnamedRefreshToken: ""
 
   onAccountIdChanged: {
-    if (accountId === "" || unnamedRefreshToken === "") return
+    if (Credentials.isUnnamedAccount(accountId) || unnamedRefreshToken === "") return
     var held = unnamedRefreshToken
     unnamedRefreshToken = ""
     storeRefreshToken(held)
@@ -296,21 +305,27 @@ Item {
 
   function storeRefreshToken(refreshToken) {
     if (!refreshToken) return
-    if (accountId === "") {
+    // Nothing is written until there is a name to write it under. The token
+    // waits in memory for the profile read, which is a second away.
+    if (Credentials.isUnnamedAccount(accountId)) {
       unnamedRefreshToken = String(refreshToken)
       return
     }
     if (keyringStore.running) return
+    var attributes = Credentials.keyringAttributes(clientId, accountId)
+    if (attributes.length === 0) return
     keyringWriteToken = String(refreshToken)
-    keyringStore.command = [pluginDir + "/scripts/keyring-store.sh"].concat(
-      Credentials.keyringAttributes(clientId, accountId))
+    keyringStore.command = [pluginDir + "/scripts/keyring-store.sh"].concat(attributes)
     keyringStore.running = true
   }
 
   function clearStoredToken() {
-    if (keyringClear.running || !clientId) return
-    keyringClear.command = ["secret-tool", "clear"].concat(
-      Credentials.keyringAttributes(clientId, accountId))
+    if (keyringClear.running) return
+    // No name, no entry: an unnamed account never wrote one, and a `clear`
+    // with no attributes deletes every entry this plugin owns.
+    var attributes = Credentials.keyringAttributes(clientId, accountId)
+    if (attributes.length === 0) return
+    keyringClear.command = ["secret-tool", "clear"].concat(attributes)
     keyringClear.running = true
   }
 

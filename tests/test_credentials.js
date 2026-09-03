@@ -152,8 +152,6 @@ deepEqual(credentials.keyringAttributes(sharedClient, "  One@Gmail.com  "), firs
 const attributeSets = [
   first,
   second,
-  credentials.keyringAttributes(sharedClient, ""),
-  credentials.keyringAttributes(sharedClient, null),
   credentials.legacyKeyringAttributes(sharedClient)
 ]
 for (const attributes of attributeSets) {
@@ -164,8 +162,22 @@ for (const attributes of attributeSets) {
     assert.ok(value.length > 0, "an empty attribute value is a secret-tool wildcard")
   }
 }
-assert.strictEqual(credentials.keyringAttributes(sharedClient, "").indexOf("default") > 0, true,
-  "an account with no name yet still gets a literal account attribute")
+
+// An account with no address is not addressable at all. It used to key on a
+// literal "default", which every unnamed account shared: whoever was added
+// next could read the last one's token out of it and write over it. There is
+// no safe stand-in for a name, so the answer is to hand back nothing and let
+// the caller wait for the real one.
+deepEqual(credentials.keyringAttributes(sharedClient, ""), [],
+  "an unnamed account has no keyring entry")
+deepEqual(credentials.keyringAttributes(sharedClient, "   "), [])
+deepEqual(credentials.keyringAttributes(sharedClient, null), [])
+deepEqual(credentials.renamedKeyringAttributes(sharedClient, ""), [],
+  "and none under the pre-rename service name either")
+for (const attributes of [first, second, credentials.legacyKeyringAttributes(sharedClient)]) {
+  assert.strictEqual(attributes.indexOf("default"), -1,
+    "no shared placeholder account survives anywhere in the attributes")
+}
 
 // Without a client id there is nothing to look up, and an attribute-free
 // lookup would match every token the plugin ever stored.
@@ -300,9 +312,11 @@ deepEqual(credentials.accountIds(damaged), ["three@work.com"])
 
 // An IMAP account is added with an empty address and only learns its id from
 // the profile read that signing in makes possible. So there is a moment where
-// it has a password and no name, and a password written then goes to the
-// placeholder every unnamed account shares — where the mailbox will never read
-// it back. The callers that store one have to be able to tell that moment.
+// it has a password and no name. There is nowhere to put that password: the
+// keyring keys on the address, and the stand-in that used to fill in for a
+// missing one was shared by every unnamed account, so each new mailbox could
+// read and overwrite what the last one left there. The refusal is the design;
+// the caller holds the secret in memory until the name arrives.
 {
   assert.strictEqual(credentials.isUnnamedAccount(""), true,
     "an account with no address yet is unnamed")
@@ -310,17 +324,60 @@ deepEqual(credentials.accountIds(damaged), ["three@work.com"])
     "and whitespace is no address either")
   assert.strictEqual(credentials.isUnnamedAccount("imap:jon@example.com"), false,
     "an account with an address is named")
-  assert.strictEqual(credentials.isUnnamedAccount("default"), true,
-    "the placeholder itself is not a name")
 
-  // Two unnamed accounts key on the same entry, which is the whole reason a
-  // password cannot be left there.
-  assert.deepStrictEqual(credentials.imapKeyringAttributes(""),
-    credentials.imapKeyringAttributes("  "),
-    "every unnamed account shares one keyring entry")
-  assert.notDeepStrictEqual(credentials.imapKeyringAttributes(""),
+  // The former placeholder is now an ordinary string, and being ordinary is
+  // the point: it names no shared entry any more.
+  assert.strictEqual(credentials.isUnnamedAccount("default"), false,
+    "\"default\" is no longer a reserved stand-in for a missing name")
+
+  // An unnamed account is refused a key rather than given a shared one.
+  deepEqual(credentials.imapKeyringAttributes(""), [],
+    "an unnamed account gets no IMAP keyring entry")
+  deepEqual(credentials.imapKeyringAttributes("  "), [])
+  deepEqual(credentials.imapKeyringAttributes(null), [])
+  deepEqual(credentials.imapKeyringAttributes("imap:jon@example.com"), [
+    "service", "omamail",
+    "kind", "imap-password",
+    "account", "imap:jon@example.com"
+  ], "a named account keys on its own address")
+  deepEqual(credentials.imapKeyringAttributes("  IMAP:Jon@Example.com "),
     credentials.imapKeyringAttributes("imap:jon@example.com"),
-    "a named account keys on its own")
+    "the same mailbox typed differently is the same account")
+
+  // An IMAP password and a Gmail refresh token for one address stay two
+  // entries, because the kind differs.
+  assert.notStrictEqual(
+    JSON.stringify(credentials.imapKeyringAttributes("jon@example.com")),
+    JSON.stringify(credentials.keyringAttributes("1234-abc.apps.googleusercontent.com",
+      "jon@example.com")))
+}
+
+// The decision a successful sign-in makes about the secret it now holds. It is
+// here rather than in QML so it can be asserted without a compositor: a draft
+// account waits, a named one writes.
+{
+  assert.strictEqual(credentials.secretDisposition("imap:jon@example.com"),
+    credentials.STORE_NOW, "a named account stores its password at once")
+  assert.strictEqual(credentials.secretDisposition("jon@example.com"),
+    credentials.STORE_NOW)
+  assert.strictEqual(credentials.secretDisposition(""),
+    credentials.STORE_WHEN_NAMED, "a draft account waits for its address")
+  assert.strictEqual(credentials.secretDisposition("   "),
+    credentials.STORE_WHEN_NAMED)
+  assert.strictEqual(credentials.secretDisposition(null),
+    credentials.STORE_WHEN_NAMED)
+  assert.notStrictEqual(credentials.STORE_NOW, credentials.STORE_WHEN_NAMED)
+
+  // Whatever the disposition says to wait for has no attributes to write
+  // under, and whatever it says to store now does. The two must not disagree:
+  // a "store now" with no key would drop the password silently, and a "wait"
+  // with a key is the shared placeholder coming back.
+  const ids = ["", "  ", null, "default", "jon@example.com", "imap:jon@example.com"]
+  for (const id of ids) {
+    const waits = credentials.secretDisposition(id) === credentials.STORE_WHEN_NAMED
+    assert.strictEqual(credentials.imapKeyringAttributes(id).length === 0, waits,
+      "disposition and addressability agree for " + JSON.stringify(id))
+  }
 }
 
 console.log("test_credentials.js ok")

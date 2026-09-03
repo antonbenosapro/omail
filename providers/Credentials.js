@@ -329,22 +329,30 @@ var KEYRING_SERVICE = "omamail"
 var RENAMED_KEYRING_SERVICE = "omarchy-gmail"
 var KEYRING_KIND = "refresh-token"
 
-// secret-tool reads an empty attribute value as "match anything", which would
-// hand back some other account's token, so an account with no name yet gets a
-// literal one. No address can collide with it: every address has an "@".
-var UNNAMED_ACCOUNT = "default"
+// An account that has not learned its address yet has no name to key on, and
+// there is no honest substitute for one. secret-tool reads an empty attribute
+// value as "match anything", so a blank name is a wildcard over every entry
+// this plugin ever wrote; a literal stand-in is worse, because every unnamed
+// account shares it and each one can then read and overwrite what the last
+// one left there. So an unnamed account is not addressable in the keyring at
+// all, and every function below hands back an empty attribute list for one.
+// The caller's answer is to wait for the name, not to invent one.
+function isUnnamedAccount(accountId) {
+  return accountKey(accountId) === ""
+}
 
 // Alternating name, value — the form secret-tool takes on its command line.
-// An entry with no client id is not addressable at all, and asking for one
+// An entry with no client id is not addressable either, and asking for one
 // would be a wildcard lookup over every token this plugin ever stored.
 function keyringAttributes(clientId, accountId) {
   var id = trimmed(clientId)
-  if (!id) return []
+  var account = accountKey(accountId)
+  if (!id || !account) return []
   return [
     "service", KEYRING_SERVICE,
     "kind", KEYRING_KIND,
     "client-id", id,
-    "account", accountKey(accountId) || UNNAMED_ACCOUNT
+    "account", account
   ]
 }
 
@@ -364,21 +372,22 @@ function legacyKeyringAttributes(clientId) {
 // are two entries rather than one overwriting the other.
 var IMAP_KEYRING_KIND = "imap-password"
 
-// An account that has not learned its address yet keys on the placeholder,
-// which every unnamed account shares. A password written there is not this
-// mailbox's password once it has a name, so the callers that store one have to
-// be able to tell the two apart.
-function isUnnamedAccount(accountId) {
-  return (accountKey(accountId) || UNNAMED_ACCOUNT) === UNNAMED_ACCOUNT
-}
-
 function imapKeyringAttributes(accountId) {
   var id = accountKey(accountId)
-  // As above: an empty attribute value is a wildcard to secret-tool, which
-  // would hand back some other account's password. An account with no name yet
-  // gets the literal placeholder, which no address can collide with.
-  return ["service", KEYRING_SERVICE, "kind", IMAP_KEYRING_KIND,
-    "account", id || UNNAMED_ACCOUNT]
+  if (!id) return []
+  return ["service", KEYRING_SERVICE, "kind", IMAP_KEYRING_KIND, "account", id]
+}
+
+// What a sign-in does with the secret it has just proved good. An account that
+// already has a name stores it; one that does not holds it in memory and waits
+// for the name, because there is no key to write it under yet and inventing
+// one is what this design refuses. Returned as a word rather than a boolean so
+// the two callers read the same at the call site as they do here.
+var STORE_NOW = "store"
+var STORE_WHEN_NAMED = "wait"
+
+function secretDisposition(accountId) {
+  return isUnnamedAccount(accountId) ? STORE_WHEN_NAMED : STORE_NOW
 }
 
 // Entries from before the Omamail rename are read once and rewritten under

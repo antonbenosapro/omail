@@ -178,13 +178,13 @@ Item {
     pendingPassword = ""
     passwordChecked = true
     lastError = ""
-    // A draft account has no address yet, so it has no id to key a password
-    // on: `imapKeyringAttributes` falls back to a placeholder shared by every
-    // unnamed account. Storing here would write the password somewhere the
-    // mailbox will never read it back from — it learns its real id a moment
-    // later, from the profile read that signing in just made possible. So the
-    // write waits for the name, and `onAccountIdChanged` performs it.
-    if (Credentials.isUnnamedAccount(accountId)) justNamed = accountId
+    // A draft account has no address yet, so there is no key to write the
+    // password under — and the keyring refuses to invent one. It learns its
+    // real id a moment later, from the profile read that signing in just made
+    // possible, so the write waits for the name and `onAccountIdChanged`
+    // performs it. Until then the password lives only in this process.
+    if (Credentials.secretDisposition(accountId) === Credentials.STORE_WHEN_NAMED)
+      storeWhenNamed = true
     else storePassword()
     loginSucceeded()
   }
@@ -198,16 +198,6 @@ Item {
   }
 
   property string keyringWriteSecret: ""
-
-  // The placeholder entry a draft account's password would have gone to. Left
-  // behind it would be handed to the next account added, which is somebody
-  // else's password in front of this one's server.
-  function clearKeyringFor(id) {
-    var attributes = Credentials.imapKeyringAttributes(id)
-    if (attributes.length === 0) return
-    keyringClear.command = ["secret-tool", "clear"].concat(attributes)
-    keyringClear.running = true
-  }
 
   function logout() {
     password = ""
@@ -241,15 +231,13 @@ Item {
     // password in memory belongs to *this* mailbox rather than the previous
     // one: a new account is added with an empty address, and only learns its
     // id from the first profile read — which cannot happen until it is signed
-    // in. So the password is written under the name the account has now, and
-    // the placeholder entry it was saved under is cleared.
-    if (justNamed !== "" && password !== "") {
+    // in. Now that there is a name, the write that was waiting for one runs.
+    if (storeWhenNamed && password !== "") {
+      storeWhenNamed = false
       storePassword()
-      clearKeyringFor(justNamed)
-      justNamed = ""
       return
     }
-    justNamed = ""
+    storeWhenNamed = false
     // Otherwise a different mailbox has a different password. Dropping the one
     // in memory is what stops an account rename from leaving the previous
     // account's credential in front of the new one's server.
@@ -258,10 +246,10 @@ Item {
     lookupHandled = false
   }
 
-  // The id this account had when it was signed in, held across the one rename
-  // that turns a nameless draft into a named mailbox. Empty at every other
-  // moment, so a genuine switch between accounts still drops the password.
-  property string justNamed: ""
+  // Set when a sign-in succeeded before the account had an address, and read
+  // once by the rename that gives it one. False at every other moment, so a
+  // genuine switch between accounts still drops the password.
+  property bool storeWhenNamed: false
 
   Component.onCompleted: {
     toolProbe.command = ["sh", "-c",
