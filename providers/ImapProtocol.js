@@ -567,20 +567,40 @@ function parseLiteralBody(line) {
   return payload.substring(0, size)
 }
 
+var MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+// `INTERNALDATE " 2-Sep-2026 06:06:28 -0400"` as milliseconds since the epoch.
+//
+// Computed with Date.UTC rather than handed to `new Date(string)`. No engine
+// is obliged to parse "Sep 2, 2026 06:06:28 -0400" and Qt's does not, so the
+// value that every message received on a single-digit day carried — RFC 3501
+// pads those with a space, which also missed the anchored pattern below —
+// arrived in the panel as no date at all. It passed every test outside the
+// shell, because Node parses the same string happily. Arithmetic is the only
+// form that means the same thing in both.
 function parseInternalDate(line) {
-  var value = unquoteImap(fetchItem(line, "INTERNALDATE"))
+  var value = unquoteImap(fetchItem(line, "INTERNALDATE")).trim()
   if (value === "") return 0
-  // "17-Jul-2026 09:02:11 +0800" is not a format Date parses anywhere, so it
-  // is rearranged into one that is.
-  var match = value.match(/^(\d{1,2})-(\w{3})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s*([+-]\d{4})?$/)
-  if (!match) {
-    var loose = new Date(value)
-    return isNaN(loose.getTime()) ? 0 : loose.getTime()
+
+  var match = value.match(
+    /^(\d{1,2})-([A-Za-z]{3})-(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*([+-])?(\d{2})?(\d{2})?$/)
+  if (!match) return 0
+
+  var month = MONTHS.indexOf(match[2].toUpperCase())
+  if (month < 0) return 0
+
+  var at = Date.UTC(Number(match[3]), month, Number(match[1]),
+    Number(match[4]), Number(match[5]), Number(match[6]))
+  if (!isFinite(at)) return 0
+
+  // The zone the server named, subtracted to reach UTC. Absent means UTC,
+  // which is what RFC 3501 requires the field to carry anyway.
+  if (match[7]) {
+    var offset = (Number(match[8] || 0) * 60 + Number(match[9] || 0)) * 60000
+    at += match[7] === "-" ? offset : -offset
   }
-  var rebuilt = match[2] + " " + match[1] + ", " + match[3] + " "
-    + match[4] + ":" + match[5] + ":" + match[6] + " " + (match[7] || "+0000")
-  var parsed = new Date(rebuilt)
-  return isNaN(parsed.getTime()) ? 0 : parsed.getTime()
+  return at
 }
 
 // One entry per message in a FETCH response, in the order the server sent

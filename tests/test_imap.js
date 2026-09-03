@@ -485,6 +485,37 @@ assert.strictEqual(imap.isFailure("* OK still going\r\n"), false, "untagged OK i
 // 12009, then restarting lower — so a client that reversed the list to get
 // "newest first" took the tail of the second run instead and the newest mail
 // on the server never appeared in the page at all.
+// RFC 3501 pads a single-digit day with a space: INTERNALDATE
+// " 2-Sep-2026 06:06:28 -0400". The anchored pattern that rearranges the value
+// into something Date accepts does not match a leading space, so those values
+// fell through to a loose `new Date(value)` — which Node parses and Qt's JS
+// engine does not. Every message received on a single-digit day therefore
+// arrived in the panel with no date at all, while passing every test run
+// outside it: a third of a page with nothing to sort by and no time to show.
+//
+// Both paddings must reach the same instant, and the assertion is on the
+// value rather than on "not zero" so a future rearrangement cannot pass by
+// returning something merely truthy.
+function fetchLineWithDate(value) {
+  return "* 1 FETCH (UID 5 FLAGS (\\Seen) INTERNALDATE \"" + value
+    + "\" RFC822.SIZE 26717)"
+}
+assert.strictEqual(
+  imap.parseFetch(fetchLineWithDate(" 2-Sep-2026 06:06:28 -0400"))[0].internalDate,
+  Date.UTC(2026, 8, 2, 10, 6, 28),
+  "a space-padded single-digit day is parsed")
+assert.strictEqual(
+  imap.parseFetch(fetchLineWithDate("02-Sep-2026 06:06:28 -0400"))[0].internalDate,
+  Date.UTC(2026, 8, 2, 10, 6, 28),
+  "and agrees with the zero-padded form")
+assert.strictEqual(
+  imap.parseFetch(fetchLineWithDate("31-Aug-2026 20:30:00 -0400"))[0].internalDate,
+  Date.UTC(2026, 8, 1, 0, 30, 0),
+  "a two-digit day is unaffected")
+// A missing INTERNALDATE is still nothing rather than an accident.
+assert.strictEqual(
+  imap.parseFetch("* 1 FETCH (UID 5 RFC822.SIZE 1)")[0].internalDate, 0)
+
 var twoRuns = "* SEARCH 10 11 12009 12008 12007 5 6 7\r\nA1 OK SEARCH completed\r\n"
 var found = imap.parseSearch(twoRuns)
 assert.strictEqual(found.length, 8, "every UID is parsed whatever the order")

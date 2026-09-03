@@ -32,6 +32,15 @@ if [ -z "$header_file" ]; then
   printf '%s' "${CURL_STUB_CAPABILITY:-}"
   exit "${CURL_STUB_PROBE_EXIT:-0}"
 fi
+# Fails the first request and succeeds after, so the retry can be asserted on.
+if [ -n "${CURL_STUB_FAIL_ONCE:-}" ]; then
+  if [ ! -f "$CURL_STUB_FAIL_ONCE" ]; then
+    : > "$CURL_STUB_FAIL_ONCE"
+    cat >/dev/null
+    printf 'curl: (56) response reading failed\n' >&2
+    exit 56
+  fi
+fi
 if [ -n "${CURL_STUB_HEADER:-}" ] && [ -n "$header_file" ]; then
   printf '%s' "$CURL_STUB_HEADER" > "$header_file"
   cat >/dev/null
@@ -337,6 +346,37 @@ body') $(b64 'friend@example.com')"
 config=$(probe_config_for "$smtp_req" '250-AUTH PLAIN LOGIN CRAM-MD5 DIGEST-MD5 GSSAPI')
 check "SMTP names a mechanism too" "$config" 'login-options = "AUTH=CRAM-MD5"'
 check_absent "SMTP does not choose GSSAPI without a ticket" "$config" 'AUTH=GSSAPI'
+
+
+# A server that limits concurrent connections drops some of a burst outright.
+# curl reports those as a transport failure, and the same command succeeds a
+# moment later — so a dropped list load must be retried rather than delivered
+# as a page with messages missing from it, which reads as mail that is not
+# there.
+rm -rf "$work/cache"
+marker="$work/failed-once"
+out=$(printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY="$axigen_imap" CURL_STUB_FAIL_ONCE="$marker" \
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
+if [ "$(printf '%s' "$out" | sed -n '1p')" = "0" ]; then
+  printf '  ok   a dropped connection is retried\n'
+else
+  printf '  FAIL a dropped connection was reported instead of retried\n'
+  failures=$(( failures + 1 ))
+fi
+
+# A server that answered NO answered. Asking again is asking a question that
+# is already settled, so only the transport is retried.
+rm -rf "$work/cache"
+out=$(printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY="$axigen_imap" CURL_STUB_EXIT=67 \
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
+if [ "$(printf '%s' "$out" | sed -n '1p')" = "67" ]; then
+  printf '  ok   a refusal is reported rather than retried\n'
+else
+  printf '  FAIL a refusal did not survive to the caller\n'
+  failures=$(( failures + 1 ))
+fi
 
 # ------------------------------------------------------------- the framing
 

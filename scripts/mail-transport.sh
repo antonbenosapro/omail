@@ -333,16 +333,38 @@ fi
 
 # curl is the last stage, so `$?` is curl's own exit code rather than the
 # config builder's.
+# Retried once on a transport failure, because a server that limits concurrent
+# connections drops some of a burst outright — several accounts refreshing
+# together, or a list load beside an unread poll. curl reports those as 3, 35,
+# 52, 55 or 56 depending on where the connection died, and none of them means
+# the request was wrong: the same command succeeds a moment later. A dropped
+# list load otherwise reached the panel as a page with messages missing from
+# it, which is indistinguishable from mail that is not there.
+#
+# Only the transport is retried. A server that answered NO answered, and
+# sending it again would be asking a question already settled.
+run_curl() {
+  build_config "$@" | curl \
+    --config - \
+    --silent \
+    --show-error \
+    --dump-header "$work/headers" \
+    --max-time 60 \
+    --connect-timeout 20 \
+    > "$work/out" 2> "$work/err"
+}
+
 set +e
-build_config "$@" | curl \
-  --config - \
-  --silent \
-  --show-error \
-  --dump-header "$work/headers" \
-  --max-time 60 \
-  --connect-timeout 20 \
-  > "$work/out" 2> "$work/err"
+run_curl "$@"
 status=$?
+case "$status" in
+  3|35|52|55|56)
+    sleep 1
+    : > "$work/headers"
+    run_curl "$@"
+    status=$?
+    ;;
+esac
 set -e
 
 printf '%s\n' "$status"

@@ -710,7 +710,12 @@ Item {
     var host = root.unified ? reader : current
     if (host) host.unsubscribe()
   }
+  // The cursor walks the list that is on screen. While unified that is the
+  // merged one, and asking the account on screen would have walked only its
+  // own messages — j and k stopped at the end of whichever mailbox the cursor
+  // started in rather than carrying on into the next.
   function cursorOffset(cursorId, delta) {
+    if (root.unified) return Model.cursorAfterOffset(root.messages, cursorId, delta)
     return current ? current.cursorOffset(cursorId, delta) : ""
   }
   // While unified every mailbox moves together, or the merged list would be

@@ -49,7 +49,11 @@ Column {
   // one holds the cursor: the answer must not wait on a binding to propagate.
   function boundsFor(id) {
     if (!root.service) return null
-    var index = Model.indexById(root.service.messages, id)
+    // Matched on the account as well while unified: two mailboxes can hold one
+    // id, and scrolling to the first of them would move the list to a row the
+    // cursor is not on.
+    var index = Model.indexById(root.service.messages, id,
+      root.service.unified ? root.cursorAccountId : "")
     if (index < 0) return null
     var item = rows.itemAt(index)
     if (!item) return null
