@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import "../providers"
 import "../cache"
 
@@ -726,6 +727,106 @@ Item {
     selectedRemoteImages = ready.remoteImages
     selectedTooHeavy = ready.tooHeavy
     return ready
+  }
+
+  // ------------------------------------------------------- attachments
+
+  // Which attachment is being written, so the row can say so and a second
+  // click cannot start a second write of the same file.
+  property string savingAttachment: ""
+
+  readonly property string downloadDirectory: {
+    var named = Quickshell.env("XDG_DOWNLOAD_DIR")
+    if (named && named !== "") return named
+    return Quickshell.env("HOME") + "/Downloads"
+  }
+
+  // Save one attachment and let the desktop open it.
+  //
+  // For IMAP this costs no request: the whole message was fetched to read it,
+  // so `getAttachment` walks the MIME tree it already holds. Gmail describes a
+  // part rather than sending it, so there the octets are one call away — which
+  // is why this is asynchronous for both rather than only for the one that
+  // needs to be.
+  function saveAttachment(attachmentId) {
+    var wanted = String(attachmentId || "")
+    if (wanted === "" || selectedId === "" || savingAttachment !== "") return
+    if (!ready) {
+      fail("Sign in before saving an attachment")
+      return
+    }
+
+    var record = null
+    var list = Array.isArray(selectedAttachments) ? selectedAttachments : []
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].attachmentId) === wanted) record = list[i]
+    }
+    if (!record) return
+
+    clearNotice()
+    savingAttachment = wanted
+    var messageId = selectedId
+
+    api.getAttachment(messageId, wanted, function(data, error) {
+      // The reader moved on. The file would still be correct, but opening a
+      // viewer for a message the user has left is not what the click asked
+      // for.
+      if (messageId !== root.selectedId) {
+        root.savingAttachment = ""
+        return
+      }
+      if (error || !data) {
+        root.savingAttachment = ""
+        root.fail(error || "That attachment is no longer in the message")
+        return
+      }
+      attachmentWriter.filename = record.filename
+      attachmentWriter.payload = data
+      attachmentWriter.command = [root.pluginDir + "/scripts/save-attachment.sh",
+        root.downloadDirectory, record.filename]
+      attachmentWriter.running = true
+    })
+  }
+
+  Process {
+    id: attachmentWriter
+
+    property string payload: ""
+    property string filename: ""
+    // The saved name, which is not always the one asked for: a name already
+    // taken gets a counter, and the script prints what it used.
+    property string savedAs: ""
+
+    stdinEnabled: true
+    stdout: SplitParser {
+      onRead: function(line) {
+        var name = String(line || "").trim()
+        if (name !== "") attachmentWriter.savedAs = name
+      }
+    }
+    stderr: SplitParser {
+      onRead: function(line) {
+        var text = String(line || "").trim()
+        // The script's own messages are prefixed with its name, which is not
+        // something to show anybody.
+        if (text !== "") attachmentWriter.savedAs = ""
+      }
+    }
+
+    onStarted: {
+      write(payload + "\n")
+      payload = ""
+    }
+
+    onExited: function(code) {
+      payload = ""
+      root.savingAttachment = ""
+      var name = savedAs !== "" ? savedAs : filename
+      savedAs = ""
+      if (code === 0) root.note("Saved " + name + " to Downloads")
+      else root.fail("Could not save " + filename)
+      filename = ""
+    }
   }
 
   function showRemoteImages() {

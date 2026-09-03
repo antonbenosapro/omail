@@ -428,22 +428,38 @@ Item {
     Repeater {
       model: root.service ? root.service.selectedAttachments : []
 
+      // One attachment. Clicking it saves the file to the downloads directory
+      // and lets the desktop open it, so the row is a control rather than a
+      // label — it takes the pointer, the cursor and the hover treatment that
+      // says so.
       Row {
+        id: attachmentRow
         required property var modelData
         spacing: Style.space(6)
+
+        readonly property bool saving: !!root.service
+          && root.service.savingAttachment === modelData.attachmentId
+        // Only one write runs at a time, so the others are not offering
+        // anything while it does.
+        readonly property bool busy: !!root.service
+          && root.service.savingAttachment !== ""
+        readonly property bool hot: attachmentMouse.containsMouse && !busy
 
         ActionIcon {
           anchors.verticalCenter: parent.verticalCenter
           name: "attachment"
           iconSize: Style.font.iconSmall
-          color: root.dimColor
+          color: attachmentRow.hot ? root.textColor : root.dimColor
         }
 
         Text {
           anchors.verticalCenter: parent.verticalCenter
           textFormat: Text.PlainText
-          text: modelData.filename
-          color: root.dimColor
+          text: attachmentRow.modelData.filename
+          // Underlined on hover as well as brightened: the row is the only
+          // clickable thing in this strip, and colour alone does not say so.
+          font.underline: attachmentRow.hot
+          color: attachmentRow.hot ? root.textColor : root.dimColor
           font.family: root.panelFontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
@@ -451,10 +467,25 @@ Item {
 
         Text {
           anchors.verticalCenter: parent.verticalCenter
-          text: Mail.formatSize(modelData.size)
+          // The size is what the row says at rest; while it writes, the row
+          // says that instead, in the same place rather than somewhere new.
+          text: attachmentRow.saving
+            ? "Saving…"
+            : Mail.formatSize(attachmentRow.modelData.size)
           color: root.dimmerColor
           font.family: root.panelFontFamily
           font.pixelSize: Style.font.caption
+        }
+
+        MouseArea {
+          id: attachmentMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          enabled: !attachmentRow.busy
+          cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+          onClicked: {
+            if (root.service) root.service.saveAttachment(attachmentRow.modelData.attachmentId)
+          }
         }
       }
     }

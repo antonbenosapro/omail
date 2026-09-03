@@ -494,6 +494,7 @@ Item {
   readonly property string unsubscribeLabel: current ? current.unsubscribeLabel : ""
   readonly property string unsubscribeDetail: current ? current.unsubscribeDetail : ""
   readonly property bool unsubscribing: !!current && current.unsubscribing
+  readonly property string savingAttachment: current ? current.savingAttachment : ""
   readonly property bool detailLoading: !!current && current.detailLoading
   readonly property bool sending: !!current && current.sending
   readonly property string lastError: current ? current.lastError : ""
@@ -509,6 +510,7 @@ Item {
   // message, and it says so.
   function showRemoteImages() { setAlwaysShowImages(true) }
   function rsvp(response) { if (current) current.rsvp(response) }
+  function saveAttachment(id) { if (current) current.saveAttachment(id) }
   function unsubscribe() { if (current) current.unsubscribe() }
   function cursorOffset(cursorId, delta) {
     return current ? current.cursorOffset(cursorId, delta) : ""

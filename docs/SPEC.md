@@ -55,7 +55,8 @@ guided by an in-app four-step walkthrough.
 
 - Mailboxes: Inbox, Unread, Starred, Sent, All mail, Trash, plus user labels
 - Message list: sender, subject, snippet, time, unread dot, star; paging
-- Reader: headers, HTML or plain body, attachment list, open in browser
+- Reader: headers, HTML or plain body, attachments saved to Downloads and
+  opened, open in browser
 - Actions: read/unread, star, archive, trash, untrash, report spam, mark all read
 - Compose, reply, reply-all, forward
 - Calendar invitations: full meeting detail, RSVP, and one-click Meet join
@@ -70,7 +71,6 @@ guided by an in-app four-step walkthrough.
 **Explicitly out of scope**
 
 - Embedded browser engine (see above)
-- Attachment download (v1.1)
 - Offline cache
 
 ## Keyboard
