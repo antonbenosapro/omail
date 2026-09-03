@@ -68,6 +68,11 @@ Item {
   readonly property bool hasSavedAccounts: Accounts.hasSavedAccounts(accountList)
   readonly property string activeAccountId: accountList ? accountList.activeId : ""
 
+  // Every mailbox at once. The hosts all exist and all poll already; this
+  // decides whether more than one of them loads a list, and whether `messages`
+  // is one account's or all of them merged.
+  readonly property bool unified: Accounts.isUnified(accountList)
+
   // The instance whose mailbox is on screen. Everything below forwards to it.
   property var current: null
 
@@ -99,11 +104,23 @@ Item {
     // a half-added mailbox could never be the one on screen, and setup would
     // have nothing to run in.
     if (!next && accountHosts.count > 0) next = accountHosts.objectAt(0)
-    if (next === current) return
+
+    // The one line the unified view turns on. Every account is instantiated
+    // and polling its unread count either way; `active` is what decides
+    // whether it also loads a list, so unified means all of them do.
+    var everyone = root.unified
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
-      if (host) host.active = host === next
+      if (!host) continue
+      host.active = everyone || host === next
+      if (everyone) host.windowOpen = windowOpen
     }
+
+    // `current` stays the mailbox the window would come back to, and is what
+    // compose, sign-in and the settings page still speak to. What it is not,
+    // while unified, is the owner of the message being read — that is resolved
+    // per message by `hostForMessage`.
+    if (next === current) return
     current = next
     if (current) current.windowOpen = windowOpen
   }
@@ -111,11 +128,35 @@ Item {
   // The whole point of switching is that it is instant, which it is because
   // each account keeps its own cache on disk.
   function switchTo(id) {
-    if (String(id) === activeAccountId && activeIndex < 0) return
+    if (String(id) === activeAccountId && activeIndex < 0 && !root.unified) return
     activeIndex = -1
-    accountList = Accounts.setActive(accountList, id)
+    accountList = Accounts.setUnified(Accounts.setActive(accountList, id), false)
     saveAccounts()
+    clearSelection()
     refreshCurrent()
+  }
+
+  // Every mailbox at once, or back to the one `activeId` still names.
+  function setAccountColor(index, color) {
+    var next = Accounts.setColorAt(accountList, index, color)
+    if (next === accountList) return
+    accountList = next
+    saveAccounts()
+  }
+
+  function showUnified() {
+    if (root.unified) return
+    activeIndex = -1
+    accountList = Accounts.setUnified(accountList, true)
+    saveAccounts()
+    clearSelection()
+    // Inbox and Unread are the only mailboxes a merged list offers: they are
+    // the two every provider maps the same way. A mailbox that resolves to a
+    // different folder per server, or is missing on one, would quietly draw
+    // from fewer accounts than the user thinks.
+    if (!Model.isUnifiedMailbox(mailboxKey)) selectMailbox("inbox")
+    refreshCurrent()
+    refresh()
   }
 
   // The switcher selects by position, because that is the only handle a mailbox
@@ -430,7 +471,10 @@ Item {
         active: host ? host.active : false,
         signedIn: host ? host.ready : false,
         busy: host ? host.listLoading : false,
-        error: host ? host.lastError : ""
+        error: host ? host.lastError : "",
+        // The stripe this account's rows carry in a merged list, and the tint
+        // on its avatar everywhere else. Empty when the user has not chosen.
+        color: Accounts.normalizeColor(accounts[i].color)
       })
     }
     return out
@@ -450,16 +494,93 @@ Item {
     var index = activeIndex >= 0 ? activeIndex : indexOfActiveAccount()
     return index >= 0 && index < accounts.length ? String(accounts[index].email || "") : ""
   }
-  readonly property int inboxUnread: current ? current.inboxUnread : 0
-  readonly property var messages: current ? current.messages : []
-  readonly property var labels: current ? current.labels : []
+  readonly property int inboxUnread: root.unified
+    ? root.unreadTotal
+    : (current ? current.inboxUnread : 0)
+  // One account's list, or every account's merged newest-first.
+  //
+  // Sorted on `date`, which `summarize` already put on every summary, because
+  // the servers answered independently and their pages interleave. The account
+  // is the tiebreak so the order is total: two messages with the same
+  // timestamp must not swap places between relayouts, or a row moves under
+  // the pointer for no reason anyone can see.
+  readonly property var messages: {
+    if (!root.unified) return current ? current.messages : []
+    var merged = []
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (!host || !host.ready) continue
+      var list = host.messages || []
+      for (var j = 0; j < list.length; j++) merged.push(list[j])
+    }
+    merged.sort(function(a, b) {
+      var left = a && a.date ? Number(a.date) : 0
+      var right = b && b.date ? Number(b.date) : 0
+      if (left !== right) return right - left
+      var leftId = String((a && a.accountId) || "")
+      var rightId = String((b && b.accountId) || "")
+      if (leftId !== rightId) return leftId < rightId ? -1 : 1
+      return String((a && a.id) || "") < String((b && b.id) || "") ? -1 : 1
+    })
+    return merged
+  }
+
+  // Which mailbox a message belongs to. Every action in a unified list goes
+  // through here rather than through `current`: the list holds several
+  // accounts, and acting on the wrong one archives somebody else's mail.
+  // The colour and the letter a row shows for the mailbox it came from. Both
+  // read off the account list rather than the host, so a row keeps its stripe
+  // while its account is still signing in.
+  function colorForAccount(accountId) {
+    return Accounts.colorFor(accountList, accountId)
+  }
+
+  function initialForAccount(accountId) {
+    var entry = Accounts.find(accountList, accountId)
+    var address = entry ? String(entry.email || "") : ""
+    return address === "" ? "" : address.charAt(0).toUpperCase()
+  }
+
+  // Which mailbox the open message belongs to, for a list that has to tell two
+  // rows with one id apart.
+  readonly property string selectedAccountId: reader ? reader.accountId : ""
+
+  function hostForMessage(id) {
+    if (!root.unified) return current
+    var wanted = String(id || "")
+    if (wanted === "") return current
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (!host) continue
+      if (Model.indexById(host.messages, wanted, host.accountId) >= 0) return host
+    }
+    return current
+  }
+
+  // The mailbox whose message is open in the reader, which is the one every
+  // reader-side property below has to read from.
+  property var readerHost: null
+  // No folder list while unified: the folders below the mailboxes are one
+  // server's own, and merging two servers' would produce rows that exist for
+  // some accounts and not others.
+  readonly property var labels: root.unified ? [] : (current ? current.labels : [])
 
   // Which service the mailbox on screen is, what mailboxes it has, and what it
   // can be asked to do. Forwarded like everything else so a view never has to
   // reach past `service` to find out.
   readonly property string providerId: current ? current.providerId : Provider.DEFAULT_ID
-  readonly property var mailboxes: current
-    ? current.mailboxes : Provider.mailboxes(Provider.DEFAULT_ID)
+  // The rail. While unified it shows only the mailboxes every account maps
+  // the same way, so a row cannot promise mail it would silently draw from
+  // fewer mailboxes than are merged.
+  readonly property var mailboxes: {
+    var all = current ? current.mailboxes : Provider.mailboxes(Provider.DEFAULT_ID)
+    if (!root.unified) return all
+    var out = []
+    for (var i = 0; i < all.length; i++) {
+      if (Model.isUnifiedMailbox(all[i].key)) out.push(all[i])
+    }
+    return out
+  }
   readonly property bool canArchive: !current || current.canArchive
   readonly property bool canReportSpam: !current || current.canReportSpam
   readonly property bool canStar: !current || current.canStar
@@ -469,58 +590,177 @@ Item {
   readonly property string mailboxKey: current ? current.mailboxKey : "inbox"
   readonly property string searchQuery: current ? current.searchQuery : ""
   readonly property string rawQuery: current ? current.rawQuery : ""
-  readonly property bool listLoading: !!current && current.listLoading
-  readonly property bool listLoaded: !!current && current.listLoaded
-  readonly property bool hasMore: !!current && current.hasMore
+  // Loading while any mailbox still is, loaded only when they all are: a
+  // skeleton that cleared on the first answer would be replaced by a list that
+  // then grew under the pointer as the others arrived.
+  readonly property bool listLoading: {
+    if (!root.unified) return !!current && current.listLoading
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (host && host.ready && host.listLoading) return true
+    }
+    return false
+  }
+
+  readonly property bool listLoaded: {
+    if (!root.unified) return !!current && current.listLoaded
+    var any = false
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (!host || !host.ready) continue
+      if (!host.listLoaded) return false
+      any = true
+    }
+    return any
+  }
+  readonly property bool hasMore: {
+    if (!root.unified) return !!current && current.hasMore
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (host && host.hasMore) return true
+    }
+    return false
+  }
   readonly property string resultSummary: current ? current.resultSummary : ""
-  readonly property string selectedId: current ? current.selectedId : ""
-  readonly property var selectedMessage: current ? current.selectedMessage : null
-  readonly property var selectedBody: current ? current.selectedBody : ({ text: "", source: "" })
-  readonly property string selectedHtml: current ? current.selectedHtml : ""
-  readonly property var selectedDocument: current ? current.selectedDocument : null
-  readonly property var selectedImages: current ? current.selectedImages : []
-  readonly property int selectedBlockedImages: current ? current.selectedBlockedImages : 0
-  readonly property int selectedRemoteImages: current ? current.selectedRemoteImages : 0
-  readonly property bool remoteImagesAllowed: !!current && current.remoteImagesAllowed
-  readonly property var selectedAttachments: current ? current.selectedAttachments : []
-  readonly property bool selectedTooHeavy: !!current && current.selectedTooHeavy
-  // The meeting inside the message, and this account's answer to it.
-  readonly property var selectedInvite: current ? current.selectedInvite : null
-  readonly property string selectedResponse: current ? current.selectedResponse : ""
-  readonly property bool canRespondToInvite: !!current && current.canRespondToInvite
-  readonly property bool rsvpSending: !!current && current.rsvpSending
+  // The reader reads from the mailbox that owns the open message, which while
+  // unified is not necessarily the one `current` points at. `reader` is that
+  // host, and every property below goes through it — one indirection in one
+  // place rather than a unified branch in each of them.
+  readonly property var reader: root.unified ? (readerHost || current) : current
+
+  readonly property string selectedId: reader ? reader.selectedId : ""
+  readonly property var selectedMessage: reader ? reader.selectedMessage : null
+  readonly property var selectedBody: reader ? reader.selectedBody : ({ text: "", source: "" })
+  readonly property string selectedHtml: reader ? reader.selectedHtml : ""
+  readonly property var selectedDocument: reader ? reader.selectedDocument : null
+  readonly property var selectedImages: reader ? reader.selectedImages : []
+  readonly property int selectedBlockedImages: reader ? reader.selectedBlockedImages : 0
+  readonly property int selectedRemoteImages: reader ? reader.selectedRemoteImages : 0
+  readonly property bool remoteImagesAllowed: !!reader && reader.remoteImagesAllowed
+  readonly property var selectedAttachments: reader ? reader.selectedAttachments : []
+  readonly property bool selectedTooHeavy: !!reader && reader.selectedTooHeavy
+  // The meeting inside the message, and the answer of the account it arrived
+  // in — which is the account that has to send the reply.
+  readonly property var selectedInvite: reader ? reader.selectedInvite : null
+  readonly property string selectedResponse: reader ? reader.selectedResponse : ""
+  readonly property bool canRespondToInvite: !!reader && reader.canRespondToInvite
+  readonly property bool rsvpSending: !!reader && reader.rsvpSending
   // Empty when this message offers no way off a list, which is the answer for
   // everything that is not a newsletter.
-  readonly property string unsubscribeLabel: current ? current.unsubscribeLabel : ""
-  readonly property string unsubscribeDetail: current ? current.unsubscribeDetail : ""
-  readonly property bool unsubscribing: !!current && current.unsubscribing
-  readonly property string savingAttachment: current ? current.savingAttachment : ""
-  readonly property bool detailLoading: !!current && current.detailLoading
+  readonly property string unsubscribeLabel: reader ? reader.unsubscribeLabel : ""
+  readonly property string unsubscribeDetail: reader ? reader.unsubscribeDetail : ""
+  readonly property bool unsubscribing: !!reader && reader.unsubscribing
+  readonly property string savingAttachment: reader ? reader.savingAttachment : ""
+  readonly property bool detailLoading: !!reader && reader.detailLoading
   readonly property bool sending: !!current && current.sending
   readonly property string lastError: current ? current.lastError : ""
   readonly property string actionStatus: current ? current.actionStatus : ""
   readonly property string signInProgress: current ? current.signInProgress : ""
   readonly property string syncedLabel: current ? current.syncedLabel : ""
 
-  function refresh() { if (current) current.refresh() }
-  function loadMore() { if (current) current.loadMore() }
-  function select(id) { if (current) current.select(id) }
-  function clearSelection() { if (current) current.clearSelection() }
+  function refresh() {
+    if (!root.unified) {
+      if (current) current.refresh()
+      return
+    }
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (host) host.refresh()
+    }
+  }
+  // Each mailbox pages independently — Gmail has a real page token, IMAP an
+  // offset into its own search — so there is no single cursor to advance.
+  // Asking every account that still has more is what a merged next page is.
+  function loadMore() {
+    if (!root.unified) {
+      if (current) current.loadMore()
+      return
+    }
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (host && host.hasMore) host.loadMore()
+    }
+  }
+  // Selecting sets which mailbox the reader speaks to, and clears the
+  // selection in every other one: two accounts each holding an open message
+  // would otherwise both answer, and the reader would show whichever property
+  // resolved first.
+  function select(id) {
+    var host = hostForMessage(id)
+    if (!host) return
+    if (root.unified) {
+      for (var i = 0; i < accountHosts.count; i++) {
+        var other = accountHosts.objectAt(i)
+        if (other && other !== host && other.selectedId !== "") other.clearSelection()
+      }
+      readerHost = host
+    }
+    host.select(id)
+  }
+
+  function clearSelection() {
+    if (root.unified) {
+      for (var i = 0; i < accountHosts.count; i++) {
+        var host = accountHosts.objectAt(i)
+        if (host) host.clearSelection()
+      }
+      readerHost = null
+      return
+    }
+    if (current) current.clearSelection()
+  }
   // The notice's own button, which is the switch: what it turns on is every
   // message, and it says so.
   function showRemoteImages() { setAlwaysShowImages(true) }
-  function rsvp(response) { if (current) current.rsvp(response) }
-  function saveAttachment(id) { if (current) current.saveAttachment(id) }
-  function unsubscribe() { if (current) current.unsubscribe() }
+  function rsvp(response) {
+    var host = root.unified ? reader : current
+    if (host) host.rsvp(response)
+  }
+  function saveAttachment(id) {
+    var host = root.unified ? reader : current
+    if (host) host.saveAttachment(id)
+  }
+  function unsubscribe() {
+    var host = root.unified ? reader : current
+    if (host) host.unsubscribe()
+  }
   function cursorOffset(cursorId, delta) {
     return current ? current.cursorOffset(cursorId, delta) : ""
   }
-  function selectMailbox(key) { if (current) current.selectMailbox(key) }
+  // While unified every mailbox moves together, or the merged list would be
+  // one account's Inbox beside another's Unread.
+  function selectMailbox(key) {
+    if (!root.unified) {
+      if (current) current.selectMailbox(key)
+      return
+    }
+    clearSelection()
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (host) host.selectMailbox(key)
+    }
+  }
   function search(text) { if (current) current.search(text) }
   function selectLabel(name) { if (current) current.selectLabel(name) }
-  function act(id, action, quiet) { if (current) current.act(id, action, quiet) }
-  function toggleStar(id) { if (current) current.toggleStar(id) }
-  function markAllRead() { if (current) current.markAllRead() }
+  // Every action names a message, so every action can find its own mailbox.
+  function act(id, action, quiet) {
+    var host = hostForMessage(id)
+    if (host) host.act(id, action, quiet)
+  }
+  function toggleStar(id) {
+    var host = hostForMessage(id)
+    if (host) host.toggleStar(id)
+  }
+  function markAllRead() {
+    if (!root.unified) {
+      if (current) current.markAllRead()
+      return
+    }
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (host) host.markAllRead()
+    }
+  }
   function send(fields) { if (current) current.send(fields) }
   function preferredSendAs(recipients) {
     return current ? current.preferredSendAs(recipients) : null

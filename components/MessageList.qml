@@ -23,6 +23,21 @@ Column {
   required property string panelFontFamily
   property string cursorId: ""
 
+  // Which mailbox the cursor's row belongs to. Derived from the list rather
+  // than passed in: the cursor names one row, and threading a second value
+  // through every place `cursorId` is written would be one more thing to keep
+  // in step. First match wins, which is also what the keyboard's own movement
+  // does with a duplicated id.
+  readonly property string cursorAccountId: {
+    if (!root.service || !root.service.unified || root.cursorId === "") return ""
+    var list = root.service.messages || []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].id === root.cursorId)
+        return String(list[i].accountId || "")
+    }
+    return ""
+  }
+
   signal messageActivated(string id)
   signal menuRequested(string id, real sceneX, real sceneY)
 
@@ -53,8 +68,22 @@ Column {
       accentColor: root.accentColor
       dimColor: root.dimColor
       panelFontFamily: root.panelFontFamily
+      // The stripe that says which mailbox this arrived in, and only where
+      // there is more than one: in a single-account list every row would
+      // carry the same colour, which says nothing.
+      accountColor: root.service.unified
+        ? root.service.colorForAccount(modelData.accountId) : ""
+      accountInitial: root.service.unified
+        ? root.service.initialForAccount(modelData.accountId) : ""
+      // Compared on the account as well as the id. Neither provider's id is
+      // unique across accounts, so in a merged list two rows can share one —
+      // and both would draw as the cursor and the open message.
       hasCursor: root.cursorId === modelData.id
+        && (!root.service.unified
+          || root.cursorAccountId === String(modelData.accountId || ""))
       selected: root.service.selectedId === modelData.id
+        && (!root.service.unified
+          || root.service.selectedAccountId === String(modelData.accountId || ""))
       canArchive: root.service.canArchive
       onActivated: root.messageActivated(modelData.id)
       onStarToggled: root.service.toggleStar(modelData.id)

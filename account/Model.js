@@ -184,6 +184,23 @@ function showListFooter(messageCount) {
   return Math.max(0, Number(messageCount) || 0) > 0
 }
 
+// Which mailboxes a merged list can show.
+//
+// Inbox and Unread are the two every provider maps the same way — "folder:INBOX"
+// and "folder:INBOX UNSEEN" on IMAP, "in:inbox" and its unread form on Gmail.
+// Sent, Archive and Trash resolve to a different folder per server and are
+// missing on some, so a merged one of those would draw from fewer accounts
+// than the rail implies without saying so.
+var UNIFIED_MAILBOXES = ["inbox", "unread"]
+
+function isUnifiedMailbox(key) {
+  var wanted = String(key || "")
+  for (var i = 0; i < UNIFIED_MAILBOXES.length; i++) {
+    if (UNIFIED_MAILBOXES[i] === wanted) return true
+  }
+  return false
+}
+
 // A message is addressed by its id *and* the mailbox it came from.
 //
 // An IMAP UID is unique only inside one folder and a Gmail id only inside one

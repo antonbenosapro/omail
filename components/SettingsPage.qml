@@ -24,6 +24,16 @@ Column {
   signal clientSetupRequested()
   signal addRequested()
   signal editRequested(int index)
+  signal colorChosen(int index, string color)
+
+  // The colours a mailbox may be given, and the only ones offered: a fixed set
+  // keeps two mailboxes from being told apart by shades nobody can distinguish,
+  // and keeps the choice to one click. Hues rather than theme values, because
+  // this mark exists to separate accounts from each other and not to blend
+  // into a surface.
+  readonly property var accountColors: [
+    "", "#e5534b", "#e2a03f", "#57ab5a", "#4c9ede", "#986ee2", "#d2649a"
+  ]
 
   readonly property var accounts: service ? service.accountSummaries : []
   readonly property var auth: service ? service.auth : null
@@ -179,6 +189,52 @@ Column {
           anchors.rightMargin: Style.space(10)
           anchors.verticalCenter: parent.verticalCenter
           spacing: Style.space(6)
+
+          // The colour this mailbox's messages are striped with in a merged
+          // list. Swatches rather than a field: the value reaches a QML colour,
+          // and a typed one that will not parse is an error rather than a
+          // default.
+          Repeater {
+            model: root.accountColors
+
+            Rectangle {
+              required property var modelData
+              required property int index
+
+              readonly property bool chosen:
+                String(row.modelData.color || "") === String(modelData)
+
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(16)
+              height: width
+              radius: width / 2
+              color: String(modelData) === "" ? "transparent" : String(modelData)
+              // The chosen one is ringed in the foreground; the rest carry a
+              // faint edge so an unpicked swatch is still a target, and so the
+              // "no colour" one is visible at all.
+              border.width: chosen ? Style.normalBorderWidth * 2 : Style.normalBorderWidth
+              border.color: chosen
+                ? root.textColor
+                : Style.hoverBorderFor(root.textColor, root.accentColor)
+
+              // "No colour" is a slash rather than an empty circle, which
+              // would read as a colour this theme happens to draw as nothing.
+              Rectangle {
+                anchors.centerIn: parent
+                visible: String(parent.modelData) === ""
+                width: parent.width * 0.62
+                height: Style.normalBorderWidth
+                rotation: -45
+                color: root.dimColor
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.colorChosen(row.index, String(parent.modelData))
+              }
+            }
+          }
 
           IconTextButton {
             text: "Edit..."

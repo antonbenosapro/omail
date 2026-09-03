@@ -17,7 +17,7 @@ var VERSION = 1
 var EMAIL_PATTERN = /^[^\s@]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/
 
 function emptyList() {
-  return { version: VERSION, accounts: [], activeId: "" }
+  return { version: VERSION, accounts: [], activeId: "", unified: false }
 }
 
 function trimmed(value) {
@@ -130,7 +130,11 @@ function copyList(list) {
   return {
     version: VERSION,
     accounts: Array.isArray(source.accounts) ? source.accounts.slice() : [],
-    activeId: String(source.activeId || "")
+    activeId: String(source.activeId || ""),
+    // Whether the window is showing every mailbox at once. `activeId` is kept
+    // either way: turning the unified view off has to come back to the mailbox
+    // the user was last in, not to an arbitrary one.
+    unified: source.unified === true
   }
 }
 
@@ -295,6 +299,40 @@ function discardDraftAt(list, index) {
   return removeAt(source, at)
 }
 
+// Turning the unified view on and off. `activeId` is untouched, so the view
+// remembers which mailbox to come back to.
+function setUnified(list, on) {
+  var next = copyList(list)
+  next.unified = on === true && next.accounts.length > 1
+  return next
+}
+
+function isUnified(list) {
+  var source = list || {}
+  var accounts = Array.isArray(source.accounts) ? source.accounts : []
+  return source.unified === true && accounts.length > 1
+}
+
+// The colour a mailbox's rows are striped with. Addressed by position rather
+// than by id, because a mailbox that has not signed in yet has no id and is
+// still a row the user can paint.
+function setColorAt(list, index, color) {
+  var next = copyList(list)
+  var at = Math.floor(Number(index))
+  if (!isFinite(at) || at < 0 || at >= next.accounts.length) return next
+  var entry = next.accounts[at]
+  var wanted = normalizeColor(color)
+  if (String(entry.color || "") === wanted) return next
+  // Rebuilt through makeAccount rather than edited, so an entry cannot end up
+  // with a shape the rest of this file does not expect.
+  var replacement = {}
+  for (var key in entry) replacement[key] = entry[key]
+  replacement.color = wanted
+  next.accounts = next.accounts.slice()
+  next.accounts[at] = makeAccount(replacement)
+  return next
+}
+
 function setActive(list, id) {
   var next = copyList(list)
   var at = indexOfId(next.accounts, id)
@@ -326,6 +364,9 @@ function load(text) {
 
   var wanted = trimmed(raw.activeId).toLowerCase()
   next.activeId = indexOfId(next.accounts, wanted) >= 0 ? wanted : nextActiveId(next.accounts, 0)
+  // One mailbox is not several, so a unified view over a single account is
+  // just that account — and saying so here keeps every caller from having to.
+  next.unified = raw.unified === true && next.accounts.length > 1
   return next
 }
 

@@ -1047,6 +1047,9 @@ Item {
                 root.setupVisible = true
               }
               onEditRequested: function(index) { root.editAccount(index) }
+        onColorChosen: function(index, color) {
+          if (root.service) root.service.setAccountColor(index, color)
+        }
             }
           }
         }
@@ -1200,8 +1203,13 @@ Item {
         popupBorderColor: root.popupBorder
         panelFontFamily: root.fontFamily
         accounts: root.service ? root.service.accountSummaries : []
+        unified: !!root.service && root.service.unified
         onAccountChosen: function(index) {
           if (root.service) root.service.switchToIndex(index)
+          root.backToList()
+        }
+        onUnifiedChosen: {
+          if (root.service) root.service.showUnified()
           root.backToList()
         }
         onAddAccountRequested: {

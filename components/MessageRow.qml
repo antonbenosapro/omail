@@ -18,6 +18,11 @@ Rectangle {
   property bool canArchive: true
   property bool hasCursor: false
   property bool selected: false
+  // The mailbox this message arrived in, shown only when the list holds more
+  // than one. Empty means a single-account list, where every row would carry
+  // the same mark and it would say nothing.
+  property string accountColor: ""
+  property string accountInitial: ""
 
   signal activated()
   signal starToggled()
@@ -53,6 +58,31 @@ Rectangle {
     }
   }
 
+  // The mailbox this arrived in. A bar down the leading edge rather than a
+  // badge, so a column of them reads as a column at a glance — which is the
+  // whole point of it in a merged list.
+  //
+  // Clipped to the row's own radius: the row is rounded, and a square bar at
+  // x=0 would sit outside its corners.
+  Rectangle {
+    anchors.left: parent.left
+    anchors.top: parent.top
+    anchors.bottom: parent.bottom
+    width: Style.space(3)
+    visible: root.accountColor !== ""
+    color: root.accountColor !== "" ? root.accountColor : "transparent"
+    radius: root.radius
+    // Only the leading corners are the row's; the trailing edge of a 3px bar
+    // meets the row's fill and must not round away from it.
+    Rectangle {
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      width: parent.width / 2
+      color: parent.color
+    }
+  }
+
   Rectangle {
     anchors.left: parent.left
     anchors.leftMargin: Style.space(4)
@@ -63,6 +93,24 @@ Rectangle {
     radius: width / 2
     visible: root.summary.unread
     color: root.accentColor
+  }
+
+  // The account's initial beside the stripe. `docs/DESIGN.md` is explicit that
+  // colour never carries state alone, and two generated-looking colours can
+  // land close together on a theme that never expected several — so the letter
+  // is what actually disambiguates and the colour is what makes it quick.
+  Text {
+    anchors.right: parent.right
+    anchors.rightMargin: Style.space(6)
+    anchors.top: parent.top
+    anchors.topMargin: Style.space(10)
+    visible: root.accountInitial !== "" && !root.hot && !root.summary.starred
+    textFormat: Text.PlainText
+    text: root.accountInitial
+    color: root.dimColor
+    font.family: root.panelFontFamily
+    font.pixelSize: Style.font.caption
+    font.bold: true
   }
 
   Column {

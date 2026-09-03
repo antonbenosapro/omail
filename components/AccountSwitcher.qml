@@ -34,8 +34,21 @@ Item {
   property int cursorIndex: 0
 
   signal accountChosen(int index)
+  signal unifiedChosen()
   signal addAccountRequested()
   signal manageRequested()
+
+  // Whether the merged view is on, so its row can show as the current one.
+  property bool unified: false
+
+  // Offered only where there is more than one mailbox to merge. One account
+  // "unified" is that account, and a row saying otherwise is a lie.
+  readonly property bool offersUnified: (root.accounts ? root.accounts.length : 0) > 1
+
+  // The unified row sits above the accounts and is addressed as -1, so every
+  // account keeps the index it already had — `accountChosen` means the same
+  // thing to the caller as it did before this row existed.
+  readonly property int unifiedIndex: -1
 
   anchors.fill: parent
   z: 45
@@ -78,14 +91,26 @@ Item {
 
   function close() { menu.close() }
 
+  // The cursor runs over the unified row and the accounts as one list, which
+  // is what the eye sees. Indices stay account indices, so the extra row is
+  // the one before the first: -1 with the unified row present, and simply
+  // absent without it.
   function moveCursor(delta) {
     var count = root.accounts ? root.accounts.length : 0
     if (count === 0) return
-    cursorIndex = Model.wrappedIndex(cursorIndex, delta, count)
+    var first = root.offersUnified ? root.unifiedIndex : 0
+    var span = count - first
+    var at = Model.wrappedIndex(cursorIndex - first, delta, span)
+    cursorIndex = at + first
   }
 
   function chooseCursor() {
     var count = root.accounts ? root.accounts.length : 0
+    if (root.offersUnified && cursorIndex === root.unifiedIndex) {
+      menu.close()
+      root.unifiedChosen()
+      return
+    }
     if (cursorIndex < 0 || cursorIndex >= count) return
     menu.close()
     root.accountChosen(cursorIndex)
@@ -95,6 +120,9 @@ Item {
   // `j` is one step away from it rather than back at the top of the list.
   function restCursorOnActive() {
     var accounts = root.accounts || []
+    // The merged view is where you are when it is on, so that is the row the
+    // keyboard opens on.
+    if (root.unified && root.offersUnified) { cursorIndex = root.unifiedIndex; return }
     for (var i = 0; i < accounts.length; i++) {
       if (accounts[i].active) { cursorIndex = i; return }
     }
@@ -151,6 +179,92 @@ Item {
         // mechanism that closes it, and a second would be one too many.
       }
 
+      // Every mailbox at once, above the accounts it merges. Drawn like a
+      // row rather than as a header, because it is a destination and not a
+      // label — and it carries the same selected fill and keyboard border as
+      // the accounts so "where you are" reads the same in both.
+      Rectangle {
+        id: unifiedRow
+        visible: root.offersUnified
+
+        readonly property bool hasCursor: root.cursorIndex === root.unifiedIndex
+
+        width: menu.width - menu.leftPadding - menu.rightPadding
+        implicitHeight: visible ? Style.space(40) : 0
+        radius: Style.cornerRadius
+        color: root.unified
+          ? Style.selectedFillFor(root.textColor, root.accentColor)
+          : (unifiedHover.hovered || hasCursor
+            ? Style.hoverFillFor(root.textColor, root.accentColor) : "transparent")
+        border.width: hasCursor ? Style.normalBorderWidth : 0
+        border.color: Style.hoverBorderFor(root.textColor, root.accentColor)
+
+        Rectangle {
+          id: unifiedAvatar
+          anchors.left: parent.left
+          anchors.leftMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(22)
+          height: width
+          radius: width / 2
+          color: Style.selectedFillFor(root.textColor, root.accentColor)
+
+          ActionIcon {
+            anchors.centerIn: parent
+            name: "inbox"
+            iconSize: Style.font.iconSmall
+            color: root.textColor
+          }
+        }
+
+        Column {
+          anchors.left: unifiedAvatar.right
+          anchors.leftMargin: Style.space(9)
+          anchors.right: parent.right
+          anchors.rightMargin: Style.space(10)
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(1)
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "All mailboxes"
+            color: root.textColor
+            font.family: root.panelFontFamily
+            font.pixelSize: Style.font.body
+            elide: Text.ElideRight
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            // What it merges, and how much of it is waiting. Inbox and Unread
+            // are the only mailboxes a merged list offers, so it says so here
+            // rather than letting the rail be the first to mention it.
+            text: {
+              var count = root.accounts ? root.accounts.length : 0
+              var unread = 0
+              for (var i = 0; i < count; i++) unread += Number(root.accounts[i].unread) || 0
+              var what = count + " mailboxes · Inbox and Unread"
+              return unread > 0 ? what + " · " + unread + " unread" : what
+            }
+            color: root.dimColor
+            font.family: root.panelFontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+        }
+
+        HoverHandler { id: unifiedHover }
+
+        TapHandler {
+          onTapped: {
+            menu.close()
+            root.unifiedChosen()
+          }
+        }
+      }
+
       Repeater {
         model: root.accounts
 
@@ -182,7 +296,11 @@ Item {
             width: Style.space(22)
             height: width
             radius: width / 2
-            color: Style.selectedFillFor(root.textColor, root.accentColor)
+            // The account's own colour where it has one, so the switcher and
+            // the stripe on its messages agree about which mailbox is which.
+            color: row.modelData.color !== ""
+              ? row.modelData.color
+              : Style.selectedFillFor(root.textColor, root.accentColor)
 
             Text {
               anchors.centerIn: parent

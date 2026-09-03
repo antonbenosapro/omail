@@ -15,7 +15,8 @@ function frozen(list) {
 
 // ------------------------------------------------------------------- shape
 
-deepEqual(accounts.emptyList(), { version: accounts.VERSION, accounts: [], activeId: "" })
+deepEqual(accounts.emptyList(),
+  { version: accounts.VERSION, accounts: [], activeId: "", unified: false })
 assert.strictEqual(accounts.VERSION, 1)
 assert.strictEqual(accounts.count(accounts.emptyList()), 0)
 
@@ -30,6 +31,62 @@ assert.strictEqual(accounts.hasSavedAccounts({ accounts: [
 ] }), false)
 assert.strictEqual(accounts.active(accounts.emptyList()), null)
 assert.strictEqual(accounts.find(accounts.emptyList(), "a@example.com"), null)
+
+// Painting a mailbox. By position rather than by id, because a mailbox that
+// has not signed in yet has no id and is still a row the user can paint.
+
+let painters = accounts.add(accounts.add(accounts.emptyList(),
+  account("ada@example.com")), account("bob@example.com"))
+let onlySecond = accounts.setColorAt(painters, 1, "#4C9EDE")
+assert.strictEqual(onlySecond.accounts[1].color, "#4c9ede")
+assert.strictEqual(onlySecond.accounts[0].color, "", "the other mailbox is untouched")
+assert.strictEqual(accounts.load(accounts.serialize(onlySecond)).accounts[1].color, "#4c9ede")
+
+// The rest of the entry survives being painted. Rebuilding an account by
+// naming the fields to keep is how an IMAP mailbox came back as a Gmail one.
+let imapPainted = accounts.setColorAt(accounts.add(accounts.emptyList(),
+  { email: "jon@example.org", provider: "imap",
+    imap: { imapHost: "mail.example.org", username: "jon@example.org" } }), 0, "#57ab5a")
+assert.strictEqual(imapPainted.accounts[0].provider, "imap")
+assert.strictEqual(imapPainted.accounts[0].imap.imapHost, "mail.example.org")
+assert.strictEqual(imapPainted.accounts[0].color, "#57ab5a")
+
+assert.strictEqual(accounts.setColorAt(onlySecond, 1, "").accounts[1].color, "",
+  "and it can be taken off again")
+assert.strictEqual(accounts.setColorAt(onlySecond, 0, "nonsense").accounts[0].color, "",
+  "an unparseable colour is not stored")
+// An index nobody has is a no-op rather than a thrown error or a grown list.
+assert.strictEqual(accounts.count(accounts.setColorAt(onlySecond, 9, "#fff")), 2)
+assert.strictEqual(accounts.count(accounts.setColorAt(onlySecond, -1, "#fff")), 2)
+
+// ----------------------------------------------------------------- unified
+//
+// Whether the window is showing every mailbox at once. Kept beside activeId
+// rather than replacing it: turning the merged view off has to come back to
+// the mailbox the user was last in.
+
+let pair = accounts.add(accounts.add(accounts.emptyList(),
+  account("ada@example.com")), account("bob@example.com"))
+assert.strictEqual(accounts.isUnified(pair), false, "off unless asked for")
+
+let merged = accounts.setUnified(pair, true)
+assert.strictEqual(accounts.isUnified(merged), true)
+assert.strictEqual(merged.activeId, pair.activeId, "the mailbox to return to is kept")
+assert.strictEqual(accounts.isUnified(accounts.load(accounts.serialize(merged))), true,
+  "and it survives the trip to disk")
+assert.strictEqual(accounts.isUnified(accounts.setUnified(merged, false)), false)
+
+// One mailbox is not several. A unified view over a single account is that
+// account, and a row offering it would be describing nothing.
+let alone = accounts.setUnified(accounts.add(accounts.emptyList(),
+  account("ada@example.com")), true)
+assert.strictEqual(accounts.isUnified(alone), false)
+assert.strictEqual(accounts.isUnified(accounts.load(accounts.serialize(alone))), false,
+  "and a hand-edited file cannot ask for it either")
+
+// Removing the second mailbox leaves nothing to merge.
+let reduced = accounts.remove(merged, "bob@example.com")
+assert.strictEqual(accounts.isUnified(reduced), false)
 
 // ---------------------------------------------------------------- colours
 //
