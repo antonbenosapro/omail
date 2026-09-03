@@ -41,6 +41,18 @@ if [ -n "${CURL_STUB_FAIL_ONCE:-}" ]; then
     exit 56
   fi
 fi
+# Fails a set number of times before succeeding, so a throttle that outlasts a
+# single retry can be told apart from one that does not.
+if [ -n "${CURL_STUB_FAIL_TIMES:-}" ]; then
+  count=0
+  [ ! -f "$CURL_STUB_FAIL_COUNTER" ] || count=$(cat "$CURL_STUB_FAIL_COUNTER")
+  if [ "$count" -lt "$CURL_STUB_FAIL_TIMES" ]; then
+    printf '%s' "$(( count + 1 ))" > "$CURL_STUB_FAIL_COUNTER"
+    cat >/dev/null
+    printf 'curl: (56) response reading failed\n' >&2
+    exit 56
+  fi
+fi
 if [ -n "${CURL_STUB_HEADER:-}" ] && [ -n "$header_file" ]; then
   printf '%s' "$CURL_STUB_HEADER" > "$header_file"
   cat >/dev/null
@@ -362,6 +374,46 @@ if [ "$(printf '%s' "$out" | sed -n '1p')" = "0" ]; then
   printf '  ok   a dropped connection is retried\n'
 else
   printf '  FAIL a dropped connection was reported instead of retried\n'
+  failures=$(( failures + 1 ))
+fi
+
+# The host this exists for refuses every connection for several seconds once
+# several accounts open theirs together — a dozen attempts a second apart were
+# all refused while a longer wait was answered. So one retry is not enough: the
+# gap has to grow, and a throttle lasting past the first retry must still come
+# back with the mail rather than an empty page.
+rm -rf "$work/cache"
+counter="$work/fail-count"
+rm -f "$counter"
+out=$(printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY="$axigen_imap" CURL_STUB_FAIL_TIMES=3 \
+    CURL_STUB_FAIL_COUNTER="$counter" \
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
+if [ "$(printf '%s' "$out" | sed -n '1p')" = "0" ]; then
+  printf '  ok   a throttle outlasting one retry still succeeds\n'
+else
+  printf '  FAIL a throttled request gave up too early\n'
+  failures=$(( failures + 1 ))
+fi
+
+# Bounded, though: a transport that never gives up is a panel that never says
+# anything, so a host that is genuinely gone still has to report.
+rm -rf "$work/cache"
+rm -f "$counter"
+out=$(printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY="$axigen_imap" CURL_STUB_FAIL_TIMES=99 \
+    CURL_STUB_FAIL_COUNTER="$counter" \
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
+if [ "$(printf '%s' "$out" | sed -n '1p')" = "56" ]; then
+  printf '  ok   a host that never answers is reported rather than retried forever\n'
+else
+  printf '  FAIL a dead host did not surface its failure\n'
+  failures=$(( failures + 1 ))
+fi
+if [ "$(cat "$counter" 2>/dev/null)" = "4" ]; then
+  printf '  ok   and it stops after four attempts\n'
+else
+  printf '  FAIL the retry count was %s, not 4\n' "$(cat "$counter" 2>/dev/null)"
   failures=$(( failures + 1 ))
 fi
 

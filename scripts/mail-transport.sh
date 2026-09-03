@@ -354,17 +354,38 @@ run_curl() {
     > "$work/out" 2> "$work/err"
 }
 
+# Backed off rather than retried once. A server that rations connections does
+# not recover within a fixed second: several accounts on one host open their
+# connections together, and the refusal outlasts any single pause. Measured
+# against the host this exists for, a dozen attempts a second apart were all
+# refused while a longer wait was answered — so the gap grows, and the last
+# attempt is made several seconds after the first rather than one.
+#
+# Bounded, because a transport that keeps trying is a panel that never says
+# anything. Four attempts over roughly seven seconds is long enough to cross a
+# throttle window and short enough that a genuinely dead host still reports.
 set +e
-run_curl "$@"
-status=$?
-case "$status" in
-  3|35|52|55|56)
-    sleep 1
-    : > "$work/headers"
-    run_curl "$@"
-    status=$?
-    ;;
-esac
+attempt=1
+while : ; do
+  run_curl "$@"
+  status=$?
+  case "$status" in
+    3|35|52|55|56) ;;
+    *) break ;;
+  esac
+  [ "$attempt" -lt 4 ] || break
+  # 1, 2, 4 seconds. Doubling keeps the early retry quick for a single dropped
+  # connection while still reaching a useful total for a throttled one.
+  sleep_for=1
+  n=1
+  while [ "$n" -lt "$attempt" ]; do
+    sleep_for=$(( sleep_for * 2 ))
+    n=$(( n + 1 ))
+  done
+  sleep "$sleep_for"
+  attempt=$(( attempt + 1 ))
+  : > "$work/headers"
+done
 set -e
 
 printf '%s\n' "$status"

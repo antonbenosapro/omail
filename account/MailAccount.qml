@@ -1496,10 +1496,37 @@ Item {
 
   // The unread count is one label read — cheap enough to keep running while
   // the panel is closed, which is the only way the bar badge stays honest.
+  // Every account's poll runs on the same interval and starts when the shell
+  // does, so without this they fire together forever — and several accounts on
+  // one host is exactly the case that produced a refused connection. The offset
+  // is derived from the account id so it is stable across restarts rather than
+  // random, and it is only ever a fraction of the interval, so a mailbox is
+  // never polled meaningfully less often than any other.
+  readonly property int pollOffsetMs: {
+    var id = String(root.accountId || "")
+    if (id === "") return 0
+    var hash = 0
+    for (var i = 0; i < id.length; i++) hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0
+    // A quarter of the interval, which spreads four mailboxes on one host
+    // across the gap between polls without delaying any of them noticeably.
+    var spread = Math.max(1, Math.floor(root.refreshIntervalSec * 250))
+    return Math.abs(hash) % spread
+  }
+
+  Timer {
+    id: pollStagger
+    interval: root.pollOffsetMs
+    running: root.ready && root.pollOffsetMs > 0
+    repeat: false
+    onTriggered: pollTimer.start()
+  }
+
   Timer {
     id: pollTimer
     interval: root.refreshIntervalSec * 1000
-    running: root.ready
+    // Started by the stagger above when there is an offset to wait out, so the
+    // first poll of each account lands at a different moment.
+    running: root.ready && root.pollOffsetMs === 0
     repeat: true
     triggeredOnStart: true
     onTriggered: {
