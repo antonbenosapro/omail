@@ -429,62 +429,78 @@ Item {
       model: root.service ? root.service.selectedAttachments : []
 
       // One attachment. Clicking it saves the file to the downloads directory
-      // and lets the desktop open it, so the row is a control rather than a
-      // label — it takes the pointer, the cursor and the hover treatment that
-      // says so.
-      Row {
-        id: attachmentRow
+      // and lets the desktop open it, so it is a control rather than a label —
+      // it takes the pointer, the cursor and the hover treatment that says so.
+      //
+      // An Item wrapping a Row, rather than the Row itself: a Row positions
+      // its children and refuses one that anchors, so a MouseArea filling the
+      // whole entry has to sit beside the Row instead of inside it. Putting it
+      // in gave "Cannot specify left, right, horizontalCenter, fill or
+      // centerIn anchors for items inside Row. Row will not function." — and
+      // the attachments stopped being drawn at all.
+      Item {
+        id: attachmentEntry
         required property var modelData
-        spacing: Style.space(6)
+
+        implicitWidth: attachmentContent.implicitWidth
+        implicitHeight: attachmentContent.implicitHeight
+        width: implicitWidth
+        height: implicitHeight
 
         readonly property bool saving: !!root.service
-          && root.service.savingAttachment === modelData.attachmentId
+          && root.service.savingAttachment === attachmentEntry.modelData.attachmentId
         // Only one write runs at a time, so the others are not offering
         // anything while it does.
         readonly property bool busy: !!root.service
           && root.service.savingAttachment !== ""
-        readonly property bool hot: attachmentMouse.containsMouse && !busy
+        readonly property bool hot: attachmentMouse.containsMouse && !attachmentEntry.busy
 
-        ActionIcon {
-          anchors.verticalCenter: parent.verticalCenter
-          name: "attachment"
-          iconSize: Style.font.iconSmall
-          color: attachmentRow.hot ? root.textColor : root.dimColor
-        }
+        Row {
+          id: attachmentContent
+          spacing: Style.space(6)
 
-        Text {
-          anchors.verticalCenter: parent.verticalCenter
-          textFormat: Text.PlainText
-          text: attachmentRow.modelData.filename
-          // Underlined on hover as well as brightened: the row is the only
-          // clickable thing in this strip, and colour alone does not say so.
-          font.underline: attachmentRow.hot
-          color: attachmentRow.hot ? root.textColor : root.dimColor
-          font.family: root.panelFontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-        }
+          ActionIcon {
+            anchors.verticalCenter: parent.verticalCenter
+            name: "attachment"
+            iconSize: Style.font.iconSmall
+            color: attachmentEntry.hot ? root.textColor : root.dimColor
+          }
 
-        Text {
-          anchors.verticalCenter: parent.verticalCenter
-          // The size is what the row says at rest; while it writes, the row
-          // says that instead, in the same place rather than somewhere new.
-          text: attachmentRow.saving
-            ? "Saving…"
-            : Mail.formatSize(attachmentRow.modelData.size)
-          color: root.dimmerColor
-          font.family: root.panelFontFamily
-          font.pixelSize: Style.font.caption
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: attachmentEntry.modelData.filename
+            // Underlined on hover as well as brightened: this is the only
+            // clickable thing in the strip, and colour alone does not say so.
+            font.underline: attachmentEntry.hot
+            color: attachmentEntry.hot ? root.textColor : root.dimColor
+            font.family: root.panelFontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            // The size is what it says at rest; while it writes, it says that
+            // instead, in the same place rather than somewhere new.
+            text: attachmentEntry.saving
+              ? "Saving\u2026"
+              : Mail.formatSize(attachmentEntry.modelData.size)
+            color: root.dimmerColor
+            font.family: root.panelFontFamily
+            font.pixelSize: Style.font.caption
+          }
         }
 
         MouseArea {
           id: attachmentMouse
           anchors.fill: parent
           hoverEnabled: true
-          enabled: !attachmentRow.busy
+          enabled: !attachmentEntry.busy
           cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
           onClicked: {
-            if (root.service) root.service.saveAttachment(attachmentRow.modelData.attachmentId)
+            if (root.service)
+              root.service.saveAttachment(attachmentEntry.modelData.attachmentId)
           }
         }
       }
