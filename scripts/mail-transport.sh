@@ -333,9 +333,21 @@ fi
 
 # curl is the last stage, so `$?` is curl's own exit code rather than the
 # config builder's.
+#
+# `--fail-early` is load-bearing, not tidiness. A sequence arrives here as
+# `--next` sections on one connection, and several of those sequences are not
+# idempotent: an archive on a server without MOVE is COPY, then STORE
+# +\Deleted, then UID EXPUNGE. Without the flag curl runs every remaining
+# section after one fails and exits with the code of the *last* transfer — so a
+# COPY answered `NO [TRYCREATE]` was followed by the STORE and the EXPUNGE, curl
+# exited 0, and the message was deleted without ever being copied. The panel
+# said archived. With the flag curl stops at the first failing section and
+# reports it, which is the only thing that makes a partly failed sequence read
+# as a failure.
+#
 # Retried once on a transport failure, because a server that limits concurrent
 # connections drops some of a burst outright — several accounts refreshing
-# together, or a list load beside an unread poll. curl reports those as 3, 35,
+# together, or a list load beside an unread poll. curl reports those as 35,
 # 52, 55 or 56 depending on where the connection died, and none of them means
 # the request was wrong: the same command succeeds a moment later. A dropped
 # list load otherwise reached the panel as a page with messages missing from
@@ -346,6 +358,7 @@ fi
 run_curl() {
   build_config "$@" | curl \
     --config - \
+    --fail-early \
     --silent \
     --show-error \
     --dump-header "$work/headers" \
@@ -369,8 +382,12 @@ attempt=1
 while : ; do
   run_curl "$@"
   status=$?
+  # 3 is not here. It is a malformed URL, which is the same the next time and
+  # the time after: retrying it spends seven seconds to reach the identical
+  # answer while the panel shows nothing. The rest are connection-level and
+  # say nothing about whether the request was right.
   case "$status" in
-    3|35|52|55|56) ;;
+    35|52|55|56) ;;
     *) break ;;
   esac
   [ "$attempt" -lt 4 ] || break

@@ -255,7 +255,7 @@ Item {
   // A whole page in one round trip. Gmail costs one request per message here;
   // IMAP fetches the lot with a single UID FETCH, which is the one place this
   // provider is comfortably faster than the other.
-  function getMessages(ids, full, callback, existingHandle) {
+  function getMessages(ids, full, callback, existingHandle, markSeen) {
     var handle = existingHandle || newHandle()
     var groups = Imap.groupByFolder(ids)
     if (groups.length === 0) {
@@ -291,7 +291,26 @@ Item {
           ? Imap.fullFetchCommand(group.uids)
           : Imap.summaryFetchCommand(group.uids)
 
-        var child = root.run(group.folder, [command], function(text, error) {
+        // Opening an unread message marks it read, and that STORE rides on the
+        // same connection as the FETCH rather than opening its own. It is one
+        // process and one TLS handshake saved on every unread open, and the
+        // read flag can no longer be left unset by a connection that died
+        // between the two. It comes after the FETCH so a `BODY.PEEK` still
+        // reads an unread message as unread — the peek is what keeps the list
+        // load from marking a mailbox seen, and the order is what keeps the
+        // reader's own copy honest about what it opened.
+        var commands = [command]
+        if (markSeen === true) {
+          // Through the same translation the separate mark-read call uses, so
+          // the folded STORE and the standalone one cannot come to disagree
+          // about which flag "read" is.
+          var plan = Imap.flagPlanForLabels([], ["UNREAD"], root.special)
+          var store = Imap.storeCommand(group.uids, plan.add, plan.remove)
+          if (typeof store === "string") store = store === "" ? [] : [store]
+          commands = commands.concat(store)
+        }
+
+        var child = root.run(group.folder, commands, function(text, error) {
           if (handle.aborted) return
           if (error && !firstError) firstError = error
           if (!error) {
@@ -308,12 +327,12 @@ Item {
     return handle
   }
 
-  function getMessage(id, full, callback) {
+  function getMessage(id, full, callback, markSeen) {
     return getMessages([id], full, function(messages, error) {
       if (typeof callback !== "function") return
       if (error || messages.length === 0) callback(null, error || "That message is no longer in the mailbox")
       else callback(messages[0], "")
-    })
+    }, null, markSeen)
   }
 
   // The same call Gmail answers with a second request. Here there is nothing
@@ -495,14 +514,29 @@ Item {
           // \Deleted message in the folder, including ones another client
           // marked — somebody else's mail disappearing because this one
           // archived.
+          //
+          // The fallback needs UIDPLUS as much as it needs the absence of
+          // MOVE, because `UID EXPUNGE` is UIDPLUS's command. Without it the
+          // sequence gets as far as marking the message \Deleted and stops:
+          // the mail is still on the server, invisible to a client that hides
+          // deleted messages, and the panel had already moved the row. A
+          // server with neither is a server this cannot archive, and saying so
+          // is the only honest answer — a capability the provider does not
+          // have is not a button it should complete.
           if (Imap.hasCapability(root.serverCapabilities, "MOVE")) {
             commands = commands.concat([Imap.moveCommand(group.uids, plan.move)])
-          } else {
+          } else if (Imap.hasCapability(root.serverCapabilities, "UIDPLUS")) {
             commands = commands.concat([
               Imap.copyCommand(group.uids, plan.move),
               "UID STORE " + Imap.sequenceSet(group.uids) + " +FLAGS.SILENT (\\Deleted)",
               Imap.expungeCommand(group.uids)
             ])
+          } else {
+            if (!firstError)
+              firstError = "This server supports neither MOVE nor UIDPLUS, so a message cannot be moved without leaving a deleted copy behind"
+            remaining--
+            if (remaining === 0 && typeof callback === "function") callback(null, firstError)
+            return
           }
         }
 

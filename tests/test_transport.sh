@@ -16,6 +16,7 @@ mkdir -p "$work/bin"
 cat > "$work/bin/curl" <<'STUB'
 #!/bin/sh
 header_file=
+[ -z "${CURL_STUB_ARGV:-}" ] || printf '%s\n' "$@" > "$CURL_STUB_ARGV"
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--dump-header" ]; then
     header_file=$2
@@ -414,6 +415,54 @@ if [ "$(cat "$counter" 2>/dev/null)" = "4" ]; then
   printf '  ok   and it stops after four attempts\n'
 else
   printf '  FAIL the retry count was %s, not 4\n' "$(cat "$counter" 2>/dev/null)"
+  failures=$(( failures + 1 ))
+fi
+
+# ----------------------------------------------- a partly failed sequence
+#
+# A sequence reaches curl as `--next` sections on one connection, and an
+# archive on a server without MOVE is three of them: COPY, STORE +\Deleted,
+# UID EXPUNGE. Without --fail-early curl runs the remaining sections after one
+# fails and exits with the code of the last transfer — so a COPY answered
+# `NO [TRYCREATE]` was followed by the delete, curl exited 0, and the message
+# was gone without ever having been copied.
+rm -rf "$work/cache"
+argv="$work/argv"
+rm -f "$argv"
+printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY="$axigen_imap" CURL_STUB_ARGV="$argv" \
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" >/dev/null
+if grep -qx -- '--fail-early' "$argv" 2>/dev/null; then
+  printf '  ok   curl is told to abort the sequence at the first failure\n'
+else
+  printf '  FAIL --fail-early did not reach curl\n'
+  failures=$(( failures + 1 ))
+fi
+
+# Exit 3 is a malformed URL. It is the same answer the next time and the time
+# after, so retrying it spends seven seconds of blank panel to arrive back
+# where it started.
+rm -rf "$work/cache"
+rm -f "$counter"
+out=$(printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY="$axigen_imap" CURL_STUB_EXIT=3 \
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
+if [ "$(printf '%s' "$out" | sed -n '1p')" = "3" ]; then
+  printf '  ok   a malformed URL is reported\n'
+else
+  printf '  FAIL exit 3 did not survive to the caller\n'
+  failures=$(( failures + 1 ))
+fi
+rm -f "$argv"
+start=$(date +%s)
+printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY="$axigen_imap" CURL_STUB_EXIT=3 CURL_STUB_ARGV="$argv" \
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" >/dev/null
+elapsed=$(( $(date +%s) - start ))
+if [ "$elapsed" -lt 3 ]; then
+  printf '  ok   and is not retried\n'
+else
+  printf '  FAIL exit 3 was retried: the request took %ss\n' "$elapsed"
   failures=$(( failures + 1 ))
 fi
 

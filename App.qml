@@ -65,7 +65,10 @@ Item {
   readonly property bool compact: window.width < Style.space(760)
 
   property string currentView: "list"
-  property string cursorId: ""
+  // Where the keyboard is: one row key, the account and the id together. A
+  // bare id addresses no row in a merged list, where two mailboxes can hold
+  // the same one.
+  property string cursorKey: ""
   // Kept across messages, and across the window being closed: somebody who
   // wants plain text wants it for their mail, not for one message. The service
   // holds it because that is what writes it to disk.
@@ -146,7 +149,7 @@ Item {
     // The list is usually already loaded by the time the window is summoned —
     // the service keeps running while it is shut — so waiting for the next
     // change to seat the cursor leaves the first j with nowhere to move from.
-    cursorId = Model.cursorAfterReload(service ? service.messages : [], cursorId)
+    cursorKey = Model.cursorAfterReload(service ? service.messages : [], cursorKey)
     Qt.callLater(function() { focusScope.applyContextFocus() })
   }
 
@@ -164,12 +167,12 @@ Item {
 
   // Plain text is a preference and survives; the heavy-document override is a
   // per-message decision about one specific message and does not.
-  function openMessage(id) {
+  function openMessage(key) {
     if (!service) return
     pendingComposeMode = ""
     reader.forceRichAnyway = false
-    cursorId = String(id || "")
-    service.select(cursorId)
+    cursorKey = String(key || "")
+    service.select(cursorKey)
     currentView = "reader"
   }
 
@@ -184,12 +187,12 @@ Item {
   // Flickable rather than a ListView — the panel already owns a scroller — so
   // there is no positionViewAtIndex and this has to be said out loud.
   //
-  // Called from here rather than from cursorId changing, because hovering a row
+  // Called from here rather than from the cursor changing, because hovering a row
   // moves the cursor too, and scrolling a half-visible row into view under the
   // pointer fights the mouse that is pointing at it.
   function revealCursorRow() {
     if (!listFlick.visible) return
-    var bounds = list.boundsFor(cursorId)
+    var bounds = list.boundsFor(cursorKey)
     if (!bounds) return
     listFlick.contentY = Model.contentYToReveal(listFlick.contentY,
       listFlick.height, list.y + bounds.y, bounds.height,
@@ -198,9 +201,9 @@ Item {
 
   function moveCursor(delta) {
     if (!service) return
-    var next = service.cursorOffset(cursorId, delta)
+    var next = service.cursorOffset(cursorKey, delta)
     if (next === "") return
-    cursorId = next
+    cursorKey = next
     revealCursorRow()
     // Moving is not opening. This used to open whatever it landed on while the
     // reader was up, which made stepping through a list a way to mark half of
@@ -227,6 +230,12 @@ Item {
       return
     }
     pendingComposeMode = ""
+    // The draft is told which mailbox it is written from before it is filled
+    // in, because filling it in already needs that account's address: an
+    // answer goes out through the account that received the message being
+    // answered, and reply-all strips that address rather than the one on
+    // screen. A new message has no parent and stays with the current mailbox.
+    service.beginComposeFor(next === "new" ? "" : service.selectedKey)
     compose.begin(next, service.selectedMessage, service.selectedBody.text)
   }
 
@@ -241,9 +250,9 @@ Item {
   // row's own menu does. Anything already open is left alone: re-selecting it
   // would throw away the body that is on screen and fetch it again.
   function composeFromCursor(mode) {
-    if (!service || cursorId === "") return
+    if (!service || cursorKey === "") return
     composeReturnView = currentView
-    if (service.selectedId !== cursorId) openMessage(cursorId)
+    if (service.selectedKey !== cursorKey) openMessage(cursorKey)
     startCompose(mode)
   }
 
@@ -252,14 +261,15 @@ Item {
   function leaveCompose() {
     var from = composeReturnView
     composeReturnView = ""
+    if (service) service.endCompose()
     if (from === "list" && currentView === "reader") backToList()
   }
 
   // Acting on the open message closes it: it is about to leave this list.
   function actOnCursor(action) {
-    if (!service || cursorId === "") return
-    var acted = cursorId
-    var wasOpen = currentView === "reader" && service.selectedId === acted
+    if (!service || cursorKey === "") return
+    var acted = cursorKey
+    var wasOpen = currentView === "reader" && service.selectedKey === acted
     // Worked out before the action, while the row still has neighbours.
     var next = Model.cursorAfterRemoval(service.messages, acted)
     var leaves = !Model.survivesAction(service.mailboxKey, action)
@@ -273,7 +283,7 @@ Item {
       else backToList()
       return
     }
-    cursorId = next
+    cursorKey = next
     revealCursorRow()
   }
 
@@ -312,14 +322,14 @@ Item {
     }
     if (id === "cursorDown") return moveCursor(1)
     if (id === "cursorUp") return moveCursor(-1)
-    if (id === "open") return openMessage(cursorId)
+    if (id === "open") return openMessage(cursorKey)
     if (id === "backToList") return backToList()
     if (id === "archive") return actOnCursor("archive")
     if (id === "trash") return actOnCursor("trash")
     // Through the same guard actOnCursor applies rather than around it:
     // starring with nothing selected used to call through with an empty id.
     if (id === "star") {
-      if (service && cursorId !== "") service.toggleStar(cursorId)
+      if (service && cursorKey !== "") service.toggleStar(cursorKey)
       return
     }
     if (id === "markRead") return actOnCursor("markRead")
@@ -398,8 +408,8 @@ Item {
     function onSelectedMessageChanged() { Qt.callLater(root.resumeHeldCompose) }
 
     function onMessagesChanged() {
-      root.cursorId = Model.cursorAfterReload(
-        root.service ? root.service.messages : [], root.cursorId)
+      root.cursorKey = Model.cursorAfterReload(
+        root.service ? root.service.messages : [], root.cursorKey)
     }
     // A new account has no mailbox yet, so the only useful place to be is the
     // page that gives it one.
@@ -856,11 +866,11 @@ Item {
               accentColor: root.accent
               dimColor: root.dim
               panelFontFamily: root.fontFamily
-              cursorId: root.cursorId
-              onMessageActivated: function(id) { root.openMessage(id) }
-              onMenuRequested: function(id, sceneX, sceneY) {
-                root.cursorId = id
-                rowMenu.openAt(id, sceneX, sceneY)
+              cursorKey: root.cursorKey
+              onMessageActivated: function(key) { root.openMessage(key) }
+              onMenuRequested: function(key, sceneX, sceneY) {
+                root.cursorKey = key
+                rowMenu.openAt(key, sceneX, sceneY)
               }
             }
           }
@@ -942,8 +952,8 @@ Item {
             root.startCompose(mode)
           }
           onActionRequested: function(action) {
-            if (root.service && root.service.selectedId !== "") {
-              root.cursorId = root.service.selectedId
+            if (root.service && root.service.selectedKey !== "") {
+              root.cursorKey = root.service.selectedKey
               root.actOnCursor(action)
             }
           }
@@ -1244,13 +1254,13 @@ Item {
         popupBackgroundColor: root.popupBackground
         popupBorderColor: root.popupBorder
         panelFontFamily: root.fontFamily
-        onComposeRequested: function(mode, id) {
+        onComposeRequested: function(mode, key) {
           root.composeReturnView = root.currentView
-          root.openMessage(id)
+          root.openMessage(key)
           root.startCompose(mode)
         }
-        onActionRequested: function(action, id) {
-          root.cursorId = id
+        onActionRequested: function(action, key) {
+          root.cursorKey = key
           root.actOnCursor(action)
         }
       }

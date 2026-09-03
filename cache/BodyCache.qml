@@ -83,13 +83,32 @@ Item {
   // cache miss, never a pile of processes.
   property var writeQueue: []
 
+  // What was last written to each file this session, so an unchanged body is
+  // not written again. A body never changes once fetched, so the record handed
+  // over is usually byte-for-byte what is already on disk — and writing it
+  // anyway is a process, plus the `find | sort` over up to a thousand files
+  // that eviction does, for a file that would come back identical.
+  //
+  // Keyed on the file name and holding only the serialised string, so it costs
+  // what the bodies opened this session cost rather than what the cache holds.
+  property var lastWritten: ({})
+
   // Named "put" rather than "write" so it cannot be confused — by a reader or
   // by QML's scope resolution — with the Process.write() below.
   function put(id, body) {
     var name = Cache.bodyFileName(id)
     if (name === "") return
+    var payload = Cache.serializeBody(body)
+    if (lastWritten[name] === payload) return
+    // Recorded before the write rather than after it: two puts of the same
+    // body queued together would otherwise both run, which is the burst this
+    // exists to stop.
+    var seen = {}
+    for (var key in lastWritten) seen[key] = lastWritten[key]
+    seen[name] = payload
+    lastWritten = seen
     var next = writeQueue.slice()
-    next.push(({ name: name, payload: Cache.serializeBody(body) }))
+    next.push(({ name: name, payload: payload }))
     writeQueue = next
     drain()
   }
@@ -105,8 +124,13 @@ Item {
 
   function clear() {
     writeQueue = []
+    lastWritten = ({})
     Quickshell.execDetached([script, "clear", directory])
   }
+
+  // The account this cache belongs to changed, so the directory did: what was
+  // written under the old one says nothing about what is on disk under the new.
+  onAccountIdChanged: lastWritten = ({})
 
   Process {
     id: writer

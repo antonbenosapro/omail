@@ -134,13 +134,19 @@ key. What matters while working:
   be tidied back into the rule by someone who only read the rule.
 - The mouse does not move the keyboard's cursor. Qt re-reports hover when
   content moves under a still pointer and the list scrolls to follow the
-  keyboard, so a hover that wrote `cursorId` pulled it back to whatever the
+  keyboard, so a hover that wrote `cursorKey` pulled it back to whatever the
   mouse was resting on and `j` went nowhere. A row draws its own hover.
-- The list cursor and the open message are two different things. `cursorId` is
-  where the keyboard is; `selectedId` is what the reader shows. Move the cursor
+- The list cursor and the open message are two different things. `cursorKey` is
+  where the keyboard is; `selectedKey` is what the reader shows. Move the cursor
   with `Model.cursorAfterOffset`, and bring the row on screen with
   `Model.contentYToReveal` — the list is a `Column`, so there is no
   `positionViewAtIndex`.
+- Both are **row keys**, not message ids: `Model.rowKey` joins the account id to
+  the message id, `Model.keyId` and `Model.keyAccountId` take them apart, and
+  `Model.keyMatches` is the one comparison a view makes. A bare id addresses no
+  row in a merged list — two IMAP accounts on one server each hold `5:INBOX` —
+  so every UI signal, every cursor function and `Service.hostForMessage` carry
+  the key. Passing the id alone is how an action landed on the wrong mailbox.
 
 ## Providers
 
@@ -189,6 +195,19 @@ key. What matters while working:
   it base64-encoded on one line of stdin, so a password never reaches the
   process table and nothing needs escaping on the way; the config carrying it
   goes to curl's own stdin rather than to a file that would be on disk.
+- **One process and one TLS connection per request, by design.** Nothing is
+  held open between requests. `docs/ARCHITECTURE.md` has the reasoning, what a
+  persistent connection would cost — hand-rolled SASL in QML JS, because the
+  host this exists for offers CRAM-MD5 and no PLAIN — and the three things that
+  exist because of the model: the retry, the two staggers, and the capability
+  probe cache. Do not remove any of them without replacing the model.
+- Several commands share one connection as `--next` sections, and that is where
+  the cost comes down. Two rules for anything folded that way: `--fail-early`
+  must be passed, or curl runs the rest of the sequence after one fails and
+  exits with the last transfer's code — which deleted a message whose COPY had
+  been refused; and the commands must not depend on each other's parsed output,
+  which is why SEARCH-then-FETCH is two processes and marking read is folded
+  into the FETCH.
 - **The response comes back base64 too, and that is load-bearing.** IMAP
   measures a literal in octets. Read as UTF-8 text, 2048 octets of a message
   with an accent in it is fewer than 2048 characters, and the parser walks off

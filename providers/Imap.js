@@ -31,7 +31,10 @@ var CAPABILITIES = {
   search: true,
   send: true,
   // No web UI this plugin could know the address of.
-  web: false
+  web: false,
+  // The transport carries several commands on one connection, so the STORE
+  // that marks a message read rides along with the FETCH that opens it.
+  fetchMarksRead: true
 }
 
 // Folders, not queries. The `folder:` DSL is read by `ImapProtocol.parseQuery`

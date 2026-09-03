@@ -100,6 +100,10 @@ Item {
   readonly property bool hasLabels: Provider.can(providerId, "labels")
   readonly property bool canOpenOnWeb: Provider.can(providerId, "web")
   readonly property bool canSend: Provider.can(providerId, "send")
+  // Whether opening a message marks it read as part of the same request. On
+  // IMAP the STORE rides on the FETCH's connection; Gmail has no way to fetch
+  // and modify at once, so there it stays the separate call it always was.
+  readonly property bool fetchMarksRead: Provider.can(providerId, "fetchMarksRead")
 
   // What the cache is keyed on. The page size is part of it: the same query at
   // a different size is a different result set, not a stale one.
@@ -218,6 +222,12 @@ Item {
   // Set once Gmail's own copy has landed, so a slower cache read knows not to
   // paint over it.
   property bool detailLive: false
+  // Set once the cache has painted a complete message. A body never changes
+  // after it is fetched, which is what makes the cache correct in the first
+  // place — so what remains to ask the server is the one thing that does
+  // change: whether the message is still unread. That is a summary fetch
+  // rather than the whole message.
+  property bool detailCached: false
   property var detailHandle: null
   // The invitation's own request, which only a message carrying one ever makes.
   property var inviteHandle: null
@@ -452,7 +462,14 @@ Item {
 
   // Paints whatever the last visit to this query left behind. Switching
   // mailboxes should never show an empty column while the network decides.
+  //
+  // Only when there is nothing on screen. A refresh of a list already loaded
+  // used to paint the cache over it and then paint the live answer over that,
+  // so every poll rebuilt the whole list twice from rows that were usually
+  // identical — and the cache's copy is by definition older than what it was
+  // replacing.
   function paintFromCache() {
+    if (listLoaded) return true
     if (!cacheStore.loaded) return false
     var entry = cacheStore.get(cacheKey)
     if (!entry || !entry.summaries || entry.summaries.length === 0) return false
@@ -582,7 +599,10 @@ Item {
 
   function applySummaries(rawSummaries, append) {
     var summaries = tagOwnership(rawSummaries)
-    var merged = append ? root.messages.concat(summaries) : summaries
+    // Appended with the seam row dropped. IMAP re-runs the whole SEARCH and
+    // slices it, so a message arriving between two pages pushes the boundary
+    // down and the first row of the new page is the last row of the old one.
+    var merged = append ? Model.appendPage(root.messages, summaries) : summaries
     var arrivals = append ? [] : Model.newArrivals(summaries, seenIds, notificationsPrimed)
 
     var seen = {}
@@ -593,7 +613,12 @@ Item {
     seenIds = seen
     notificationsPrimed = true
 
-    messages = merged
+    // Assigned only when something a row draws actually differs. `messages` is
+    // a plain array bound to a Repeater, so a new array identity destroys and
+    // recreates every delegate — twenty-seven objects a row, three of them
+    // Canvas icons and three tooltip Popups — and a poll that found nothing
+    // new was doing exactly that, once per account per refresh.
+    if (!Model.sameList(root.messages, merged)) messages = merged
     listLoaded = true
     lastError = ""
     lastSyncedMs = Date.now()
@@ -615,6 +640,12 @@ Item {
       clearSelection()
       return
     }
+    // Re-selecting what is already open does nothing. It used to blank every
+    // body property and fetch the whole message again, so clicking the open
+    // row — or answering from the list a message the list had already opened —
+    // flashed the reader back to a skeleton and paid for a second fetch to
+    // arrive at what was on screen.
+    if (messageId === selectedId && selectedMessage) return
     selectedId = messageId
     var serial = ++detailSerial
     abortRequest(detailHandle)
@@ -640,9 +671,18 @@ Item {
     // the race — in which case the cached one is simply dropped rather than
     // painted over what is already correct.
     detailLive = false
+    detailCached = false
+    // The fetch is started from inside this callback rather than beside it,
+    // because what to ask the server for depends on what the file held and the
+    // read is asynchronous. `FileView` answers exactly once either way — a hit
+    // through onLoaded, a miss through onLoadFailed — so the fetch is started
+    // exactly once too.
     bodyCache.read(messageId, function(cached) {
       if (serial !== root.detailSerial) return
-      if (root.detailLive || !cached) return
+      if (!cached) {
+        root.fetchDetail(messageId, serial)
+        return
+      }
       // The text is read out of the cached markup rather than taken off the
       // disk beside it, on the same grounds the document is: what the cache
       // holds is the sender's HTML, so a fix to how a message reads reaches
@@ -662,15 +702,52 @@ Item {
       // second later when the network agrees.
       root.selectedInvite = cached.invite
       root.selectedUnsubscribe = cached.unsubscribe
+      // The row the list already has, which is the summary the reader's header
+      // and toolbar are gated on. Without it the cache painted the body
+      // properties into a reader still drawing its skeleton, because every
+      // visible part of the reader is `visible: !!summary` — so the cache
+      // saved one sanitize parse and nothing anybody could see, and the
+      // message appeared only when the network answered.
+      var known = Model.indexById(root.messages, messageId, root.accountId)
+      var plan = Model.detailFetchPlan(true, known >= 0)
+      if (plan.paintNow) {
+        root.detailCached = true
+        root.selectedMessage = root.messages[known]
+        root.detailLoading = false
+      }
       bodyCache.touch(messageId)
+      root.fetchDetail(messageId, serial)
     })
+  }
 
-    detailHandle = api.getMessage(messageId, true, function(payload, error) {
+  // What is still worth asking the server. A body never changes once fetched,
+  // which is what makes the cache correct — so after a hit the only thing left
+  // that can have changed is whether the message is still unread, and that is
+  // a summary fetch. On IMAP the difference is a `BODY.PEEK[HEADER]` rather
+  // than a `BODY.PEEK[]` of the whole message; on Gmail it is the metadata
+  // query rather than the full one.
+  function fetchDetail(messageId, serial) {
+    if (serial !== root.detailSerial) return
+    var plan = Model.detailFetchPlan(root.detailCached, root.detailCached)
+    var whole = plan.whole
+    // Whether this open should also mark the message read, decided from the
+    // row the list holds rather than from the answer that has not arrived. On
+    // a provider that folds it, the STORE goes out on the fetch's own
+    // connection; everywhere else this stays false and the separate call below
+    // does it once the answer says the message really was unread.
+    var known = Model.indexById(root.messages, messageId, root.accountId)
+    var wasUnread = known >= 0 && root.messages[known].unread === true
+    var folded = root.fetchMarksRead && wasUnread
+
+    detailHandle = api.getMessage(messageId, whole, function(payload, error) {
       if (serial !== root.detailSerial) return
       root.detailLoading = false
       root.detailLive = true
       if (error || !payload) {
-        root.fail(error || "Could not open that message")
+        // A message the cache already drew is on screen and correct. Saying
+        // the open failed over the top of it would be a notice about nothing
+        // the user can see, and would blank a reader that is working.
+        if (plan.reportFailure) root.fail(error || "Could not open that message")
         return
       }
       // Stamped like every other summary. This one is built fresh from the
@@ -680,6 +757,18 @@ Item {
       // fell back to matching on the id alone.
       var summary = root.tagOwnership([Mail.summarize(payload, new Date())])[0]
       root.selectedMessage = summary
+
+      // The whole message was not asked for, so there is no body in this
+      // payload to read. Everything below it — the parse, the attachments, the
+      // invitation, the cache write — would be reading a message that was not
+      // fetched, and would overwrite what the cache correctly drew with
+      // nothing. The list row and the read flag are all this answer carries.
+      if (!whole) {
+        root.messages = Model.replaceById(root.messages, summary)
+        root.markOpenedRead(messageId, summary, folded)
+        return
+      }
+
       var decoded = Mail.extractBody(payload.payload)
       var rawHtml = Mail.extractHtml(payload.payload)
       // Both readings of the body out of one parse. The markers in the
@@ -721,10 +810,28 @@ Item {
       // there at once the next time this message is opened.
       root.loadInvite(messageId, serial, Calendar.pendingPart(payload.payload), record)
       root.messages = Model.replaceById(root.messages, summary)
-      // Opening a message is the one place Gmail's own clients mark it read
-      // without being asked, and a reader that leaves it bold is confusing.
-      if (summary.unread) root.act(messageId, "markRead", true)
-    })
+      root.markOpenedRead(messageId, summary, folded)
+    }, folded)
+  }
+
+  // Opening a message is the one place Gmail's own clients mark it read
+  // without being asked, and a reader that leaves it bold is confusing.
+  //
+  // Where the fetch carried the STORE, the server has already been told and
+  // there is nothing to send — but the answer describes the message as it was
+  // *before* that STORE, because the FETCH ran first so a BODY.PEEK would read
+  // an unread message as unread. So the row is corrected here rather than left
+  // showing a flag the server no longer holds.
+  function markOpenedRead(messageId, summary, folded) {
+    if (!summary || !summary.unread) return
+    if (!folded) {
+      root.act(messageId, "markRead", true)
+      return
+    }
+    var read = Model.applyLabelChange(summary, "markRead")
+    root.selectedMessage = read
+    root.messages = Model.replaceById(root.messages, read)
+    root.refreshCounts()
   }
 
   // The invitation the message pointed at. Nothing happens for the messages
@@ -897,8 +1004,8 @@ Item {
 
   // The cursor is the list's own position and moves relative to itself.
   // `selectedId` keeps its separate meaning: which message the reader shows.
-  function cursorOffset(cursorId, delta) {
-    return Model.cursorAfterOffset(messages, cursorId, delta)
+  function cursorOffset(cursorKey, delta) {
+    return Model.cursorAfterOffset(messages, cursorKey, delta)
   }
 
   // -------------------------------------------------------------- actions
@@ -1347,24 +1454,68 @@ Item {
 
   // ------------------------------------------------------------- lifecycle
 
+  // Opening the window runs a profile read, a send-as read and a list load, and
+  // becoming ready adds a count — four processes per account, launched in the
+  // same tick for every account at once. Five mailboxes is twenty connections
+  // opened together, and a server that rations concurrent ones refuses some of
+  // them outright: that is the burst the retry and the poll stagger exist to
+  // survive, arriving from the one path neither of them covered.
+  //
+  // So it is spread the way the poll is, by an offset derived from the account
+  // id. Under a second across any number of mailboxes, because unlike the poll
+  // this one is in front of somebody who has just opened the window.
+  readonly property int openOffsetMs: Model.openOffsetMs(root.accountId)
+
+  // What the burst is for, so a stagger has one thing to delay rather than a
+  // handler each. Either reason may arrive first, and both may arrive before
+  // the timer fires, so they accumulate into the pending set rather than
+  // replacing one another.
+  property bool openBurstReady: false
+  property bool openBurstWindow: false
+
   onWindowOpenChanged: {
     if (!windowOpen) return
     clearNotice()
     if (!ready) return
-    loadProfile()
-    loadSendAs()
-    if (!listLoaded) loadMessages(false)
-    else refresh()
+    openBurstWindow = true
+    openBurst.restart()
   }
 
   onReadyChanged: {
     if (!ready) return
+    openBurstReady = true
+    openBurst.restart()
+  }
+
+  function runOpenBurst() {
+    var becameReady = openBurstReady
+    var opened = openBurstWindow
+    openBurstReady = false
+    openBurstWindow = false
+    if (!ready) return
+
     loadProfile()
     loadSendAs()
-    refreshCounts()
+    // The count is what the bar badge reads, and it is polled whether or not
+    // the window is open — so becoming ready asks for it and opening the
+    // window does not need to.
+    if (becameReady) refreshCounts()
     if (!active) return
-    loadLabels()
-    if (windowOpen && !listLoaded) loadMessages(false)
+    if (becameReady) loadLabels()
+    if (!listLoaded) {
+      // A list is worth loading only where one would be looked at. Becoming
+      // ready with the window shut leaves it to the open that follows.
+      if (windowOpen) loadMessages(false)
+    } else if (opened) {
+      refresh()
+    }
+  }
+
+  Timer {
+    id: openBurst
+    interval: root.openOffsetMs
+    repeat: false
+    onTriggered: root.runOpenBurst()
   }
 
   // Becoming the account on screen is what earns a list.
@@ -1502,16 +1653,8 @@ Item {
   // is derived from the account id so it is stable across restarts rather than
   // random, and it is only ever a fraction of the interval, so a mailbox is
   // never polled meaningfully less often than any other.
-  readonly property int pollOffsetMs: {
-    var id = String(root.accountId || "")
-    if (id === "") return 0
-    var hash = 0
-    for (var i = 0; i < id.length; i++) hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0
-    // A quarter of the interval, which spreads four mailboxes on one host
-    // across the gap between polls without delaying any of them noticeably.
-    var spread = Math.max(1, Math.floor(root.refreshIntervalSec * 250))
-    return Math.abs(hash) % spread
-  }
+  readonly property int pollOffsetMs: Model.pollOffsetMs(root.accountId,
+    root.refreshIntervalSec)
 
   Timer {
     id: pollStagger

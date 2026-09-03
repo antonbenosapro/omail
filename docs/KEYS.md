@@ -170,11 +170,13 @@ message list clamps.
 
 ## The cursor
 
-`cursorId` is where the keyboard is. `selectedId` is what the reader shows.
+`cursorKey` is where the keyboard is. `selectedKey` is what the reader shows.
 They are two different things, and conflating them was the first bug in this
 area: movement was anchored on the opened message, so in the list — where
 nothing is open — every step resolved to the first row, and `j` moved once and
 then stopped.
+
+Both are *row keys* rather than message ids: the account and the id together, built by `Model.rowKey` and read back by `Model.keyId` and `Model.keyAccountId`. A bare id addresses no row in a merged list, where two IMAP accounts on one server can each hold `5:INBOX` — the cursor could not walk past the first of them, and an action on the second acted on the first. Every function below takes and returns a key.
 
 Three rules, all in `account/Model.js` so the node tests reach them:
 
@@ -199,7 +201,7 @@ plausible targets. So there is no `positionViewAtIndex`, and keyboard movement
 has to scroll the list itself: **`Model.contentYToReveal`** decides where the
 scroller goes, leaving it alone while the row is already visible so stepping one
 row does not drag the list under someone reading it. It is called from
-`moveCursor`, not from `cursorId` changing, because hovering a row moves the
+`moveCursor`, not from `cursorKey` changing, because hovering a row moves the
 cursor too and scrolling under the pointer fights the mouse.
 
 ## The mouse
@@ -207,11 +209,11 @@ cursor too and scrolling under the pointer fights the mouse.
 The mouse does not move the keyboard's cursor. A row draws its own hover
 (`MessageRow.hot`), clicking one opens it, and right-clicking one sets the
 cursor explicitly before opening its menu — but hovering does nothing to
-`cursorId`.
+`cursorKey`.
 
 That is not a preference. Qt re-reports hover when content moves under a
 pointer that has not moved, and the list scrolls to follow the keyboard. With
-hover writing `cursorId`, pressing `j` moved the cursor, the scroll brought a
+hover writing `cursorKey`, pressing `j` moved the cursor, the scroll brought a
 different row under the still pointer, and the cursor snapped back to it — so
 `j` and `k` stuck on whichever rows the mouse was resting near.
 `tests/qml/tst_hover_under_scroll.qml` pins the Qt behaviour that makes this so.

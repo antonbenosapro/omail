@@ -8,7 +8,7 @@ import "../account/Model.js" as Model
 // gives every wheel event two plausible targets.
 //
 // Hovering a row does not move the keyboard's cursor. A row reports its own
-// hover appearance (MessageRow.hot), and letting hover write `cursorId` as well
+// hover appearance (MessageRow.hot), and letting hover write the cursor as well
 // put the mouse and the keyboard in a fight the mouse won: pressing j scrolls
 // the list to follow the cursor, and Qt re-reports hover when content moves
 // under a pointer that has not moved — so the cursor was pulled straight back
@@ -21,25 +21,14 @@ Column {
   required property color accentColor
   required property color dimColor
   required property string panelFontFamily
-  property string cursorId: ""
+  // Where the keyboard is, as a row key: the account and the id together. A
+  // bare id is not an address in a merged list — two mailboxes can hold one —
+  // and deriving the account from the id afterwards answered with whichever
+  // row came first, so the cursor could not reach the second of a pair.
+  property string cursorKey: ""
 
-  // Which mailbox the cursor's row belongs to. Derived from the list rather
-  // than passed in: the cursor names one row, and threading a second value
-  // through every place `cursorId` is written would be one more thing to keep
-  // in step. First match wins, which is also what the keyboard's own movement
-  // does with a duplicated id.
-  readonly property string cursorAccountId: {
-    if (!root.service || !root.service.unified || root.cursorId === "") return ""
-    var list = root.service.messages || []
-    for (var i = 0; i < list.length; i++) {
-      if (list[i] && list[i].id === root.cursorId)
-        return String(list[i].accountId || "")
-    }
-    return ""
-  }
-
-  signal messageActivated(string id)
-  signal menuRequested(string id, real sceneX, real sceneY)
+  signal messageActivated(string key)
+  signal menuRequested(string key, real sceneX, real sceneY)
 
   width: parent ? parent.width : 0
   spacing: Style.space(2)
@@ -47,13 +36,11 @@ Column {
   // Where a row sits in this column's own coordinates, so the panel's scroller
   // can bring it into view. Found by index rather than by asking the rows which
   // one holds the cursor: the answer must not wait on a binding to propagate.
-  function boundsFor(id) {
+  function boundsFor(key) {
     if (!root.service) return null
-    // Matched on the account as well while unified: two mailboxes can hold one
-    // id, and scrolling to the first of them would move the list to a row the
-    // cursor is not on.
-    var index = Model.indexById(root.service.messages, id,
-      root.service.unified ? root.cursorAccountId : "")
+    // The key carries the account, so scrolling cannot land on the other row
+    // of a colliding pair — the one the cursor is not on.
+    var index = Model.indexByKey(root.service.messages, key)
     if (index < 0) return null
     var item = rows.itemAt(index)
     if (!item) return null
@@ -77,22 +64,22 @@ Column {
       // carry the same colour, which says nothing.
       accountColor: root.service.unified
         ? root.service.colorForAccount(modelData.accountId) : ""
-      // Compared on the account as well as the id. Neither provider's id is
-      // unique across accounts, so in a merged list two rows can share one —
-      // and both would draw as the cursor and the open message.
-      hasCursor: root.cursorId === modelData.id
-        && (!root.service.unified
-          || root.cursorAccountId === String(modelData.accountId || ""))
-      selected: root.service.selectedId === modelData.id
-        && (!root.service.unified
-          || root.service.selectedAccountId === String(modelData.accountId || ""))
-      canArchive: root.service.canArchive
-      onActivated: root.messageActivated(modelData.id)
-      onStarToggled: root.service.toggleStar(modelData.id)
-      onArchiveRequested: root.service.act(modelData.id, "archive")
-      onTrashRequested: root.service.act(modelData.id, "trash")
+      // Both compared on the whole key. Neither provider's id is unique across
+      // accounts, so in a merged list two rows can share one — and both would
+      // draw as the cursor and as the open message.
+      hasCursor: Model.keyMatches(root.cursorKey, modelData)
+      selected: Model.keyMatches(root.service.selectedKey, modelData)
+      // The row's own account's answer. Taking `current`'s drew an archive
+      // button on every merged row whether or not the account behind it has
+      // one — and a button that fails after the row has already moved is
+      // worse than one that was never offered.
+      canArchive: root.service.capabilityFor(Model.rowKey(modelData), "archive")
+      onActivated: root.messageActivated(Model.rowKey(modelData))
+      onStarToggled: root.service.toggleStar(Model.rowKey(modelData))
+      onArchiveRequested: root.service.act(Model.rowKey(modelData), "archive")
+      onTrashRequested: root.service.act(Model.rowKey(modelData), "trash")
       onMenuRequested: function(sceneX, sceneY) {
-        root.menuRequested(modelData.id, sceneX, sceneY)
+        root.menuRequested(Model.rowKey(modelData), sceneX, sceneY)
       }
     }
   }

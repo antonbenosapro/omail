@@ -92,10 +92,12 @@ Item {
   }
 
   // Everyone on the original except this mailbox: replying to yourself is
-  // never what reply-all was for.
+  // never what reply-all was for. "This mailbox" is the one that received the
+  // message, not the one on screen — stripping the wrong address left the
+  // replier on their own reply-all and dropped somebody who belonged on it.
   function otherRecipients(summary) {
     if (!summary) return ""
-    var mine = String(root.service ? root.service.accountEmail : "").toLowerCase()
+    var mine = String(root.service ? root.service.composeEmail : "").toLowerCase()
     var list = Array.isArray(summary.to) ? summary.to : []
     var kept = []
     for (var i = 0; i < list.length; i++) {

@@ -50,7 +50,12 @@ function capabilities(values) {
     search: raw.search === true,
     // Sends mail. A read-only provider still shows a reader; it just cannot
     // answer from it.
-    send: raw.send === true
+    send: raw.send === true,
+    // Marking a message read is part of fetching it, rather than a second
+    // request afterwards. True where the protocol carries several commands on
+    // one connection: opening an unread message is then two processes instead
+    // of three, and the flag cannot be left unset by a failure between them.
+    fetchMarksRead: raw.fetchMarksRead === true
   }
 }
 

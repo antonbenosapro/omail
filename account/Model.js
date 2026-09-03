@@ -208,12 +208,28 @@ function isUnifiedMailbox(key) {
 // from IMAP's INTERNALDATE and Gmail's internalDate, not from the sender's
 // own Date header, which is sender-controlled and can be wrong by days.
 //
-// A summary with no date does not sort to the bottom. A page fetched while a
+// An undated row sorts after every dated one, and undated rows sort among
+// themselves by arrival number and then by account. A page fetched while a
 // server was throttling can arrive with content and no INTERNALDATE, and a
 // comparator that called every such row equal collapsed half a list out of
-// order. The numeric part of the id is the fallback: an IMAP UID rises with
-// arrival within a folder, so it orders those rows among themselves the same
-// way the date would have.
+// order — the numeric part of the id is the fallback, because an IMAP UID
+// rises with arrival within a folder.
+//
+// One rule for undated rows, not two. The previous comparator had them placed
+// by UID against a dated row of the same account and "dated leads" against a
+// dated row of another, and those two rules cycle: with A dated uid 5, B
+// undated uid 10 in the same account, and C dated in another account, B beats
+// A, A ties-breaks against C, and C beats B — so the same three rows sorted
+// from six permutations gave three different orders. A comparator that is not
+// a total order is not merely untidy: Array.prototype.sort is free to produce
+// anything at all from one, and the merged list reshuffled between relayouts
+// with rows moving under the pointer.
+//
+// The cost of the single rule is that an undated row lands at the end rather
+// than near where its UID says it belongs. That is the honest place for it:
+// the list is ordered by when mail arrived, and a row with no arrival time has
+// no position in that order to claim. It is also rare — a throttled page — and
+// self-correcting, because the next load brings the date.
 //
 // Ties break on account and then id so the order is total. Two messages
 // sharing a timestamp must not swap places between relayouts, or a row moves
@@ -233,25 +249,18 @@ function arrivalRank(summary) {
 function byReceivedDescending(a, b) {
   var left = receivedRank(a)
   var right = receivedRank(b)
-  // Both dated, or both undated: compare like with like.
-  if (left > 0 && right > 0 && left !== right) return right - left
-  if ((left > 0) !== (right > 0)) {
-    // One is dated and the other is not. The undated one is placed by its
-    // arrival number against the other's, so it lands near where it belongs
-    // rather than at the end of the list.
-    var known = left > 0 ? a : b
-    var unknown = left > 0 ? b : a
-    var sameAccount = String((known && known.accountId) || "")
-      === String((unknown && unknown.accountId) || "")
-    if (sameAccount) {
-      var byArrival = arrivalRank(b) - arrivalRank(a)
-      if (byArrival !== 0) return byArrival
-    } else {
-      // Nothing comparable across two mailboxes, so the dated one leads: it
-      // is the row whose position the user can actually verify.
-      return left > 0 ? -1 : 1
-    }
-  } else if (left === 0 && right === 0) {
+
+  // Dated before undated, always. This is the one rule, and having only one is
+  // what makes the order total.
+  if ((left > 0) !== (right > 0)) return left > 0 ? -1 : 1
+
+  // Both dated: newest first.
+  if (left > 0 && left !== right) return right - left
+
+  // Both undated: by arrival number, which within one account is the order the
+  // dates would have given. Across accounts it compares nothing meaningful,
+  // but it is consistent, and the account tie-break below settles the rest.
+  if (left === 0) {
     var undated = arrivalRank(b) - arrivalRank(a)
     if (undated !== 0) return undated
   }
@@ -259,7 +268,252 @@ function byReceivedDescending(a, b) {
   var leftAccount = String((a && a.accountId) || "")
   var rightAccount = String((b && b.accountId) || "")
   if (leftAccount !== rightAccount) return leftAccount < rightAccount ? -1 : 1
-  return String((a && a.id) || "") < String((b && b.id) || "") ? -1 : 1
+  var leftId = String((a && a.id) || "")
+  var rightId = String((b && b.id) || "")
+  if (leftId === rightId) return 0
+  return leftId < rightId ? -1 : 1
+}
+
+// ----------------------------------------------------------- spreading load
+//
+// Several mailboxes on one server open their connections in the same tick, and
+// a server that rations concurrent connections refuses some of them outright.
+// The unread poll already spreads itself this way; the window-open and startup
+// loads did not, and they are the bigger burst: opening the window runs a
+// profile read, a send-as read, a count and a list load per account, so five
+// accounts is twenty processes at once, which is the shape the server was
+// refusing.
+//
+// Derived from the account id so it is stable across restarts rather than
+// random — the same mailbox waits the same fraction every time, which is
+// debuggable — and bounded to a fraction of the interval so no mailbox is ever
+// meaningfully later than any other.
+function spreadHash(accountId) {
+  var id = String(accountId || "")
+  var hash = 0
+  for (var i = 0; i < id.length; i++) hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0
+  return Math.abs(hash)
+}
+
+// The poll's own offset: a quarter of the refresh interval, which spreads four
+// mailboxes on one host across the gap between polls.
+function pollOffsetMs(accountId, refreshIntervalSec) {
+  if (String(accountId || "") === "") return 0
+  var spread = Math.max(1, Math.floor(Number(refreshIntervalSec) * 250))
+  return spreadHash(accountId) % spread
+}
+
+// The offset before a window-open or startup load. Much shorter than the
+// poll's, because this one is in front of somebody who has just opened the
+// window: it has to spread the connections without the list visibly waiting
+// for them. Under a second across any number of mailboxes.
+var OPEN_SPREAD_MS = 900
+
+function openOffsetMs(accountId) {
+  if (String(accountId || "") === "") return 0
+  return spreadHash(accountId) % OPEN_SPREAD_MS
+}
+
+// --------------------------------------------------------- rebuilding a list
+//
+// Whether a new page of summaries is worth assigning over the list that is on
+// screen. `messages` is a plain JS array bound to a `Repeater`, so a new array
+// identity destroys and recreates every delegate — and a `MessageRow` is about
+// twenty-seven objects including three Canvas icons and three tooltip Popups.
+// A poll that found nothing new was rebuilding the whole list anyway, several
+// times per cycle and once per account in a merged view.
+//
+// Compared field by field, over what a row draws plus what decides where a row
+// belongs. Comparing the objects by identity would answer "changed" every
+// time, because each load builds fresh summaries out of fresh payloads.
+//
+// `subject`, `snippet`, `unread` and `starred` are drawn; `from` is drawn
+// through its display name and address; `date` is what `time` is derived from
+// and what the merged order sorts on; `id` and `accountId` are the row's
+// identity; `labelIds` is what decides whether an action leaves the row in
+// this mailbox. Nothing else in a summary reaches the list.
+var ROW_FIELDS = ["id", "accountId", "subject", "snippet", "date",
+  "unread", "starred"]
+
+function sameRow(a, b) {
+  if (!a || !b) return a === b
+  for (var i = 0; i < ROW_FIELDS.length; i++) {
+    var field = ROW_FIELDS[i]
+    if (!sameField(a[field], b[field])) return false
+  }
+  if (!sameParty(a.from, b.from)) return false
+  return sameLabels(a.labelIds, b.labelIds)
+}
+
+// `date` is a Date, and every load builds a fresh one out of a fresh payload —
+// two Dates for one instant are never `===`. Comparing them by identity made
+// every list differ from itself, which would have left the whole comparison
+// inert while looking like it worked.
+function sameField(left, right) {
+  if (left === right) return true
+  // Both absent counts as the same: a summary hydrated from an older cache
+  // simply has fewer fields than one off the wire.
+  var leftEmpty = left === undefined || left === null
+  var rightEmpty = right === undefined || right === null
+  if (leftEmpty || rightEmpty) return leftEmpty && rightEmpty
+  // Duck-typed rather than `instanceof Date`, which is per-realm: the node
+  // tests build their dates outside the vm context the module runs in, so
+  // `instanceof` is false there and the comparison would be exercised by
+  // nothing while looking correct in the shell.
+  if (isDateLike(left) && isDateLike(right)) {
+    var leftAt = Number(left)
+    var rightAt = Number(right)
+    // An invalid date is NaN, which is not equal to itself. Two of them are
+    // the same absence of a date.
+    if (!isFinite(leftAt) && !isFinite(rightAt)) return true
+    return leftAt === rightAt
+  }
+  return false
+}
+
+function isDateLike(value) {
+  return !!value && typeof value.getTime === "function"
+}
+
+function sameLabels(a, b) {
+  var left = Array.isArray(a) ? a : []
+  var right = Array.isArray(b) ? b : []
+  if (left.length !== right.length) return false
+  for (var i = 0; i < left.length; i++) {
+    if (String(left[i]) !== String(right[i])) return false
+  }
+  return true
+}
+
+function sameParty(a, b) {
+  var leftEmail = String((a && a.email) || "")
+  var rightEmail = String((b && b.email) || "")
+  if (leftEmail !== rightEmail) return false
+  return String((a && a.displayName) || "") === String((b && b.displayName) || "")
+}
+
+function sameList(a, b) {
+  var left = Array.isArray(a) ? a : []
+  var right = Array.isArray(b) ? b : []
+  if (left.length !== right.length) return false
+  for (var i = 0; i < left.length; i++) {
+    if (!sameRow(left[i], right[i])) return false
+  }
+  return true
+}
+
+// A page appended to the list it already holds, with the seam row dropped.
+//
+// IMAP has no page token: it re-runs the whole SEARCH and slices
+// `[offset, offset + limit]`, so a message that arrives between two pages
+// pushes the boundary down and the first row of the new page is the last row
+// of the old one. Gmail's own token is stable, but a retried page is not.
+// Nothing deduplicated, so the seam row appeared twice — and in a merged list
+// there is one seam per account.
+function appendPage(current, page) {
+  var existing = Array.isArray(current) ? current : []
+  var added = Array.isArray(page) ? page : []
+  var out = existing.slice()
+  for (var i = 0; i < added.length; i++) {
+    var summary = added[i]
+    if (!summary) continue
+    if (indexById(out, summary.id, summary.accountId) >= 0) continue
+    out.push(summary)
+  }
+  return out
+}
+
+// ------------------------------------------------------- opening a message
+//
+// What a select still has to ask the server for, once the body cache has
+// answered. A body never changes after it is fetched — which is what makes the
+// cache correct at all — so a hit leaves exactly one thing that can have moved
+// since: whether the message is still unread. That is a summary fetch, not the
+// whole message.
+//
+// Before this, a cached open did the full fetch every time and painted nothing
+// early: the cache set the body properties but never `selectedMessage`, and
+// every visible part of the reader is gated on that summary. So the cache
+// bought one skipped sanitize parse and nothing the user could see, while the
+// reader drew its skeleton until the network answered — on IMAP a whole new
+// process, TLS handshake, LOGIN, SELECT and `UID FETCH BODY.PEEK[]` of the
+// entire message.
+//
+// `painted` is whether the cache had the body *and* the list still holds the
+// row it belongs to. Without the row there is no summary to show, so the fetch
+// has to bring one.
+function detailFetchPlan(cacheHit, rowKnown) {
+  var painted = cacheHit === true && rowKnown === true
+  return ({
+    // Whether to ask for the whole message rather than its headers.
+    whole: !painted,
+    // Whether the reader can stop drawing its skeleton now.
+    paintNow: painted,
+    // Whether a failure from the server is worth telling the user about. A
+    // message the cache already drew is on screen and correct; a notice over
+    // the top of it would be about nothing they can see.
+    reportFailure: !painted
+  })
+}
+
+// ------------------------------------------------------------- row keys
+//
+// One string that names one row: the account it belongs to and the id inside
+// that account. The keyboard cursor, the reader's selection, and every signal
+// a row emits carry this rather than a bare id.
+//
+// The bare id is not an address. An IMAP UID is unique only inside its folder
+// and a Gmail id only inside its account, so in a merged list two rows really
+// do share one — the pair that prompted this had overlapping UID ranges. Every
+// path that took a bare id resolved it to whichever account happened to hold
+// it first: `j` could not walk past the duplicate, and archiving the second
+// row archived the first one's message. Carrying the pair as two values was
+// the alternative, and it means a second argument on every signal and a second
+// property beside every `cursorId`, any one of which can be forgotten
+// silently. One opaque key cannot be half-passed.
+//
+// The account leads because it is the half with a known shape: an account id
+// is an address, or `imap:` and an address, and neither can hold the
+// separator. A message id can hold anything a folder name can, so it goes
+// second and the split is at the first separator only.
+//
+// A key with no separator is a bare id with no account, which `sameMessage`
+// already reads as "any account" — that is the single-account list, where the
+// id is unambiguous by construction.
+var KEY_SEPARATOR = "\u001f"
+
+function rowKey(summary) {
+  if (!summary) return ""
+  return messageKey(summary.id, summary.accountId)
+}
+
+function messageKey(id, accountId) {
+  var wanted = String(id || "")
+  if (wanted === "") return ""
+  var owner = String(accountId || "")
+  if (owner === "") return wanted
+  return owner + KEY_SEPARATOR + wanted
+}
+
+function keyId(key) {
+  var text = String(key || "")
+  var at = text.indexOf(KEY_SEPARATOR)
+  return at < 0 ? text : text.slice(at + KEY_SEPARATOR.length)
+}
+
+function keyAccountId(key) {
+  var text = String(key || "")
+  var at = text.indexOf(KEY_SEPARATOR)
+  return at < 0 ? "" : text.slice(0, at)
+}
+
+// Whether a row is the one a key names. The one comparison every view makes,
+// so no view has to remember to check the account as well as the id.
+function keyMatches(key, summary) {
+  if (!summary) return false
+  var text = String(key || "")
+  if (text === "") return false
+  return sameMessage(summary, keyId(text), keyAccountId(text))
 }
 
 // A message is addressed by its id *and* the mailbox it came from.
@@ -312,6 +566,13 @@ function indexById(list, id, accountId) {
     if (sameMessage(source[i], id, accountId)) return i
   }
   return -1
+}
+
+// The same lookup for a row key, which is what the view layer holds.
+function indexByKey(list, key) {
+  var text = String(key || "")
+  if (text === "") return -1
+  return indexById(list, keyId(text), keyAccountId(text))
 }
 
 // The rail as one numbered list, in the order it is drawn: the provider's
@@ -370,18 +631,18 @@ function wrappedIndex(index, delta, count) {
 // open while the list is being walked, and walking must not move the reader.
 // Anchoring this on the open message pinned it — every step in the list
 // resolved to row 0, and in the reader the anchor never advanced.
-function cursorAfterOffset(list, cursorId, delta) {
+function cursorAfterOffset(list, cursorKey, delta) {
   var source = Array.isArray(list) ? list : []
   if (source.length === 0) return ""
   var step = Math.floor(Number(delta) || 0)
-  var index = indexById(source, cursorId)
+  var index = indexByKey(source, cursorKey)
   // No cursor, or one whose message has left the list: start from the end the
   // move is coming from, so j opens at the top and k opens at the bottom.
-  if (index < 0) return step < 0 ? source[source.length - 1].id : source[0].id
+  if (index < 0) return rowKey(step < 0 ? source[source.length - 1] : source[0])
   var next = index + step
   if (next < 0) next = 0
   if (next > source.length - 1) next = source.length - 1
-  return source[next].id
+  return rowKey(source[next])
 }
 
 // Where the cursor goes when the row it is on is about to leave the list.
@@ -391,23 +652,27 @@ function cursorAfterOffset(list, cursorId, delta) {
 // Leaving the cursor on a row that has gone is not harmless. cursorAfterOffset
 // cannot find it, so it restarts at the top — which is how archiving one
 // message sent the next j back to the first row.
-function cursorAfterRemoval(list, cursorId) {
+function cursorAfterRemoval(list, cursorKey) {
   var source = Array.isArray(list) ? list : []
-  var index = indexById(source, cursorId)
+  var index = indexByKey(source, cursorKey)
   if (index < 0) return ""
-  if (index + 1 < source.length) return source[index + 1].id
-  if (index > 0) return source[index - 1].id
+  if (index + 1 < source.length) return rowKey(source[index + 1])
+  if (index > 0) return rowKey(source[index - 1])
   return ""
 }
 
 // Where the cursor goes when the whole list is replaced under it — a mailbox
 // switch, a search, a refresh that dropped things. The message it was on keeps
 // it if it survived; otherwise the top, which is where the eye goes anyway.
-function cursorAfterReload(list, cursorId) {
+function cursorAfterReload(list, cursorKey) {
   var source = Array.isArray(list) ? list : []
   if (source.length === 0) return ""
-  if (indexById(source, cursorId) >= 0) return cursorId
-  return source[0].id
+  var index = indexByKey(source, cursorKey)
+  // Re-derived from the row rather than returned as it came in: a key that
+  // named no account matched the row by id alone, and handing it back would
+  // leave the cursor ambiguous for as long as it sat there.
+  if (index >= 0) return rowKey(source[index])
+  return rowKey(source[0])
 }
 
 // Where the scroller has to sit for a row to be on screen. The list is a Column

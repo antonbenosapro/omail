@@ -113,16 +113,13 @@ Item {
       var host = accountHosts.objectAt(i)
       if (!host) continue
       host.active = everyone || host === next
-      if (everyone) host.windowOpen = windowOpen
     }
 
     // `current` stays the mailbox the window would come back to, and is what
     // compose, sign-in and the settings page still speak to. What it is not,
     // while unified, is the owner of the message being read — that is resolved
     // per message by `hostForMessage`.
-    if (next === current) return
     current = next
-    if (current) current.windowOpen = windowOpen
   }
 
   // The whole point of switching is that it is instant, which it is because
@@ -417,8 +414,11 @@ Item {
     alwaysShowImages = next
     saveWindowPrefs()
     // The message on screen is the one the answer was given about, so it
-    // answers now rather than at the next message.
-    if (next && current) current.showRemoteImages()
+    // answers now rather than at the next message — and the message on screen
+    // belongs to `reader`, which while unified is not `current`. Telling
+    // `current` left the message the notice was shown over still blocking its
+    // images, so the button appeared to do nothing.
+    if (next && reader) reader.showRemoteImages()
   }
   signal duplicateAccount(string email)
 
@@ -482,26 +482,48 @@ Item {
 
   // ------------------------------------------------------------- forwarding
 
+  // Which accounts are on screen: every one while unified, otherwise the one
+  // the window came back to. The delegate binds its own `windowOpen` to this,
+  // rather than three places pushing the value in — `refreshCurrent` did it
+  // twice and `onWindowOpenChanged` a third time, and none of them ever set it
+  // false again, so after leaving unified the other hosts believed the window
+  // was open forever. That was inert only because `active` gates every load as
+  // well; two sources of truth for one fact is the bug waiting behind it.
   property bool windowOpen: false
-  // While unified every account is on screen, so every account has to know the
-  // window opened — not just `current`. Without this the others never run the
-  // refresh that `onWindowOpenChanged` does, and their half of a merged list
-  // stays as old as the last time they happened to be the active mailbox.
-  onWindowOpenChanged: {
-    if (root.unified) {
-      for (var i = 0; i < accountHosts.count; i++) {
-        var host = accountHosts.objectAt(i)
-        if (host) host.windowOpen = windowOpen
-      }
-      return
-    }
-    if (current) current.windowOpen = windowOpen
-  }
 
   readonly property var auth: current ? current.auth : null
   readonly property bool ready: !!current && current.ready
   readonly property string accountEmail: current ? current.accountEmail : ""
-  readonly property var sendAsAliases: current ? current.availableSendAsAliases : []
+
+  // The mailbox a draft is being written from. An answer goes out through the
+  // account that received what is being answered — otherwise, in a merged
+  // list, replying to a message in B sent from A's address over A's SMTP,
+  // landed in A's Sent, and reply-all stripped A's address from the recipients
+  // rather than B's. `composeOwner` is that account for a reply or a forward
+  // and empty for a new message, which has no parent and belongs to whichever
+  // mailbox is on screen.
+  property string composeOwner: ""
+  readonly property var composeHost: {
+    if (root.composeOwner === "") return current
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (host && host.accountId === root.composeOwner) return host
+    }
+    return current
+  }
+
+  // Called when a draft opens. A key names the message being answered, and an
+  // empty one is a new message.
+  function beginComposeFor(key) {
+    var text = String(key || "")
+    root.composeOwner = text === "" ? "" : Model.keyAccountId(text)
+  }
+  function endCompose() { root.composeOwner = "" }
+
+  // The address a draft signs with, and the aliases it may choose from: both
+  // the drafting account's, not the one on screen.
+  readonly property string composeEmail: composeHost ? composeHost.accountEmail : ""
+  readonly property var sendAsAliases: composeHost ? composeHost.availableSendAsAliases : []
   readonly property string accountAddress: {
     var accounts = accountList ? accountList.accounts : []
     var index = activeIndex >= 0 ? activeIndex : indexOfActiveAccount()
@@ -540,17 +562,27 @@ Item {
     return Accounts.colorFor(accountList, accountId)
   }
 
-  // Which mailbox the open message belongs to, for a list that has to tell two
-  // rows with one id apart.
-  readonly property string selectedAccountId: reader ? reader.accountId : ""
-
-  function hostForMessage(id) {
+  // Which mailbox a row key names. The account half decides it outright where
+  // there is one: two IMAP accounts on one server hold `5:INBOX` each, and
+  // searching the hosts in order for the id alone answered with whichever came
+  // first — so archiving the second row archived the first one's message.
+  //
+  // A key with no account is still resolved by search, because that is what a
+  // single-account list produces and what a summary written before ownership
+  // was stamped reads back as.
+  function hostForMessage(key) {
     if (!root.unified) return current
-    var wanted = String(id || "")
-    if (wanted === "") return current
+    var text = String(key || "")
+    if (text === "") return current
+    var owner = Model.keyAccountId(text)
+    var wanted = Model.keyId(text)
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
       if (!host) continue
+      if (owner !== "") {
+        if (host.accountId === owner) return host
+        continue
+      }
       if (Model.indexById(host.messages, wanted, host.accountId) >= 0) return host
     }
     return current
@@ -580,12 +612,34 @@ Item {
     }
     return out
   }
-  readonly property bool canArchive: !current || current.canArchive
-  readonly property bool canReportSpam: !current || current.canReportSpam
-  readonly property bool canStar: !current || current.canStar
+  // What the *open* message's account can be asked to do. A capability the
+  // provider does not declare is a button the panel does not draw, and these
+  // read from `reader` rather than `current` because in a merged list the two
+  // are different accounts: with a Gmail account on screen and an IMAP message
+  // open, the reader drew Archive, Report spam and Open in browser per Gmail's
+  // capabilities and the browser button aimed a Gmail URL at an IMAP id.
+  //
+  // A merged row asks its own account through `capabilityFor`, because a row
+  // is not the open message.
+  readonly property bool canArchive: !reader || reader.canArchive
+  readonly property bool canReportSpam: !reader || reader.canReportSpam
+  readonly property bool canStar: !reader || reader.canStar
   readonly property bool hasLabels: !current || current.hasLabels
-  readonly property bool canOpenOnWeb: !current || current.canOpenOnWeb
-  readonly property bool canSend: !current || current.canSend
+  readonly property bool canOpenOnWeb: !reader || reader.canOpenOnWeb
+  readonly property bool canSend: !composeHost || composeHost.canSend
+
+  // One row's own account's answer, for a list whose rows come from several.
+  // The row buttons used to take `current`'s, so every merged row drew an
+  // archive button whether or not the account behind it has one.
+  function capabilityFor(key, name) {
+    var host = hostForMessage(key)
+    if (!host) return true
+    if (name === "archive") return host.canArchive
+    if (name === "star") return host.canStar
+    if (name === "spam") return host.canReportSpam
+    if (name === "openOnWeb") return host.canOpenOnWeb
+    return true
+  }
   readonly property string mailboxKey: current ? current.mailboxKey : "inbox"
   readonly property string searchQuery: current ? current.searchQuery : ""
   readonly property string rawQuery: current ? current.rawQuery : ""
@@ -628,6 +682,10 @@ Item {
   readonly property var reader: root.unified ? (readerHost || current) : current
 
   readonly property string selectedId: reader ? reader.selectedId : ""
+  // The open message as one addressable row, which is what the list compares
+  // against and what the reader hands back to an action.
+  readonly property string selectedKey: reader
+    ? Model.messageKey(reader.selectedId, reader.accountId) : ""
   readonly property var selectedMessage: reader ? reader.selectedMessage : null
   readonly property var selectedBody: reader ? reader.selectedBody : ({ text: "", source: "" })
   readonly property string selectedHtml: reader ? reader.selectedHtml : ""
@@ -684,8 +742,8 @@ Item {
   // selection in every other one: two accounts each holding an open message
   // would otherwise both answer, and the reader would show whichever property
   // resolved first.
-  function select(id) {
-    var host = hostForMessage(id)
+  function select(key) {
+    var host = hostForMessage(key)
     if (!host) return
     if (root.unified) {
       for (var i = 0; i < accountHosts.count; i++) {
@@ -694,7 +752,7 @@ Item {
       }
       readerHost = host
     }
-    host.select(id)
+    host.select(Model.keyId(key))
   }
 
   function clearSelection() {
@@ -727,9 +785,9 @@ Item {
   // merged one, and asking the account on screen would have walked only its
   // own messages — j and k stopped at the end of whichever mailbox the cursor
   // started in rather than carrying on into the next.
-  function cursorOffset(cursorId, delta) {
-    if (root.unified) return Model.cursorAfterOffset(root.messages, cursorId, delta)
-    return current ? current.cursorOffset(cursorId, delta) : ""
+  function cursorOffset(cursorKey, delta) {
+    if (root.unified) return Model.cursorAfterOffset(root.messages, cursorKey, delta)
+    return current ? current.cursorOffset(cursorKey, delta) : ""
   }
   // While unified every mailbox moves together, or the merged list would be
   // one account's Inbox beside another's Unread.
@@ -747,13 +805,13 @@ Item {
   function search(text) { if (current) current.search(text) }
   function selectLabel(name) { if (current) current.selectLabel(name) }
   // Every action names a message, so every action can find its own mailbox.
-  function act(id, action, quiet) {
-    var host = hostForMessage(id)
-    if (host) host.act(id, action, quiet)
+  function act(key, action, quiet) {
+    var host = hostForMessage(key)
+    if (host) host.act(Model.keyId(key), action, quiet)
   }
-  function toggleStar(id) {
-    var host = hostForMessage(id)
-    if (host) host.toggleStar(id)
+  function toggleStar(key) {
+    var host = hostForMessage(key)
+    if (host) host.toggleStar(Model.keyId(key))
   }
   function markAllRead() {
     if (!root.unified) {
@@ -765,9 +823,9 @@ Item {
       if (host) host.markAllRead()
     }
   }
-  function send(fields) { if (current) current.send(fields) }
+  function send(fields) { if (composeHost) composeHost.send(fields) }
   function preferredSendAs(recipients) {
-    return current ? current.preferredSendAs(recipients) : null
+    return composeHost ? composeHost.preferredSendAs(recipients) : null
   }
   function signIn() { if (current) current.signIn() }
   function cancelSignIn() { if (current) current.cancelSignIn() }
@@ -808,7 +866,10 @@ Item {
     }
     return -1
   }
-  function openInBrowser(id) { if (current) current.openInBrowser(id) }
+  function openInBrowser(key) {
+    var host = hostForMessage(key)
+    if (host) host.openInBrowser(Model.keyId(key))
+  }
   function openWebInbox() { if (current) current.openWebInbox() }
   function openCloudConsole() { if (current) current.openCloudConsole() }
   function openGmailApiPage() { if (current) current.openGmailApiPage() }
@@ -857,6 +918,10 @@ Item {
       // only the first one may claim it.
       mayAdoptLegacyToken: index === 0 && (!entry || entry.provider === "gmail")
       settings: root.settings
+      // One binding rather than a value pushed in from wherever somebody
+      // remembered to. It is false for a host that is not on screen, which is
+      // what nothing used to say.
+      windowOpen: root.windowOpen && (root.unified || root.current === this)
       // Every mailbox obeys the one answer: it is about what the reader is
       // willing to tell a sender, not about which account the mail came to.
       alwaysShowImages: root.alwaysShowImages
