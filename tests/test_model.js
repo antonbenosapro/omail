@@ -403,6 +403,113 @@ const untagged = [{ id: "7:INBOX", subject: "old cache" }]
 assert.strictEqual(model.indexById(untagged, "7:INBOX", "imap:a@example.org"), 0)
 assert.strictEqual(model.removeById(untagged, "7:INBOX", "imap:a@example.org").length, 0)
 
+// -------------------------------------------------------- rebuilding a list
+//
+// `messages` is a plain array bound to a Repeater, so a new array identity
+// destroys and recreates every delegate — about twenty-seven objects a row,
+// three of them Canvas icons and three tooltip Popups. A poll that found
+// nothing new was rebuilding the whole list anyway, once per account per
+// refresh, and in a merged view that is N times over.
+
+function summaryRow(over) {
+  const base = {
+    id: "5:INBOX", accountId: "a", subject: "Hello", snippet: "there",
+    date: new Date("2026-09-01T10:00:00Z"), unread: true, starred: false,
+    from: { email: "sender@example.org", displayName: "Sender" },
+    labelIds: ["INBOX", "UNREAD"]
+  }
+  const out = {}
+  for (const key in base) out[key] = base[key]
+  for (const key in (over || {})) out[key] = over[key]
+  return out
+}
+
+// The everyday case: the same message fetched again, as a different object.
+assert.strictEqual(model.sameList([summaryRow()], [summaryRow()]), true,
+  "a re-fetched but unchanged list is not worth assigning")
+
+// Anything a row draws, or anything that decides where it belongs.
+assert.strictEqual(model.sameList([summaryRow()], [summaryRow({ unread: false })]), false)
+assert.strictEqual(model.sameList([summaryRow()], [summaryRow({ starred: true })]), false)
+assert.strictEqual(model.sameList([summaryRow()], [summaryRow({ subject: "Other" })]), false)
+assert.strictEqual(model.sameList([summaryRow()], [summaryRow({ snippet: "else" })]), false)
+assert.strictEqual(model.sameList([summaryRow()],
+  [summaryRow({ date: new Date("2026-09-02T10:00:00Z") })]), false)
+assert.strictEqual(model.sameList([summaryRow()], [summaryRow({ accountId: "b" })]), false)
+assert.strictEqual(model.sameList([summaryRow()],
+  [summaryRow({ from: { email: "other@example.org", displayName: "Sender" } })]), false,
+  "a different sender is a different row even under the same name")
+assert.strictEqual(model.sameList([summaryRow()],
+  [summaryRow({ labelIds: ["INBOX"] })]), false,
+  "the labels decide whether an action leaves the row in this mailbox")
+
+// What a row does not draw does not count. `time` and `fullTime` are derived
+// from `date`, and every load recomputes them against a fresh `now`.
+assert.strictEqual(model.sameList([summaryRow({ time: "2h" })],
+  [summaryRow({ time: "3h" })]), true)
+assert.strictEqual(model.sameList([summaryRow({ sizeEstimate: 100 })],
+  [summaryRow({ sizeEstimate: 200 })]), true)
+
+// Length and order both count.
+assert.strictEqual(model.sameList([summaryRow()], []), false)
+assert.strictEqual(model.sameList(
+  [summaryRow({ id: "1:INBOX" }), summaryRow({ id: "2:INBOX" })],
+  [summaryRow({ id: "2:INBOX" }), summaryRow({ id: "1:INBOX" })]), false)
+assert.strictEqual(model.sameList([], []), true)
+assert.strictEqual(model.sameList(null, undefined), true)
+
+// The date is a Date, and every load builds a fresh one out of a fresh
+// payload, so two of them are never `===`. This is the assertion that keeps
+// the comparison from being inert: an `instanceof Date` check would be false
+// here — the vm context these tests run the module in has its own Date — and
+// would report every list as changed while looking correct.
+assert.strictEqual(model.sameRow(
+  summaryRow({ date: new Date("2026-09-01T10:00:00Z") }),
+  summaryRow({ date: new Date("2026-09-01T10:00:00Z") })), true,
+  "two Dates for one instant are the same date")
+assert.strictEqual(model.sameRow(
+  summaryRow({ date: new Date("bad") }),
+  summaryRow({ date: new Date("also bad") })), true,
+  "and two invalid dates are the same absence of one")
+assert.strictEqual(model.sameRow(
+  summaryRow({ date: new Date("2026-09-01T10:00:00Z") }),
+  summaryRow({ date: null })), false)
+
+// A hydrated cache row has fewer fields than one off the wire. Absent on both
+// sides is the same, so a cache-painted list is not rebuilt by the live answer
+// purely for having been hydrated.
+assert.strictEqual(model.sameRow({ id: "1", accountId: "a" },
+  { id: "1", accountId: "a", starred: undefined }), true)
+
+// -------------------------------------------------------------- the seam
+//
+// IMAP has no page token: it re-runs the whole SEARCH and slices
+// `[offset, offset + limit]`. A message arriving between two pages pushes the
+// boundary down, so the first row of the new page is the last row of the old
+// one — and nothing deduplicated it. In a merged list there is one seam per
+// account.
+{
+  const loaded = [summaryRow({ id: "9:INBOX" }), summaryRow({ id: "8:INBOX" })]
+  const page = [summaryRow({ id: "8:INBOX" }), summaryRow({ id: "7:INBOX" })]
+  deepEqual(model.appendPage(loaded, page).map(function(m) { return m.id }),
+    ["9:INBOX", "8:INBOX", "7:INBOX"], "the seam row appears once")
+
+  // Deduplicated on the pair, not the id: the same UID under another account
+  // is a different message and belongs in the list.
+  const mixed = model.appendPage(
+    [summaryRow({ id: "5:INBOX", accountId: "a" })],
+    [summaryRow({ id: "5:INBOX", accountId: "b" })])
+  assert.strictEqual(mixed.length, 2,
+    "one id under two accounts is two messages")
+
+  // A page that repeats itself entirely adds nothing.
+  const same = [summaryRow({ id: "9:INBOX" })]
+  assert.strictEqual(model.appendPage(same, same).length, 1)
+  deepEqual(model.appendPage([], page).map(function(m) { return m.id }),
+    ["8:INBOX", "7:INBOX"])
+  assert.strictEqual(model.appendPage(null, null).length, 0)
+}
+
 // ------------------------------------------------------- opening a message
 //
 // A cached open used to do the whole fetch anyway and paint nothing early:
@@ -593,21 +700,24 @@ const again = tied.slice().reverse().sort(model.byReceivedDescending).map(functi
 deepEqual(first, again, "the same rows sort the same way whatever order they arrive in")
 
 // A page fetched while the server was throttling can arrive with content and
-// no INTERNALDATE. Such a row must not collapse to the bottom of the list:
-// half of a real cached page was dateless, and calling every one of them equal
-// put them all below a week of older mail. Within one mailbox the UID rises
-// with arrival, so it stands in for the date.
+// no INTERNALDATE. One rule for those rows: after every dated one, then by
+// arrival number, then by account.
+//
+// The rule they used to follow was two rules — placed by UID against a dated
+// row of the same account, and "dated leads" against a dated row of another —
+// and those cycle. The list is ordered by when mail arrived, and a row with no
+// arrival time has no position in that order to claim, so it goes last. It is
+// rare and self-correcting: the next load brings the date.
 const patchy = [
   { id: "11994:INBOX", accountId: "a", date: null },
   { id: "11995:INBOX", accountId: "a", date: new Date("2026-09-02T15:01:57Z") },
   { id: "12000:INBOX", accountId: "a", date: null }
 ]
 deepEqual(patchy.slice().sort(model.byReceivedDescending).map(function(m) { return m.id }),
-  ["12000:INBOX", "11995:INBOX", "11994:INBOX"],
-  "an undated row sits where its arrival number puts it")
+  ["11995:INBOX", "12000:INBOX", "11994:INBOX"],
+  "dated rows lead, and undated ones follow by arrival number")
 
-// Across mailboxes there is nothing to compare an undated row against, so the
-// row whose position can actually be verified leads.
+// The same across mailboxes, by the same rule rather than a second one.
 const across = [
   { id: "12000:INBOX", accountId: "a", date: null },
   { id: "50:INBOX", accountId: "b", date: new Date("2026-09-03T09:00:00Z") }
@@ -622,6 +732,101 @@ const blind = [
 ]
 deepEqual(blind.slice().sort(model.byReceivedDescending).map(function(m) { return m.id }),
   ["9:INBOX", "8:INBOX", "7:INBOX"])
+
+// Undated rows from two mailboxes break their tie on the account, so the order
+// is total rather than merely consistent within one.
+const blindAcross = [
+  { id: "9:INBOX", accountId: "b", date: null },
+  { id: "9:INBOX", accountId: "a", date: null }
+]
+deepEqual(blindAcross.slice().sort(model.byReceivedDescending)
+  .map(function(m) { return m.accountId }), ["a", "b"])
+
+// ------------------------------------------------------- a total order
+//
+// The comparator has to be a total order, not nearly one. Array.prototype.sort
+// is free to produce anything at all from an inconsistent comparator, and the
+// merged list reshuffled between relayouts with rows moving under the pointer.
+//
+// The case that broke it: A dated uid 5 and B undated uid 10 in one account,
+// C dated in another. B beat A by arrival, A tie-broke against C by date, and
+// C beat B because "the dated one leads" — a cycle. Sorting those three from
+// all six permutations gave three different orders.
+
+function permutations(list) {
+  if (list.length <= 1) return [list.slice()]
+  const out = []
+  for (let i = 0; i < list.length; i++) {
+    const rest = list.slice(0, i).concat(list.slice(i + 1))
+    const inner = permutations(rest)
+    for (let j = 0; j < inner.length; j++) out.push([list[i]].concat(inner[j]))
+  }
+  return out
+}
+
+function assertTotalOrder(rows, label) {
+  const compare = model.byReceivedDescending
+
+  // Antisymmetric, and reflexive on a row against itself.
+  for (let i = 0; i < rows.length; i++) {
+    assert.strictEqual(compare(rows[i], rows[i]), 0,
+      label + ": a row compared with itself is equal")
+    for (let j = 0; j < rows.length; j++) {
+      const forward = compare(rows[i], rows[j])
+      const back = compare(rows[j], rows[i])
+      assert.ok((forward < 0 && back > 0) || (forward > 0 && back < 0)
+        || (forward === 0 && back === 0),
+        label + ": " + rows[i].id + "/" + rows[i].accountId + " against "
+          + rows[j].id + "/" + rows[j].accountId + " disagrees when reversed")
+    }
+  }
+
+  // Transitive: a before b and b before c means a before c, for every triple.
+  for (let i = 0; i < rows.length; i++) {
+    for (let j = 0; j < rows.length; j++) {
+      for (let k = 0; k < rows.length; k++) {
+        if (compare(rows[i], rows[j]) <= 0 && compare(rows[j], rows[k]) <= 0) {
+          assert.ok(compare(rows[i], rows[k]) <= 0,
+            label + ": " + rows[i].id + " <= " + rows[j].id + " <= " + rows[k].id
+              + " but not " + rows[i].id + " <= " + rows[k].id)
+        }
+      }
+    }
+  }
+
+  // And the observable consequence: every permutation sorts to one answer.
+  const orders = {}
+  const all = permutations(rows)
+  for (let i = 0; i < all.length; i++) {
+    const key = all[i].slice().sort(compare)
+      .map(function(m) { return m.accountId + "/" + m.id }).join(",")
+    orders[key] = true
+  }
+  assert.strictEqual(Object.keys(orders).length, 1,
+    label + ": " + all.length + " permutations gave "
+      + Object.keys(orders).length + " different orders")
+}
+
+// The three rows from the report, verbatim.
+assertTotalOrder([
+  { id: "5:INBOX", accountId: "a", date: new Date("2026-09-01T10:00:00Z") },
+  { id: "10:INBOX", accountId: "a", date: null },
+  { id: "3:INBOX", accountId: "b", date: new Date("2026-09-02T10:00:00Z") }
+], "the reported cycle")
+
+// Every shape that reaches the comparator at once: dated and undated, two
+// accounts, a shared timestamp, a shared id across accounts, an id with no
+// leading number, and a row with no account at all.
+assertTotalOrder([
+  { id: "5:INBOX", accountId: "a", date: new Date("2026-09-01T10:00:00Z") },
+  { id: "5:INBOX", accountId: "b", date: new Date("2026-09-01T10:00:00Z") },
+  { id: "10:INBOX", accountId: "a", date: null },
+  { id: "10:INBOX", accountId: "b", date: null },
+  { id: "3:INBOX", accountId: "b", date: new Date("2026-09-02T10:00:00Z") },
+  { id: "18f2c:", accountId: "c", date: null },
+  { id: "7:INBOX", accountId: "", date: null },
+  { id: "7:INBOX", accountId: "a", date: new Date("2026-09-01T10:00:00Z") }
+], "every shape at once")
 
 // Only Inbox and Unread are merged: they are the two every provider maps the
 // same way.

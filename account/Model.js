@@ -208,12 +208,28 @@ function isUnifiedMailbox(key) {
 // from IMAP's INTERNALDATE and Gmail's internalDate, not from the sender's
 // own Date header, which is sender-controlled and can be wrong by days.
 //
-// A summary with no date does not sort to the bottom. A page fetched while a
+// An undated row sorts after every dated one, and undated rows sort among
+// themselves by arrival number and then by account. A page fetched while a
 // server was throttling can arrive with content and no INTERNALDATE, and a
 // comparator that called every such row equal collapsed half a list out of
-// order. The numeric part of the id is the fallback: an IMAP UID rises with
-// arrival within a folder, so it orders those rows among themselves the same
-// way the date would have.
+// order — the numeric part of the id is the fallback, because an IMAP UID
+// rises with arrival within a folder.
+//
+// One rule for undated rows, not two. The previous comparator had them placed
+// by UID against a dated row of the same account and "dated leads" against a
+// dated row of another, and those two rules cycle: with A dated uid 5, B
+// undated uid 10 in the same account, and C dated in another account, B beats
+// A, A ties-breaks against C, and C beats B — so the same three rows sorted
+// from six permutations gave three different orders. A comparator that is not
+// a total order is not merely untidy: Array.prototype.sort is free to produce
+// anything at all from one, and the merged list reshuffled between relayouts
+// with rows moving under the pointer.
+//
+// The cost of the single rule is that an undated row lands at the end rather
+// than near where its UID says it belongs. That is the honest place for it:
+// the list is ordered by when mail arrived, and a row with no arrival time has
+// no position in that order to claim. It is also rare — a throttled page — and
+// self-correcting, because the next load brings the date.
 //
 // Ties break on account and then id so the order is total. Two messages
 // sharing a timestamp must not swap places between relayouts, or a row moves
@@ -233,25 +249,18 @@ function arrivalRank(summary) {
 function byReceivedDescending(a, b) {
   var left = receivedRank(a)
   var right = receivedRank(b)
-  // Both dated, or both undated: compare like with like.
-  if (left > 0 && right > 0 && left !== right) return right - left
-  if ((left > 0) !== (right > 0)) {
-    // One is dated and the other is not. The undated one is placed by its
-    // arrival number against the other's, so it lands near where it belongs
-    // rather than at the end of the list.
-    var known = left > 0 ? a : b
-    var unknown = left > 0 ? b : a
-    var sameAccount = String((known && known.accountId) || "")
-      === String((unknown && unknown.accountId) || "")
-    if (sameAccount) {
-      var byArrival = arrivalRank(b) - arrivalRank(a)
-      if (byArrival !== 0) return byArrival
-    } else {
-      // Nothing comparable across two mailboxes, so the dated one leads: it
-      // is the row whose position the user can actually verify.
-      return left > 0 ? -1 : 1
-    }
-  } else if (left === 0 && right === 0) {
+
+  // Dated before undated, always. This is the one rule, and having only one is
+  // what makes the order total.
+  if ((left > 0) !== (right > 0)) return left > 0 ? -1 : 1
+
+  // Both dated: newest first.
+  if (left > 0 && left !== right) return right - left
+
+  // Both undated: by arrival number, which within one account is the order the
+  // dates would have given. Across accounts it compares nothing meaningful,
+  // but it is consistent, and the account tie-break below settles the rest.
+  if (left === 0) {
     var undated = arrivalRank(b) - arrivalRank(a)
     if (undated !== 0) return undated
   }
@@ -259,7 +268,119 @@ function byReceivedDescending(a, b) {
   var leftAccount = String((a && a.accountId) || "")
   var rightAccount = String((b && b.accountId) || "")
   if (leftAccount !== rightAccount) return leftAccount < rightAccount ? -1 : 1
-  return String((a && a.id) || "") < String((b && b.id) || "") ? -1 : 1
+  var leftId = String((a && a.id) || "")
+  var rightId = String((b && b.id) || "")
+  if (leftId === rightId) return 0
+  return leftId < rightId ? -1 : 1
+}
+
+// --------------------------------------------------------- rebuilding a list
+//
+// Whether a new page of summaries is worth assigning over the list that is on
+// screen. `messages` is a plain JS array bound to a `Repeater`, so a new array
+// identity destroys and recreates every delegate — and a `MessageRow` is about
+// twenty-seven objects including three Canvas icons and three tooltip Popups.
+// A poll that found nothing new was rebuilding the whole list anyway, several
+// times per cycle and once per account in a merged view.
+//
+// Compared field by field, over what a row draws plus what decides where a row
+// belongs. Comparing the objects by identity would answer "changed" every
+// time, because each load builds fresh summaries out of fresh payloads.
+//
+// `subject`, `snippet`, `unread` and `starred` are drawn; `from` is drawn
+// through its display name and address; `date` is what `time` is derived from
+// and what the merged order sorts on; `id` and `accountId` are the row's
+// identity; `labelIds` is what decides whether an action leaves the row in
+// this mailbox. Nothing else in a summary reaches the list.
+var ROW_FIELDS = ["id", "accountId", "subject", "snippet", "date",
+  "unread", "starred"]
+
+function sameRow(a, b) {
+  if (!a || !b) return a === b
+  for (var i = 0; i < ROW_FIELDS.length; i++) {
+    var field = ROW_FIELDS[i]
+    if (!sameField(a[field], b[field])) return false
+  }
+  if (!sameParty(a.from, b.from)) return false
+  return sameLabels(a.labelIds, b.labelIds)
+}
+
+// `date` is a Date, and every load builds a fresh one out of a fresh payload —
+// two Dates for one instant are never `===`. Comparing them by identity made
+// every list differ from itself, which would have left the whole comparison
+// inert while looking like it worked.
+function sameField(left, right) {
+  if (left === right) return true
+  // Both absent counts as the same: a summary hydrated from an older cache
+  // simply has fewer fields than one off the wire.
+  var leftEmpty = left === undefined || left === null
+  var rightEmpty = right === undefined || right === null
+  if (leftEmpty || rightEmpty) return leftEmpty && rightEmpty
+  // Duck-typed rather than `instanceof Date`, which is per-realm: the node
+  // tests build their dates outside the vm context the module runs in, so
+  // `instanceof` is false there and the comparison would be exercised by
+  // nothing while looking correct in the shell.
+  if (isDateLike(left) && isDateLike(right)) {
+    var leftAt = Number(left)
+    var rightAt = Number(right)
+    // An invalid date is NaN, which is not equal to itself. Two of them are
+    // the same absence of a date.
+    if (!isFinite(leftAt) && !isFinite(rightAt)) return true
+    return leftAt === rightAt
+  }
+  return false
+}
+
+function isDateLike(value) {
+  return !!value && typeof value.getTime === "function"
+}
+
+function sameLabels(a, b) {
+  var left = Array.isArray(a) ? a : []
+  var right = Array.isArray(b) ? b : []
+  if (left.length !== right.length) return false
+  for (var i = 0; i < left.length; i++) {
+    if (String(left[i]) !== String(right[i])) return false
+  }
+  return true
+}
+
+function sameParty(a, b) {
+  var leftEmail = String((a && a.email) || "")
+  var rightEmail = String((b && b.email) || "")
+  if (leftEmail !== rightEmail) return false
+  return String((a && a.displayName) || "") === String((b && b.displayName) || "")
+}
+
+function sameList(a, b) {
+  var left = Array.isArray(a) ? a : []
+  var right = Array.isArray(b) ? b : []
+  if (left.length !== right.length) return false
+  for (var i = 0; i < left.length; i++) {
+    if (!sameRow(left[i], right[i])) return false
+  }
+  return true
+}
+
+// A page appended to the list it already holds, with the seam row dropped.
+//
+// IMAP has no page token: it re-runs the whole SEARCH and slices
+// `[offset, offset + limit]`, so a message that arrives between two pages
+// pushes the boundary down and the first row of the new page is the last row
+// of the old one. Gmail's own token is stable, but a retried page is not.
+// Nothing deduplicated, so the seam row appeared twice — and in a merged list
+// there is one seam per account.
+function appendPage(current, page) {
+  var existing = Array.isArray(current) ? current : []
+  var added = Array.isArray(page) ? page : []
+  var out = existing.slice()
+  for (var i = 0; i < added.length; i++) {
+    var summary = added[i]
+    if (!summary) continue
+    if (indexById(out, summary.id, summary.accountId) >= 0) continue
+    out.push(summary)
+  }
+  return out
 }
 
 // ------------------------------------------------------- opening a message

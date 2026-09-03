@@ -458,7 +458,14 @@ Item {
 
   // Paints whatever the last visit to this query left behind. Switching
   // mailboxes should never show an empty column while the network decides.
+  //
+  // Only when there is nothing on screen. A refresh of a list already loaded
+  // used to paint the cache over it and then paint the live answer over that,
+  // so every poll rebuilt the whole list twice from rows that were usually
+  // identical — and the cache's copy is by definition older than what it was
+  // replacing.
   function paintFromCache() {
+    if (listLoaded) return true
     if (!cacheStore.loaded) return false
     var entry = cacheStore.get(cacheKey)
     if (!entry || !entry.summaries || entry.summaries.length === 0) return false
@@ -588,7 +595,10 @@ Item {
 
   function applySummaries(rawSummaries, append) {
     var summaries = tagOwnership(rawSummaries)
-    var merged = append ? root.messages.concat(summaries) : summaries
+    // Appended with the seam row dropped. IMAP re-runs the whole SEARCH and
+    // slices it, so a message arriving between two pages pushes the boundary
+    // down and the first row of the new page is the last row of the old one.
+    var merged = append ? Model.appendPage(root.messages, summaries) : summaries
     var arrivals = append ? [] : Model.newArrivals(summaries, seenIds, notificationsPrimed)
 
     var seen = {}
@@ -599,7 +609,12 @@ Item {
     seenIds = seen
     notificationsPrimed = true
 
-    messages = merged
+    // Assigned only when something a row draws actually differs. `messages` is
+    // a plain array bound to a Repeater, so a new array identity destroys and
+    // recreates every delegate — twenty-seven objects a row, three of them
+    // Canvas icons and three tooltip Popups — and a poll that found nothing
+    // new was doing exactly that, once per account per refresh.
+    if (!Model.sameList(root.messages, merged)) messages = merged
     listLoaded = true
     lastError = ""
     lastSyncedMs = Date.now()
