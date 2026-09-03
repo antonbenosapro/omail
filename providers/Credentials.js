@@ -364,6 +364,14 @@ function legacyKeyringAttributes(clientId) {
 // are two entries rather than one overwriting the other.
 var IMAP_KEYRING_KIND = "imap-password"
 
+// An account that has not learned its address yet keys on the placeholder,
+// which every unnamed account shares. A password written there is not this
+// mailbox's password once it has a name, so the callers that store one have to
+// be able to tell the two apart.
+function isUnnamedAccount(accountId) {
+  return (accountKey(accountId) || UNNAMED_ACCOUNT) === UNNAMED_ACCOUNT
+}
+
 function imapKeyringAttributes(accountId) {
   var id = accountKey(accountId)
   // As above: an empty attribute value is a wildcard to secret-tool, which

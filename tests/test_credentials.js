@@ -298,4 +298,29 @@ deepEqual(credentials.accountIds(damaged), ["three@work.com"])
     "nothing configured stays nothing")
 }
 
+// An IMAP account is added with an empty address and only learns its id from
+// the profile read that signing in makes possible. So there is a moment where
+// it has a password and no name, and a password written then goes to the
+// placeholder every unnamed account shares — where the mailbox will never read
+// it back. The callers that store one have to be able to tell that moment.
+{
+  assert.strictEqual(credentials.isUnnamedAccount(""), true,
+    "an account with no address yet is unnamed")
+  assert.strictEqual(credentials.isUnnamedAccount("   "), true,
+    "and whitespace is no address either")
+  assert.strictEqual(credentials.isUnnamedAccount("imap:jon@example.com"), false,
+    "an account with an address is named")
+  assert.strictEqual(credentials.isUnnamedAccount("default"), true,
+    "the placeholder itself is not a name")
+
+  // Two unnamed accounts key on the same entry, which is the whole reason a
+  // password cannot be left there.
+  assert.deepStrictEqual(credentials.imapKeyringAttributes(""),
+    credentials.imapKeyringAttributes("  "),
+    "every unnamed account shares one keyring entry")
+  assert.notDeepStrictEqual(credentials.imapKeyringAttributes(""),
+    credentials.imapKeyringAttributes("imap:jon@example.com"),
+    "a named account keys on its own")
+}
+
 console.log("test_credentials.js ok")
