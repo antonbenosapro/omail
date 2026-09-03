@@ -230,6 +230,12 @@ Item {
       return
     }
     pendingComposeMode = ""
+    // The draft is told which mailbox it is written from before it is filled
+    // in, because filling it in already needs that account's address: an
+    // answer goes out through the account that received the message being
+    // answered, and reply-all strips that address rather than the one on
+    // screen. A new message has no parent and stays with the current mailbox.
+    service.beginComposeFor(next === "new" ? "" : service.selectedKey)
     compose.begin(next, service.selectedMessage, service.selectedBody.text)
   }
 
@@ -255,6 +261,7 @@ Item {
   function leaveCompose() {
     var from = composeReturnView
     composeReturnView = ""
+    if (service) service.endCompose()
     if (from === "list" && currentView === "reader") backToList()
   }
 

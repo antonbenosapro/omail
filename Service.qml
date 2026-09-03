@@ -417,8 +417,11 @@ Item {
     alwaysShowImages = next
     saveWindowPrefs()
     // The message on screen is the one the answer was given about, so it
-    // answers now rather than at the next message.
-    if (next && current) current.showRemoteImages()
+    // answers now rather than at the next message — and the message on screen
+    // belongs to `reader`, which while unified is not `current`. Telling
+    // `current` left the message the notice was shown over still blocking its
+    // images, so the button appeared to do nothing.
+    if (next && reader) reader.showRemoteImages()
   }
   signal duplicateAccount(string email)
 
@@ -501,7 +504,36 @@ Item {
   readonly property var auth: current ? current.auth : null
   readonly property bool ready: !!current && current.ready
   readonly property string accountEmail: current ? current.accountEmail : ""
-  readonly property var sendAsAliases: current ? current.availableSendAsAliases : []
+
+  // The mailbox a draft is being written from. An answer goes out through the
+  // account that received what is being answered — otherwise, in a merged
+  // list, replying to a message in B sent from A's address over A's SMTP,
+  // landed in A's Sent, and reply-all stripped A's address from the recipients
+  // rather than B's. `composeOwner` is that account for a reply or a forward
+  // and empty for a new message, which has no parent and belongs to whichever
+  // mailbox is on screen.
+  property string composeOwner: ""
+  readonly property var composeHost: {
+    if (root.composeOwner === "") return current
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (host && host.accountId === root.composeOwner) return host
+    }
+    return current
+  }
+
+  // Called when a draft opens. A key names the message being answered, and an
+  // empty one is a new message.
+  function beginComposeFor(key) {
+    var text = String(key || "")
+    root.composeOwner = text === "" ? "" : Model.keyAccountId(text)
+  }
+  function endCompose() { root.composeOwner = "" }
+
+  // The address a draft signs with, and the aliases it may choose from: both
+  // the drafting account's, not the one on screen.
+  readonly property string composeEmail: composeHost ? composeHost.accountEmail : ""
+  readonly property var sendAsAliases: composeHost ? composeHost.availableSendAsAliases : []
   readonly property string accountAddress: {
     var accounts = accountList ? accountList.accounts : []
     var index = activeIndex >= 0 ? activeIndex : indexOfActiveAccount()
@@ -590,12 +622,34 @@ Item {
     }
     return out
   }
-  readonly property bool canArchive: !current || current.canArchive
-  readonly property bool canReportSpam: !current || current.canReportSpam
-  readonly property bool canStar: !current || current.canStar
+  // What the *open* message's account can be asked to do. A capability the
+  // provider does not declare is a button the panel does not draw, and these
+  // read from `reader` rather than `current` because in a merged list the two
+  // are different accounts: with a Gmail account on screen and an IMAP message
+  // open, the reader drew Archive, Report spam and Open in browser per Gmail's
+  // capabilities and the browser button aimed a Gmail URL at an IMAP id.
+  //
+  // A merged row asks its own account through `capabilityFor`, because a row
+  // is not the open message.
+  readonly property bool canArchive: !reader || reader.canArchive
+  readonly property bool canReportSpam: !reader || reader.canReportSpam
+  readonly property bool canStar: !reader || reader.canStar
   readonly property bool hasLabels: !current || current.hasLabels
-  readonly property bool canOpenOnWeb: !current || current.canOpenOnWeb
-  readonly property bool canSend: !current || current.canSend
+  readonly property bool canOpenOnWeb: !reader || reader.canOpenOnWeb
+  readonly property bool canSend: !composeHost || composeHost.canSend
+
+  // One row's own account's answer, for a list whose rows come from several.
+  // The row buttons used to take `current`'s, so every merged row drew an
+  // archive button whether or not the account behind it has one.
+  function capabilityFor(key, name) {
+    var host = hostForMessage(key)
+    if (!host) return true
+    if (name === "archive") return host.canArchive
+    if (name === "star") return host.canStar
+    if (name === "spam") return host.canReportSpam
+    if (name === "openOnWeb") return host.canOpenOnWeb
+    return true
+  }
   readonly property string mailboxKey: current ? current.mailboxKey : "inbox"
   readonly property string searchQuery: current ? current.searchQuery : ""
   readonly property string rawQuery: current ? current.rawQuery : ""
@@ -779,9 +833,9 @@ Item {
       if (host) host.markAllRead()
     }
   }
-  function send(fields) { if (current) current.send(fields) }
+  function send(fields) { if (composeHost) composeHost.send(fields) }
   function preferredSendAs(recipients) {
-    return current ? current.preferredSendAs(recipients) : null
+    return composeHost ? composeHost.preferredSendAs(recipients) : null
   }
   function signIn() { if (current) current.signIn() }
   function cancelSignIn() { if (current) current.cancelSignIn() }

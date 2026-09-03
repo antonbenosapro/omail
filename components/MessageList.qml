@@ -69,7 +69,11 @@ Column {
       // draw as the cursor and as the open message.
       hasCursor: Model.keyMatches(root.cursorKey, modelData)
       selected: Model.keyMatches(root.service.selectedKey, modelData)
-      canArchive: root.service.canArchive
+      // The row's own account's answer. Taking `current`'s drew an archive
+      // button on every merged row whether or not the account behind it has
+      // one — and a button that fails after the row has already moved is
+      // worse than one that was never offered.
+      canArchive: root.service.capabilityFor(Model.rowKey(modelData), "archive")
       onActivated: root.messageActivated(Model.rowKey(modelData))
       onStarToggled: root.service.toggleStar(Model.rowKey(modelData))
       onArchiveRequested: root.service.act(Model.rowKey(modelData), "archive")
