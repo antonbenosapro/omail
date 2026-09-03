@@ -495,14 +495,29 @@ Item {
           // \Deleted message in the folder, including ones another client
           // marked — somebody else's mail disappearing because this one
           // archived.
+          //
+          // The fallback needs UIDPLUS as much as it needs the absence of
+          // MOVE, because `UID EXPUNGE` is UIDPLUS's command. Without it the
+          // sequence gets as far as marking the message \Deleted and stops:
+          // the mail is still on the server, invisible to a client that hides
+          // deleted messages, and the panel had already moved the row. A
+          // server with neither is a server this cannot archive, and saying so
+          // is the only honest answer — a capability the provider does not
+          // have is not a button it should complete.
           if (Imap.hasCapability(root.serverCapabilities, "MOVE")) {
             commands = commands.concat([Imap.moveCommand(group.uids, plan.move)])
-          } else {
+          } else if (Imap.hasCapability(root.serverCapabilities, "UIDPLUS")) {
             commands = commands.concat([
               Imap.copyCommand(group.uids, plan.move),
               "UID STORE " + Imap.sequenceSet(group.uids) + " +FLAGS.SILENT (\\Deleted)",
               Imap.expungeCommand(group.uids)
             ])
+          } else {
+            if (!firstError)
+              firstError = "This server supports neither MOVE nor UIDPLUS, so a message cannot be moved without leaving a deleted copy behind"
+            remaining--
+            if (remaining === 0 && typeof callback === "function") callback(null, firstError)
+            return
           }
         }
 
