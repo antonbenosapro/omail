@@ -134,13 +134,19 @@ key. What matters while working:
   be tidied back into the rule by someone who only read the rule.
 - The mouse does not move the keyboard's cursor. Qt re-reports hover when
   content moves under a still pointer and the list scrolls to follow the
-  keyboard, so a hover that wrote `cursorId` pulled it back to whatever the
+  keyboard, so a hover that wrote `cursorKey` pulled it back to whatever the
   mouse was resting on and `j` went nowhere. A row draws its own hover.
-- The list cursor and the open message are two different things. `cursorId` is
-  where the keyboard is; `selectedId` is what the reader shows. Move the cursor
+- The list cursor and the open message are two different things. `cursorKey` is
+  where the keyboard is; `selectedKey` is what the reader shows. Move the cursor
   with `Model.cursorAfterOffset`, and bring the row on screen with
   `Model.contentYToReveal` — the list is a `Column`, so there is no
   `positionViewAtIndex`.
+- Both are **row keys**, not message ids: `Model.rowKey` joins the account id to
+  the message id, `Model.keyId` and `Model.keyAccountId` take them apart, and
+  `Model.keyMatches` is the one comparison a view makes. A bare id addresses no
+  row in a merged list — two IMAP accounts on one server each hold `5:INBOX` —
+  so every UI signal, every cursor function and `Service.hostForMessage` carry
+  the key. Passing the id alone is how an action landed on the wrong mailbox.
 
 ## Providers
 

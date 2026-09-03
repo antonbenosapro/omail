@@ -3,6 +3,7 @@ import QtQuick.Controls as QQC
 import qs.Commons
 import qs.Ui
 import "Menu.js" as Menu
+import "../account/Model.js" as Model
 
 // The list's right-click menu. It is a Popup rather than a child of the row
 // because the list scrolls inside a clipping Flickable, which would cut the
@@ -18,7 +19,11 @@ Item {
   required property color popupBorderColor
   required property string panelFontFamily
 
-  property string messageId: ""
+  // The row this menu was raised on, account and id together. Found by id
+  // alone it was the *first* row holding that id, so in a merged list the menu
+  // on the second of a colliding pair read the first one's starred and unread
+  // state and acted on the first one's message.
+  property string messageKey: ""
   property real anchorX: 0
   property real anchorY: 0
   property int cursorIndex: -1
@@ -26,22 +31,19 @@ Item {
     trashRow, spamRow, readRow, starRow, browserRow]
   readonly property bool opened: menu.opened
   readonly property var summary: {
-    if (!service || messageId === "") return null
-    var list = service.messages
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].id === messageId) return list[i]
-    }
-    return null
+    if (!service || messageKey === "") return null
+    var index = Model.indexByKey(service.messages, messageKey)
+    return index < 0 ? null : service.messages[index]
   }
 
-  signal composeRequested(string mode, string id)
-  signal actionRequested(string action, string id)
+  signal composeRequested(string mode, string key)
+  signal actionRequested(string action, string key)
 
   anchors.fill: parent
   z: 50
 
-  function openAt(id, sceneX, sceneY) {
-    root.messageId = String(id || "")
+  function openAt(key, sceneX, sceneY) {
+    root.messageKey = String(key || "")
     if (!root.summary) return
     var local = root.mapFromGlobal(sceneX, sceneY)
     anchorX = local.x
@@ -70,15 +72,15 @@ Item {
   function close() { menu.close() }
 
   function run(action) {
-    var id = root.messageId
+    var key = root.messageKey
     menu.close()
-    root.actionRequested(action, id)
+    root.actionRequested(action, key)
   }
 
   function compose(mode) {
-    var id = root.messageId
+    var key = root.messageKey
     menu.close()
-    root.composeRequested(mode, id)
+    root.composeRequested(mode, key)
   }
 
   QQC.Popup {
@@ -175,9 +177,9 @@ Item {
         text: "Open in browser..."
         tone: root.dimColor
         onActivated: {
-          var id = root.messageId
+          var key = root.messageKey
           menu.close()
-          if (root.service) root.service.openInBrowser(id)
+          if (root.service) root.service.openInBrowser(key)
         }
       }
     }

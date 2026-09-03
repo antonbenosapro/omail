@@ -4,7 +4,7 @@ import QtTest
 // Why hovering a row must not move the keyboard's cursor.
 //
 // Qt re-reports hover when content moves under a pointer that has not moved.
-// The list scrolls to follow the keyboard, so a hover that wrote `cursorId`
+// The list scrolls to follow the keyboard, so a hover that wrote `cursorKey`
 // handed it straight back to whatever the mouse was resting on: j moved the
 // cursor, the scroll brought a different row under the still pointer, and the
 // cursor snapped back. It looked like j and k sticking on a few rows.

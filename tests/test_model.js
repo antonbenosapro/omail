@@ -403,6 +403,133 @@ const untagged = [{ id: "7:INBOX", subject: "old cache" }]
 assert.strictEqual(model.indexById(untagged, "7:INBOX", "imap:a@example.org"), 0)
 assert.strictEqual(model.removeById(untagged, "7:INBOX", "imap:a@example.org").length, 0)
 
+// ---------------------------------------------------------------- row keys
+//
+// The address a view holds. The bug this replaces: `hostForMessage(id)` and
+// every cursor function took a bare id, so two IMAP accounts each holding
+// `5:INBOX` gave the first one every open, every action and the cursor itself
+// — and `j` could not walk past the duplicate, because moving from A's row
+// answered with an id whose first match was still A's row.
+
+const A = "imap:a@example.org"
+const B = "imap:b@example.org"
+
+function collidingRow(accountId, uid, date) {
+  return { id: uid + ":INBOX", accountId: accountId, date: date,
+    subject: accountId.slice(5, 6).toUpperCase() + "#" + uid }
+}
+
+// Five each, with overlapping UIDs 1..5 and interleaved arrival times, which
+// is the shape the two mailboxes on one server actually had.
+const hostA = [collidingRow(A, 5, 1000), collidingRow(A, 4, 800), collidingRow(A, 3, 600),
+  collidingRow(A, 2, 400), collidingRow(A, 1, 200)]
+const hostB = [collidingRow(B, 5, 900), collidingRow(B, 4, 700), collidingRow(B, 3, 500),
+  collidingRow(B, 2, 300), collidingRow(B, 1, 100)]
+const both = hostA.concat(hostB).slice().sort(model.byReceivedDescending)
+
+assert.strictEqual(both.map(m => m.subject).join(" "),
+  "A#5 B#5 A#4 B#4 A#3 B#3 A#2 B#2 A#1 B#1",
+  "the merged order interleaves the two accounts")
+
+// A key round-trips, and a key with no account is a bare id — which is what a
+// single-account list produces and what `sameMessage` already reads as "any".
+assert.strictEqual(model.keyId(model.rowKey(hostB[0])), "5:INBOX")
+assert.strictEqual(model.keyAccountId(model.rowKey(hostB[0])), B)
+assert.strictEqual(model.messageKey("5:INBOX", ""), "5:INBOX")
+assert.strictEqual(model.keyAccountId("5:INBOX"), "")
+assert.strictEqual(model.keyId("5:INBOX"), "5:INBOX")
+
+// A folder name may hold anything, so the split is at the first separator only
+// and the id keeps whatever it had.
+const odd = model.messageKey("9:Archive/2024", A)
+assert.strictEqual(model.keyId(odd), "9:Archive/2024")
+assert.strictEqual(model.keyAccountId(odd), A)
+
+// The one comparison a row makes. Both halves have to agree, or both rows of a
+// colliding pair draw as the cursor.
+assert.strictEqual(model.keyMatches(model.rowKey(hostB[0]), hostB[0]), true)
+assert.strictEqual(model.keyMatches(model.rowKey(hostB[0]), hostA[0]), false,
+  "the same id under another account is a different row")
+assert.strictEqual(model.keyMatches("", hostA[0]), false)
+
+// j walks every row. This is the report: the cursor stuck at the first
+// duplicated id and no row below it could be reached.
+{
+  let cursor = ""
+  const walked = []
+  for (let i = 0; i < both.length; i++) {
+    cursor = model.cursorAfterOffset(both, cursor, 1)
+    walked.push(model.indexByKey(both, cursor))
+  }
+  assert.deepStrictEqual(walked, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "j reaches every row of a merged list holding duplicated ids")
+  assert.strictEqual(model.cursorAfterOffset(both, cursor, 1),
+    model.rowKey(both[both.length - 1]), "and clamps at the last row")
+}
+
+// k walks back the same way.
+{
+  let cursor = ""
+  const walked = []
+  for (let i = 0; i < both.length; i++) {
+    cursor = model.cursorAfterOffset(both, cursor, -1)
+    walked.push(model.indexByKey(both, cursor))
+  }
+  assert.deepStrictEqual(walked, [9, 8, 7, 6, 5, 4, 3, 2, 1, 0])
+}
+
+// Archiving the second row of a colliding pair resolves to the second account.
+// `hostForMessage` in Service.qml reads the key's account half; this is the
+// decision it makes, with the hosts as they are.
+{
+  const hosts = [{ accountId: A, messages: hostA }, { accountId: B, messages: hostB }]
+  function hostForMessage(key) {
+    const owner = model.keyAccountId(key)
+    for (const host of hosts) {
+      if (owner !== "") {
+        if (host.accountId === owner) return host
+        continue
+      }
+      if (model.indexById(host.messages, model.keyId(key), host.accountId) >= 0) return host
+    }
+    return null
+  }
+
+  const second = both[1]
+  assert.strictEqual(second.subject, "B#5", "row 1 is the second of the pair")
+  const key = model.rowKey(second)
+  assert.strictEqual(hostForMessage(key).accountId, B,
+    "archive on the second row resolves to the second account")
+  assert.strictEqual(hostForMessage(model.rowKey(both[0])).accountId, A)
+
+  // And it removes only that account's row.
+  const after = model.removeById(hostB, model.keyId(key), B)
+  assert.strictEqual(after.length, 4)
+  assert.strictEqual(hostA.length, 5, "the other account's list is untouched")
+}
+
+// The cursor after a removal is the row below, addressed by key — not an id
+// that would resolve back to the row above it in the other account.
+{
+  const key = model.rowKey(both[1])
+  const next = model.cursorAfterRemoval(both, key)
+  assert.strictEqual(model.indexByKey(both, next), 2)
+  assert.strictEqual(model.keyAccountId(next), A, "row 2 is A#4")
+}
+
+// A reload re-derives the key from the row it matched. A cursor that arrived
+// as a bare id — from an older session, or a single-account list that has just
+// become merged — comes back addressed.
+{
+  assert.strictEqual(model.cursorAfterReload(both, model.rowKey(both[3])),
+    model.rowKey(both[3]))
+  assert.strictEqual(model.cursorAfterReload(both, "5:INBOX"), model.rowKey(both[0]),
+    "a bare id resolves to the first row holding it, and is returned addressed")
+  assert.strictEqual(model.cursorAfterReload(both, model.messageKey("9:INBOX", A)),
+    model.rowKey(both[0]), "a cursor whose row is gone starts at the top")
+  assert.strictEqual(model.cursorAfterReload([], model.rowKey(both[0])), "")
+}
+
 // --------------------------------------------------- merged list ordering
 //
 // Newest first, by when the message was received. A merged list is several

@@ -897,8 +897,8 @@ Item {
 
   // The cursor is the list's own position and moves relative to itself.
   // `selectedId` keeps its separate meaning: which message the reader shows.
-  function cursorOffset(cursorId, delta) {
-    return Model.cursorAfterOffset(messages, cursorId, delta)
+  function cursorOffset(cursorKey, delta) {
+    return Model.cursorAfterOffset(messages, cursorKey, delta)
   }
 
   // -------------------------------------------------------------- actions

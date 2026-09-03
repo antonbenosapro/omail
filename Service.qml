@@ -540,17 +540,27 @@ Item {
     return Accounts.colorFor(accountList, accountId)
   }
 
-  // Which mailbox the open message belongs to, for a list that has to tell two
-  // rows with one id apart.
-  readonly property string selectedAccountId: reader ? reader.accountId : ""
-
-  function hostForMessage(id) {
+  // Which mailbox a row key names. The account half decides it outright where
+  // there is one: two IMAP accounts on one server hold `5:INBOX` each, and
+  // searching the hosts in order for the id alone answered with whichever came
+  // first — so archiving the second row archived the first one's message.
+  //
+  // A key with no account is still resolved by search, because that is what a
+  // single-account list produces and what a summary written before ownership
+  // was stamped reads back as.
+  function hostForMessage(key) {
     if (!root.unified) return current
-    var wanted = String(id || "")
-    if (wanted === "") return current
+    var text = String(key || "")
+    if (text === "") return current
+    var owner = Model.keyAccountId(text)
+    var wanted = Model.keyId(text)
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
       if (!host) continue
+      if (owner !== "") {
+        if (host.accountId === owner) return host
+        continue
+      }
       if (Model.indexById(host.messages, wanted, host.accountId) >= 0) return host
     }
     return current
@@ -628,6 +638,10 @@ Item {
   readonly property var reader: root.unified ? (readerHost || current) : current
 
   readonly property string selectedId: reader ? reader.selectedId : ""
+  // The open message as one addressable row, which is what the list compares
+  // against and what the reader hands back to an action.
+  readonly property string selectedKey: reader
+    ? Model.messageKey(reader.selectedId, reader.accountId) : ""
   readonly property var selectedMessage: reader ? reader.selectedMessage : null
   readonly property var selectedBody: reader ? reader.selectedBody : ({ text: "", source: "" })
   readonly property string selectedHtml: reader ? reader.selectedHtml : ""
@@ -684,8 +698,8 @@ Item {
   // selection in every other one: two accounts each holding an open message
   // would otherwise both answer, and the reader would show whichever property
   // resolved first.
-  function select(id) {
-    var host = hostForMessage(id)
+  function select(key) {
+    var host = hostForMessage(key)
     if (!host) return
     if (root.unified) {
       for (var i = 0; i < accountHosts.count; i++) {
@@ -694,7 +708,7 @@ Item {
       }
       readerHost = host
     }
-    host.select(id)
+    host.select(Model.keyId(key))
   }
 
   function clearSelection() {
@@ -727,9 +741,9 @@ Item {
   // merged one, and asking the account on screen would have walked only its
   // own messages — j and k stopped at the end of whichever mailbox the cursor
   // started in rather than carrying on into the next.
-  function cursorOffset(cursorId, delta) {
-    if (root.unified) return Model.cursorAfterOffset(root.messages, cursorId, delta)
-    return current ? current.cursorOffset(cursorId, delta) : ""
+  function cursorOffset(cursorKey, delta) {
+    if (root.unified) return Model.cursorAfterOffset(root.messages, cursorKey, delta)
+    return current ? current.cursorOffset(cursorKey, delta) : ""
   }
   // While unified every mailbox moves together, or the merged list would be
   // one account's Inbox beside another's Unread.
@@ -747,13 +761,13 @@ Item {
   function search(text) { if (current) current.search(text) }
   function selectLabel(name) { if (current) current.selectLabel(name) }
   // Every action names a message, so every action can find its own mailbox.
-  function act(id, action, quiet) {
-    var host = hostForMessage(id)
-    if (host) host.act(id, action, quiet)
+  function act(key, action, quiet) {
+    var host = hostForMessage(key)
+    if (host) host.act(Model.keyId(key), action, quiet)
   }
-  function toggleStar(id) {
-    var host = hostForMessage(id)
-    if (host) host.toggleStar(id)
+  function toggleStar(key) {
+    var host = hostForMessage(key)
+    if (host) host.toggleStar(Model.keyId(key))
   }
   function markAllRead() {
     if (!root.unified) {
@@ -808,7 +822,10 @@ Item {
     }
     return -1
   }
-  function openInBrowser(id) { if (current) current.openInBrowser(id) }
+  function openInBrowser(key) {
+    var host = hostForMessage(key)
+    if (host) host.openInBrowser(Model.keyId(key))
+  }
   function openWebInbox() { if (current) current.openWebInbox() }
   function openCloudConsole() { if (current) current.openCloudConsole() }
   function openGmailApiPage() { if (current) current.openGmailApiPage() }

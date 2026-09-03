@@ -95,7 +95,7 @@ Provider differences end at the provider boundary. Code above that boundary asks
 
 ## Vocabulary is an interface contract
 
-Follow the Coding Guides' vocabulary and API naming rules. Omamail keeps one canonical name for each mail object, command, and state across QML properties, signals, actions, sidebar rows, settings, menus, tooltips, notices, shortcuts, errors, and documentation. The project-specific distinction between `cursorId` and `selectedId` is load-bearing: the former is the keyboard position and the latter is the message shown by the reader.
+Follow the Coding Guides' vocabulary and API naming rules. Omamail keeps one canonical name for each mail object, command, and state across QML properties, signals, actions, sidebar rows, settings, menus, tooltips, notices, shortcuts, errors, and documentation. The project-specific distinction between `cursorKey` and `selectedKey` is load-bearing: the former is the keyboard position and the latter is the message shown by the reader. Both are row keys — an account id and a message id together, because neither provider's message id is unique across the accounts a merged list holds.
 
 Review terminology in the rendered surface beside neighboring labels, not as an isolated string. When a canonical term changes, search every interface surface and document that may use it.
 

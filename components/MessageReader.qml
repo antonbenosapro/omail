@@ -144,7 +144,7 @@ Item {
       foreground: root.summary && root.summary.starred ? root.accentColor : root.dimColor
       hoverColor: root.accentColor
       fontFamily: root.panelFontFamily
-      onClicked: if (root.service && root.summary) root.service.toggleStar(root.summary.id)
+      onClicked: if (root.service && root.summary) root.service.toggleStar(root.service.selectedKey)
     }
 
     Column {
@@ -621,7 +621,7 @@ Item {
         iconName: "browser"; tooltipText: "Open in browser"
         foreground: root.dimColor; hoverColor: root.textColor
         fontFamily: root.panelFontFamily
-        onClicked: if (root.service && root.summary) root.service.openInBrowser(root.summary.id)
+        onClicked: if (root.service && root.summary) root.service.openInBrowser(root.service.selectedKey)
       }
     }
     }

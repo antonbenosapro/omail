@@ -262,6 +262,66 @@ function byReceivedDescending(a, b) {
   return String((a && a.id) || "") < String((b && b.id) || "") ? -1 : 1
 }
 
+// ------------------------------------------------------------- row keys
+//
+// One string that names one row: the account it belongs to and the id inside
+// that account. The keyboard cursor, the reader's selection, and every signal
+// a row emits carry this rather than a bare id.
+//
+// The bare id is not an address. An IMAP UID is unique only inside its folder
+// and a Gmail id only inside its account, so in a merged list two rows really
+// do share one — the pair that prompted this had overlapping UID ranges. Every
+// path that took a bare id resolved it to whichever account happened to hold
+// it first: `j` could not walk past the duplicate, and archiving the second
+// row archived the first one's message. Carrying the pair as two values was
+// the alternative, and it means a second argument on every signal and a second
+// property beside every `cursorId`, any one of which can be forgotten
+// silently. One opaque key cannot be half-passed.
+//
+// The account leads because it is the half with a known shape: an account id
+// is an address, or `imap:` and an address, and neither can hold the
+// separator. A message id can hold anything a folder name can, so it goes
+// second and the split is at the first separator only.
+//
+// A key with no separator is a bare id with no account, which `sameMessage`
+// already reads as "any account" — that is the single-account list, where the
+// id is unambiguous by construction.
+var KEY_SEPARATOR = "\u001f"
+
+function rowKey(summary) {
+  if (!summary) return ""
+  return messageKey(summary.id, summary.accountId)
+}
+
+function messageKey(id, accountId) {
+  var wanted = String(id || "")
+  if (wanted === "") return ""
+  var owner = String(accountId || "")
+  if (owner === "") return wanted
+  return owner + KEY_SEPARATOR + wanted
+}
+
+function keyId(key) {
+  var text = String(key || "")
+  var at = text.indexOf(KEY_SEPARATOR)
+  return at < 0 ? text : text.slice(at + KEY_SEPARATOR.length)
+}
+
+function keyAccountId(key) {
+  var text = String(key || "")
+  var at = text.indexOf(KEY_SEPARATOR)
+  return at < 0 ? "" : text.slice(0, at)
+}
+
+// Whether a row is the one a key names. The one comparison every view makes,
+// so no view has to remember to check the account as well as the id.
+function keyMatches(key, summary) {
+  if (!summary) return false
+  var text = String(key || "")
+  if (text === "") return false
+  return sameMessage(summary, keyId(text), keyAccountId(text))
+}
+
 // A message is addressed by its id *and* the mailbox it came from.
 //
 // An IMAP UID is unique only inside one folder and a Gmail id only inside one
@@ -312,6 +372,13 @@ function indexById(list, id, accountId) {
     if (sameMessage(source[i], id, accountId)) return i
   }
   return -1
+}
+
+// The same lookup for a row key, which is what the view layer holds.
+function indexByKey(list, key) {
+  var text = String(key || "")
+  if (text === "") return -1
+  return indexById(list, keyId(text), keyAccountId(text))
 }
 
 // The rail as one numbered list, in the order it is drawn: the provider's
@@ -370,18 +437,18 @@ function wrappedIndex(index, delta, count) {
 // open while the list is being walked, and walking must not move the reader.
 // Anchoring this on the open message pinned it — every step in the list
 // resolved to row 0, and in the reader the anchor never advanced.
-function cursorAfterOffset(list, cursorId, delta) {
+function cursorAfterOffset(list, cursorKey, delta) {
   var source = Array.isArray(list) ? list : []
   if (source.length === 0) return ""
   var step = Math.floor(Number(delta) || 0)
-  var index = indexById(source, cursorId)
+  var index = indexByKey(source, cursorKey)
   // No cursor, or one whose message has left the list: start from the end the
   // move is coming from, so j opens at the top and k opens at the bottom.
-  if (index < 0) return step < 0 ? source[source.length - 1].id : source[0].id
+  if (index < 0) return rowKey(step < 0 ? source[source.length - 1] : source[0])
   var next = index + step
   if (next < 0) next = 0
   if (next > source.length - 1) next = source.length - 1
-  return source[next].id
+  return rowKey(source[next])
 }
 
 // Where the cursor goes when the row it is on is about to leave the list.
@@ -391,23 +458,27 @@ function cursorAfterOffset(list, cursorId, delta) {
 // Leaving the cursor on a row that has gone is not harmless. cursorAfterOffset
 // cannot find it, so it restarts at the top — which is how archiving one
 // message sent the next j back to the first row.
-function cursorAfterRemoval(list, cursorId) {
+function cursorAfterRemoval(list, cursorKey) {
   var source = Array.isArray(list) ? list : []
-  var index = indexById(source, cursorId)
+  var index = indexByKey(source, cursorKey)
   if (index < 0) return ""
-  if (index + 1 < source.length) return source[index + 1].id
-  if (index > 0) return source[index - 1].id
+  if (index + 1 < source.length) return rowKey(source[index + 1])
+  if (index > 0) return rowKey(source[index - 1])
   return ""
 }
 
 // Where the cursor goes when the whole list is replaced under it — a mailbox
 // switch, a search, a refresh that dropped things. The message it was on keeps
 // it if it survived; otherwise the top, which is where the eye goes anyway.
-function cursorAfterReload(list, cursorId) {
+function cursorAfterReload(list, cursorKey) {
   var source = Array.isArray(list) ? list : []
   if (source.length === 0) return ""
-  if (indexById(source, cursorId) >= 0) return cursorId
-  return source[0].id
+  var index = indexByKey(source, cursorKey)
+  // Re-derived from the row rather than returned as it came in: a key that
+  // named no account matched the row by id alone, and handing it back would
+  // leave the cursor ambiguous for as long as it sat there.
+  if (index >= 0) return rowKey(source[index])
+  return rowKey(source[0])
 }
 
 // Where the scroller has to sit for a row to be on screen. The list is a Column

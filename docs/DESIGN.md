@@ -122,8 +122,8 @@ The list is optimized for scanning. Each row establishes, in order:
 
 Unread state is redundant by design: dot, weight, and brighter subject. Hover is local visual feedback. Keyboard cursor and opened message remain separate states:
 
-- `cursorId` says where the next keyboard action applies;
-- `selectedId` says what the reader displays;
+- `cursorKey` says where the next keyboard action applies;
+- `selectedKey` says what the reader displays;
 - hover says only that the pointer is over a row.
 
 Selected and hovered fills extend to the list/splitter edge. Text padding is inside the row; viewport margins must not create a dead strip that breaks the relationship between row and reader.
