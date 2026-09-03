@@ -93,9 +93,133 @@ esac
 escaped_url=$(escape "$url")
 escaped_credentials=$(escape "$credentials")
 
+# ------------------------------------------------------- mechanism selection
+#
+# curl picks the "most secure" mechanism the server advertises, and it ranks
+# GSSAPI above everything. A server offering GSSAPI to a machine with no
+# Kerberos ticket therefore gets `AUTHENTICATE GSSAPI`, gss_init_sec_context()
+# fails for want of a credential cache, and curl gives up with exit 94 rather
+# than falling back — so the password is never tried at all. Axigen advertises
+# exactly that set (CRAM-MD5, DIGEST-MD5, GSSAPI and no PLAIN), which is what
+# made this reachable.
+#
+# The fix is to ask the server what it supports before authenticating and name
+# a mechanism curl can actually complete. The probe is unauthenticated, so it
+# costs no credentials and cannot itself fail the way the real connection did.
+#
+# Preference order is curl's own, minus the mechanisms that need a credential
+# this machine may not have: the strongest shared secret first, plain-text
+# last, and it only ever narrows what curl would have chosen from.
+imap_probe='CAPABILITY'
+
+# The server root for $url, with any mailbox path removed. Everything through
+# the host and port is kept; what follows the first "/" after it is not.
+probe_root() {
+  # Shell parameter expansion rather than sed: the value is a URL, and every
+  # character sed would take as a delimiter can legitimately appear in one.
+  root=$1
+  scheme=${root%%://*}
+  rest=${root#*://}
+  authority=${rest%%/*}
+  if [ "$mode" = "imap" ]; then
+    printf '%s://%s/' "$scheme" "$authority"
+  else
+    printf '%s://%s' "$scheme" "$authority"
+  fi
+}
+
+# Whether GSSAPI could possibly succeed. A ticket may exist under a ccache the
+# environment names rather than the default file, so this asks klist rather
+# than looking for /tmp/krb5cc_$(id -u). No klist means no Kerberos worth
+# trying. `-s` is a silent yes/no in both MIT and Heimdal.
+have_kerberos_ticket() {
+  command -v klist >/dev/null 2>&1 || return 1
+  klist -s >/dev/null 2>&1
+}
+
+# The advertised mechanisms, uppercased and space-padded so a match on
+# " NAME " cannot hit a prefix of a longer one.
+advertised_mechanisms() {
+  # The probe asks the server root rather than the mailbox in $url: a path
+  # makes curl SELECT the folder before running the request, which needs the
+  # login this probe exists to make work ("curl: (67) Select failed").
+  probe_url=$(escape "$(probe_root "$url")")
+
+  # IMAP puts the untagged CAPABILITY reply on stdout; ESMTP never reaches
+  # stdout at all and its 250-AUTH line is only visible in curl's verbose
+  # protocol trace on stderr. Both channels are kept, so one pass over the
+  # text covers the two shapes.
+  probe_out=$(
+    if [ "$mode" = "imap" ]; then
+      curl --config - --silent --show-error --max-time 20 --connect-timeout 20 <<PROBE 2>&1
+url = "$probe_url"
+noproxy = "*"
+request = "$imap_probe"
+PROBE
+    else
+      curl --config - --silent --show-error --verbose --max-time 20 --connect-timeout 20 <<PROBE 2>&1
+url = "$probe_url"
+noproxy = "*"
+PROBE
+    fi
+  ) || true
+
+  # IMAP answers `* CAPABILITY ... AUTH=CRAM-MD5 ...`; ESMTP answers
+  # `250-AUTH PLAIN LOGIN CRAM-MD5`. Both reach us through curl's verbose
+  # protocol lines, so one pass over the text covers the two shapes.
+  printf ' %s ' "$(
+    printf '%s' "$probe_out" \
+      | tr -c 'A-Za-z0-9=-' ' ' \
+      | tr 'a-z' 'A-Z' \
+      | sed -e 's/AUTH=/ /g' \
+      | tr ' ' '\n' \
+      | grep -Ex 'CRAM-MD5|DIGEST-MD5|GSSAPI|NTLM|PLAIN|LOGIN|OAUTHBEARER|XOAUTH2' \
+      | sort -u \
+      | tr '\n' ' '
+  )"
+}
+
+# The mechanism to name, or empty to leave curl's own choice alone — which is
+# the right answer when the probe told us nothing, so a server this code has
+# never seen behaves exactly as it did before.
+choose_mechanism() {
+  mechanisms=$(advertised_mechanisms)
+  [ "$mechanisms" != "  " ] || return 0
+
+  for candidate in CRAM-MD5 DIGEST-MD5 PLAIN LOGIN; do
+    case "$mechanisms" in
+      *" $candidate "*) printf '%s' "$candidate"; return 0 ;;
+    esac
+  done
+
+  # Only unusable-here mechanisms were offered. GSSAPI is worth naming if a
+  # ticket exists, and otherwise there is nothing to say.
+  #
+  # The `if` is not decoration: under `set -e` a bare `cmd && printf` as the
+  # last command in a function makes the function's own status 1 when the test
+  # fails, and `mechanism=$(choose_mechanism)` is then a failing command that
+  # takes the whole script down before curl ever runs. The caller sees an empty
+  # response rather than an error, which is a blank message in the reader.
+  case "$mechanisms" in
+    *" GSSAPI "*)
+      if have_kerberos_ticket; then printf 'GSSAPI'; fi
+      ;;
+  esac
+  return 0
+}
+
 umask 077
 work=$(mktemp -d "${TMPDIR:-/tmp}/omamail.XXXXXX") || fail 'mail-transport.sh: no temporary directory'
 trap 'rm -rf "$work"' EXIT INT TERM HUP
+
+# OAuth carries a bearer token rather than a password, and curl selects the
+# right mechanism from the option that supplies it. Probing would be wasted
+# work and naming a password mechanism would be wrong, so the sign-in path is
+# left exactly as it was.
+mechanism=''
+case "$credentials" in
+  *:*) mechanism=$(choose_mechanism) ;;
+esac
 
 # The config is written to curl's own stdin rather than to a file: it carries
 # the password, and a file holding one would be on disk for as long as curl
@@ -110,6 +234,7 @@ if [ "$mode" = "smtp" ]; then
   printf 'url = "%s"\n' "$escaped_url"
   printf 'noproxy = "*"\n'
   printf 'user = "%s"\n' "$escaped_credentials"
+  [ -z "$mechanism" ] || printf 'login-options = "AUTH=%s"\n' "$mechanism"
   printf 'mail-from = "%s"\n' "$(escape "$sender")"
   for recipient in "$@"; do
     printf 'mail-rcpt = "%s"\n' "$(escape "$(decode "$recipient")")"
@@ -137,6 +262,8 @@ else
     # Repeated because `next` resets this curl option with the rest.
     printf 'noproxy = "*"\n'
     printf 'user = "%s"\n' "$escaped_credentials"
+    # Repeated for the same reason the URL is: `next` resets it.
+    [ -z "$mechanism" ] || printf 'login-options = "AUTH=%s"\n' "$mechanism"
     printf 'request = "%s"\n' "$(escape "$(decode "$argument")")"
   done
 fi

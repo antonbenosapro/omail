@@ -24,6 +24,14 @@ while [ "$#" -gt 0 ]; do
     shift
   fi
 done
+# The capability probe is the invocation with no --dump-header: the real
+# request always has one. It answers with whatever mechanisms the test set,
+# so the choice the script makes can be asserted on.
+if [ -z "$header_file" ]; then
+  cat >/dev/null
+  printf '%s' "${CURL_STUB_CAPABILITY:-}"
+  exit "${CURL_STUB_PROBE_EXIT:-0}"
+fi
 if [ -n "${CURL_STUB_HEADER:-}" ] && [ -n "$header_file" ]; then
   printf '%s' "$CURL_STUB_HEADER" > "$header_file"
   cat >/dev/null
@@ -180,6 +188,106 @@ check "the first recipient is set" "$config" 'mail-rcpt = "friend@example.com"'
 check "every recipient is set" "$config" 'mail-rcpt = "other@example.com"'
 check "the body is uploaded from a file, not passed as an argument" "$config" 'upload-file = "'
 check_absent "SMTP does not emit --next sections" "$config" 'next'
+
+
+# -------------------------------------------------- SASL mechanism selection
+#
+# curl ranks GSSAPI above every other mechanism and does not fall back when
+# gss_init_sec_context() fails for want of a ticket — it exits 94 without ever
+# sending the password. A server offering GSSAPI but no PLAIN (Axigen does
+# exactly this) is therefore unreachable unless a mechanism is named.
+
+axigen_imap='* CAPABILITY IMAP4rev1 IDLE STARTTLS AUTH=CRAM-MD5 AUTH=DIGEST-MD5 AUTH=GSSAPI ACL RIGHTS=texkbn'
+
+probe_config_for() {
+  printf '%s\n' "$1" \
+    | CURL_STUB_CAPABILITY="$2" PATH="$work/bin:$PATH" sh "$script" \
+    | sed -n '2p' | base64 -d
+}
+
+imap_req="imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 'jane:pw') $(b64 'NOOP')"
+
+config=$(probe_config_for "$imap_req" "$axigen_imap")
+check "a shared secret is preferred over GSSAPI" "$config" 'login-options = "AUTH=CRAM-MD5"'
+check_absent "GSSAPI is not chosen without a ticket" "$config" 'AUTH=GSSAPI'
+
+# Every section repeats it, because `next` resets the option along with the URL.
+count=$(printf '%s' "$config" | grep -c 'login-options' || true)
+if [ "$count" = "1" ]; then
+  printf '  ok   the mechanism is named once per section\n'
+else
+  printf '  FAIL expected 1 login-options line, found %s\n' "$count"
+  failures=$(( failures + 1 ))
+fi
+
+multi_req="imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 'jane:pw') $(b64 'NOOP') $(b64 'NOOP')"
+config=$(probe_config_for "$multi_req" "$axigen_imap")
+count=$(printf '%s' "$config" | grep -c 'login-options' || true)
+if [ "$count" = "2" ]; then
+  printf '  ok   a --next section repeats the mechanism\n'
+else
+  printf '  FAIL expected 2 login-options lines, found %s\n' "$count"
+  failures=$(( failures + 1 ))
+fi
+
+# A server that offers a password mechanism gets the strongest one, not the
+# plain-text one, even though both would work.
+config=$(probe_config_for "$imap_req" '* CAPABILITY IMAP4rev1 AUTH=PLAIN AUTH=LOGIN AUTH=CRAM-MD5')
+check "CRAM-MD5 outranks PLAIN" "$config" 'login-options = "AUTH=CRAM-MD5"'
+
+config=$(probe_config_for "$imap_req" '* CAPABILITY IMAP4rev1 AUTH=PLAIN')
+check "PLAIN is named when it is all there is" "$config" 'login-options = "AUTH=PLAIN"'
+
+# Silence is not a mechanism. A server that advertised nothing we recognise —
+# or a probe that failed outright — must leave curl's own choice alone rather
+# than force one, so an unfamiliar server behaves as it did before.
+config=$(probe_config_for "$imap_req" '* CAPABILITY IMAP4rev1 IDLE UIDPLUS')
+check_absent "no mechanism is forced when none is advertised" "$config" 'login-options'
+
+config=$(probe_config_for "$imap_req" '')
+check_absent "no mechanism is forced when the probe says nothing" "$config" 'login-options'
+
+# `RIGHTS=texkbn` sits next to the AUTH= words in a real Axigen banner, and a
+# looser parser reads its value as a mechanism.
+config=$(probe_config_for "$imap_req" "$axigen_imap")
+check_absent "a non-AUTH capability value is not read as a mechanism" "$config" 'AUTH=TEXKBN'
+
+# A server offering GSSAPI and nothing else usable, to a machine with no
+# ticket, is the case that has no answer — and the script still has to run the
+# request. Under `set -e` a bare `have_kerberos_ticket && printf` as the last
+# command in `choose_mechanism` makes the function exit 1, which makes the
+# `mechanism=$(choose_mechanism)` assignment a failing command and kills the
+# whole script before curl is ever reached. The transport then produces no
+# output at all, so the caller sees an empty response rather than an error:
+# in the panel, a message that opens to a blank reader with nothing logged.
+config=$(probe_config_for "$imap_req" '* CAPABILITY IMAP4rev1 AUTH=GSSAPI')
+check "a GSSAPI-only server still sends the request" "$config" 'request = "NOOP"'
+check_absent "and names no mechanism it cannot complete" "$config" 'login-options'
+
+lines=$(printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY='* CAPABILITY IMAP4rev1 AUTH=GSSAPI' \
+    PATH="$work/bin:$PATH" sh "$script" | wc -l | tr -d ' ')
+if [ "$lines" = "3" ]; then
+  printf '  ok   a GSSAPI-only server still gets a three-line reply\n'
+else
+  printf '  FAIL expected 3 lines from a GSSAPI-only server, got %s\n' "$lines"
+  failures=$(( failures + 1 ))
+fi
+
+# The bearer-token path names no mechanism: curl selects XOAUTH2 from the
+# option carrying the token, and a password mechanism would be wrong.
+oauth_req="imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 'ya29.token') $(b64 'NOOP')"
+config=$(probe_config_for "$oauth_req" '* CAPABILITY IMAP4rev1 AUTH=PLAIN AUTH=XOAUTH2')
+check_absent "OAuth credentials are left to curl" "$config" 'login-options'
+
+# SMTP advertises its mechanisms on a 250-AUTH line rather than a CAPABILITY
+# one, and needs the same protection: the send path hits the same wall.
+smtp_req="smtp $(b64 'smtps://smtp.example.org:465') $(b64 'jane:pw') $(b64 'jane@example.org') $(b64 'Subject: hi
+
+body') $(b64 'friend@example.com')"
+config=$(probe_config_for "$smtp_req" '250-AUTH PLAIN LOGIN CRAM-MD5 DIGEST-MD5 GSSAPI')
+check "SMTP names a mechanism too" "$config" 'login-options = "AUTH=CRAM-MD5"'
+check_absent "SMTP does not choose GSSAPI without a ticket" "$config" 'AUTH=GSSAPI'
 
 # ------------------------------------------------------------- the framing
 
