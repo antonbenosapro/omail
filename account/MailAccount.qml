@@ -218,6 +218,12 @@ Item {
   // Set once Gmail's own copy has landed, so a slower cache read knows not to
   // paint over it.
   property bool detailLive: false
+  // Set once the cache has painted a complete message. A body never changes
+  // after it is fetched, which is what makes the cache correct in the first
+  // place — so what remains to ask the server is the one thing that does
+  // change: whether the message is still unread. That is a summary fetch
+  // rather than the whole message.
+  property bool detailCached: false
   property var detailHandle: null
   // The invitation's own request, which only a message carrying one ever makes.
   property var inviteHandle: null
@@ -615,6 +621,12 @@ Item {
       clearSelection()
       return
     }
+    // Re-selecting what is already open does nothing. It used to blank every
+    // body property and fetch the whole message again, so clicking the open
+    // row — or answering from the list a message the list had already opened —
+    // flashed the reader back to a skeleton and paid for a second fetch to
+    // arrive at what was on screen.
+    if (messageId === selectedId && selectedMessage) return
     selectedId = messageId
     var serial = ++detailSerial
     abortRequest(detailHandle)
@@ -640,9 +652,18 @@ Item {
     // the race — in which case the cached one is simply dropped rather than
     // painted over what is already correct.
     detailLive = false
+    detailCached = false
+    // The fetch is started from inside this callback rather than beside it,
+    // because what to ask the server for depends on what the file held and the
+    // read is asynchronous. `FileView` answers exactly once either way — a hit
+    // through onLoaded, a miss through onLoadFailed — so the fetch is started
+    // exactly once too.
     bodyCache.read(messageId, function(cached) {
       if (serial !== root.detailSerial) return
-      if (root.detailLive || !cached) return
+      if (!cached) {
+        root.fetchDetail(messageId, serial)
+        return
+      }
       // The text is read out of the cached markup rather than taken off the
       // disk beside it, on the same grounds the document is: what the cache
       // holds is the sender's HTML, so a fix to how a message reads reaches
@@ -662,15 +683,43 @@ Item {
       // second later when the network agrees.
       root.selectedInvite = cached.invite
       root.selectedUnsubscribe = cached.unsubscribe
+      // The row the list already has, which is the summary the reader's header
+      // and toolbar are gated on. Without it the cache painted the body
+      // properties into a reader still drawing its skeleton, because every
+      // visible part of the reader is `visible: !!summary` — so the cache
+      // saved one sanitize parse and nothing anybody could see, and the
+      // message appeared only when the network answered.
+      var known = Model.indexById(root.messages, messageId, root.accountId)
+      var plan = Model.detailFetchPlan(true, known >= 0)
+      if (plan.paintNow) {
+        root.detailCached = true
+        root.selectedMessage = root.messages[known]
+        root.detailLoading = false
+      }
       bodyCache.touch(messageId)
+      root.fetchDetail(messageId, serial)
     })
+  }
 
-    detailHandle = api.getMessage(messageId, true, function(payload, error) {
+  // What is still worth asking the server. A body never changes once fetched,
+  // which is what makes the cache correct — so after a hit the only thing left
+  // that can have changed is whether the message is still unread, and that is
+  // a summary fetch. On IMAP the difference is a `BODY.PEEK[HEADER]` rather
+  // than a `BODY.PEEK[]` of the whole message; on Gmail it is the metadata
+  // query rather than the full one.
+  function fetchDetail(messageId, serial) {
+    if (serial !== root.detailSerial) return
+    var plan = Model.detailFetchPlan(root.detailCached, root.detailCached)
+    var whole = plan.whole
+    detailHandle = api.getMessage(messageId, whole, function(payload, error) {
       if (serial !== root.detailSerial) return
       root.detailLoading = false
       root.detailLive = true
       if (error || !payload) {
-        root.fail(error || "Could not open that message")
+        // A message the cache already drew is on screen and correct. Saying
+        // the open failed over the top of it would be a notice about nothing
+        // the user can see, and would blank a reader that is working.
+        if (plan.reportFailure) root.fail(error || "Could not open that message")
         return
       }
       // Stamped like every other summary. This one is built fresh from the
@@ -680,6 +729,18 @@ Item {
       // fell back to matching on the id alone.
       var summary = root.tagOwnership([Mail.summarize(payload, new Date())])[0]
       root.selectedMessage = summary
+
+      // The whole message was not asked for, so there is no body in this
+      // payload to read. Everything below it — the parse, the attachments, the
+      // invitation, the cache write — would be reading a message that was not
+      // fetched, and would overwrite what the cache correctly drew with
+      // nothing. The list row and the read flag are all this answer carries.
+      if (!whole) {
+        root.messages = Model.replaceById(root.messages, summary)
+        if (summary.unread) root.act(messageId, "markRead", true)
+        return
+      }
+
       var decoded = Mail.extractBody(payload.payload)
       var rawHtml = Mail.extractHtml(payload.payload)
       // Both readings of the body out of one parse. The markers in the

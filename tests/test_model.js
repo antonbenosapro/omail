@@ -403,6 +403,42 @@ const untagged = [{ id: "7:INBOX", subject: "old cache" }]
 assert.strictEqual(model.indexById(untagged, "7:INBOX", "imap:a@example.org"), 0)
 assert.strictEqual(model.removeById(untagged, "7:INBOX", "imap:a@example.org").length, 0)
 
+// ------------------------------------------------------- opening a message
+//
+// A cached open used to do the whole fetch anyway and paint nothing early:
+// the cache set the body properties but never the summary the reader gates
+// every visible part on, so the reader drew its skeleton until the network
+// answered — one IMAP process, TLS handshake, LOGIN, SELECT and a
+// `BODY.PEEK[]` of the entire message, to arrive at what was already on disk.
+
+{
+  const painted = model.detailFetchPlan(true, true)
+  assert.strictEqual(painted.paintNow, true,
+    "a hit whose row is still listed paints at once")
+  assert.strictEqual(painted.whole, false,
+    "and asks only for what can have changed: the read flag")
+  assert.strictEqual(painted.reportFailure, false,
+    "a failure over a message already drawn is a notice about nothing visible")
+
+  // A hit with no row is a message the list no longer holds, so there is no
+  // summary to draw and the fetch has to bring one.
+  const orphan = model.detailFetchPlan(true, false)
+  assert.strictEqual(orphan.paintNow, false)
+  assert.strictEqual(orphan.whole, true)
+  assert.strictEqual(orphan.reportFailure, true)
+
+  const miss = model.detailFetchPlan(false, true)
+  assert.strictEqual(miss.paintNow, false)
+  assert.strictEqual(miss.whole, true, "a miss fetches everything, as it always did")
+  assert.strictEqual(miss.reportFailure, true)
+
+  assert.strictEqual(model.detailFetchPlan(false, false).whole, true)
+  // Anything that is not a true is a miss: the cache answers null on a file
+  // that was never written, and undefined is what a caller with no answer yet
+  // has.
+  assert.strictEqual(model.detailFetchPlan(undefined, undefined).whole, true)
+}
+
 // ---------------------------------------------------------------- row keys
 //
 // The address a view holds. The bug this replaces: `hostForMessage(id)` and

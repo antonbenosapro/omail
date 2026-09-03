@@ -262,6 +262,39 @@ function byReceivedDescending(a, b) {
   return String((a && a.id) || "") < String((b && b.id) || "") ? -1 : 1
 }
 
+// ------------------------------------------------------- opening a message
+//
+// What a select still has to ask the server for, once the body cache has
+// answered. A body never changes after it is fetched — which is what makes the
+// cache correct at all — so a hit leaves exactly one thing that can have moved
+// since: whether the message is still unread. That is a summary fetch, not the
+// whole message.
+//
+// Before this, a cached open did the full fetch every time and painted nothing
+// early: the cache set the body properties but never `selectedMessage`, and
+// every visible part of the reader is gated on that summary. So the cache
+// bought one skipped sanitize parse and nothing the user could see, while the
+// reader drew its skeleton until the network answered — on IMAP a whole new
+// process, TLS handshake, LOGIN, SELECT and `UID FETCH BODY.PEEK[]` of the
+// entire message.
+//
+// `painted` is whether the cache had the body *and* the list still holds the
+// row it belongs to. Without the row there is no summary to show, so the fetch
+// has to bring one.
+function detailFetchPlan(cacheHit, rowKnown) {
+  var painted = cacheHit === true && rowKnown === true
+  return ({
+    // Whether to ask for the whole message rather than its headers.
+    whole: !painted,
+    // Whether the reader can stop drawing its skeleton now.
+    paintNow: painted,
+    // Whether a failure from the server is worth telling the user about. A
+    // message the cache already drew is on screen and correct; a notice over
+    // the top of it would be about nothing they can see.
+    reportFailure: !painted
+  })
+}
+
 // ------------------------------------------------------------- row keys
 //
 // One string that names one row: the account it belongs to and the id inside
