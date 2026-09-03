@@ -673,7 +673,12 @@ Item {
         root.fail(error || "Could not open that message")
         return
       }
-      var summary = Mail.summarize(payload, new Date())
+      // Stamped like every other summary. This one is built fresh from the
+      // fetched message rather than taken from the list, so without this the
+      // row loses its account the moment it is opened — the stripe saying
+      // which mailbox it came from disappeared on read, and `replaceById`
+      // fell back to matching on the id alone.
+      var summary = root.tagOwnership([Mail.summarize(payload, new Date())])[0]
       root.selectedMessage = summary
       var decoded = Mail.extractBody(payload.payload)
       var rawHtml = Mail.extractHtml(payload.payload)

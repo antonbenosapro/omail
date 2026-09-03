@@ -73,8 +73,6 @@ Column {
       // carry the same colour, which says nothing.
       accountColor: root.service.unified
         ? root.service.colorForAccount(modelData.accountId) : ""
-      accountInitial: root.service.unified
-        ? root.service.initialForAccount(modelData.accountId) : ""
       // Compared on the account as well as the id. Neither provider's id is
       // unique across accounts, so in a merged list two rows can share one —
       // and both would draw as the cursor and the open message.

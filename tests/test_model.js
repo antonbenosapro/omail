@@ -402,3 +402,70 @@ assert.strictEqual(model.indexById(collide, "12100:INBOX", ""), 0)
 const untagged = [{ id: "7:INBOX", subject: "old cache" }]
 assert.strictEqual(model.indexById(untagged, "7:INBOX", "imap:a@example.org"), 0)
 assert.strictEqual(model.removeById(untagged, "7:INBOX", "imap:a@example.org").length, 0)
+
+// --------------------------------------------------- merged list ordering
+//
+// Newest first, by when the message was received. A merged list is several
+// servers' pages interleaved, so the order has to come from the summaries
+// rather than from the order they arrived in.
+
+const dated = [
+  { id: "5:INBOX", accountId: "a", date: new Date("2026-09-01T09:00:00Z") },
+  { id: "9:INBOX", accountId: "b", date: new Date("2026-09-03T09:00:00Z") },
+  { id: "7:INBOX", accountId: "a", date: new Date("2026-09-02T09:00:00Z") }
+]
+const ordered = dated.slice().sort(model.byReceivedDescending)
+deepEqual(ordered.map(function(m) { return m.id }), ["9:INBOX", "7:INBOX", "5:INBOX"])
+
+// The order is total: two messages sharing a timestamp must not swap places
+// between relayouts, or a row moves under the pointer.
+const same = new Date("2026-09-02T09:00:00Z")
+const tied = [
+  { id: "2:INBOX", accountId: "b", date: same },
+  { id: "1:INBOX", accountId: "a", date: same },
+  { id: "3:INBOX", accountId: "a", date: same }
+]
+const first = tied.slice().sort(model.byReceivedDescending).map(function(m) { return m.id })
+const again = tied.slice().reverse().sort(model.byReceivedDescending).map(function(m) { return m.id })
+deepEqual(first, again, "the same rows sort the same way whatever order they arrive in")
+
+// A page fetched while the server was throttling can arrive with content and
+// no INTERNALDATE. Such a row must not collapse to the bottom of the list:
+// half of a real cached page was dateless, and calling every one of them equal
+// put them all below a week of older mail. Within one mailbox the UID rises
+// with arrival, so it stands in for the date.
+const patchy = [
+  { id: "11994:INBOX", accountId: "a", date: null },
+  { id: "11995:INBOX", accountId: "a", date: new Date("2026-09-02T15:01:57Z") },
+  { id: "12000:INBOX", accountId: "a", date: null }
+]
+deepEqual(patchy.slice().sort(model.byReceivedDescending).map(function(m) { return m.id }),
+  ["12000:INBOX", "11995:INBOX", "11994:INBOX"],
+  "an undated row sits where its arrival number puts it")
+
+// Across mailboxes there is nothing to compare an undated row against, so the
+// row whose position can actually be verified leads.
+const across = [
+  { id: "12000:INBOX", accountId: "a", date: null },
+  { id: "50:INBOX", accountId: "b", date: new Date("2026-09-03T09:00:00Z") }
+]
+assert.strictEqual(across.slice().sort(model.byReceivedDescending)[0].id, "50:INBOX")
+
+// Undated rows from one mailbox still order among themselves.
+const blind = [
+  { id: "7:INBOX", accountId: "a", date: null },
+  { id: "9:INBOX", accountId: "a", date: null },
+  { id: "8:INBOX", accountId: "a", date: null }
+]
+deepEqual(blind.slice().sort(model.byReceivedDescending).map(function(m) { return m.id }),
+  ["9:INBOX", "8:INBOX", "7:INBOX"])
+
+// Only Inbox and Unread are merged: they are the two every provider maps the
+// same way.
+assert.strictEqual(model.isUnifiedMailbox("inbox"), true)
+assert.strictEqual(model.isUnifiedMailbox("unread"), true)
+assert.strictEqual(model.isUnifiedMailbox("sent"), false)
+assert.strictEqual(model.isUnifiedMailbox("archive"), false)
+assert.strictEqual(model.isUnifiedMailbox("trash"), false)
+assert.strictEqual(model.isUnifiedMailbox("all"), false)
+assert.strictEqual(model.isUnifiedMailbox(""), false)

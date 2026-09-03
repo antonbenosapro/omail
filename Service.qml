@@ -513,15 +513,7 @@ Item {
       var list = host.messages || []
       for (var j = 0; j < list.length; j++) merged.push(list[j])
     }
-    merged.sort(function(a, b) {
-      var left = a && a.date ? Number(a.date) : 0
-      var right = b && b.date ? Number(b.date) : 0
-      if (left !== right) return right - left
-      var leftId = String((a && a.accountId) || "")
-      var rightId = String((b && b.accountId) || "")
-      if (leftId !== rightId) return leftId < rightId ? -1 : 1
-      return String((a && a.id) || "") < String((b && b.id) || "") ? -1 : 1
-    })
+    merged.sort(Model.byReceivedDescending)
     return merged
   }
 
@@ -533,12 +525,6 @@ Item {
   // while its account is still signing in.
   function colorForAccount(accountId) {
     return Accounts.colorFor(accountList, accountId)
-  }
-
-  function initialForAccount(accountId) {
-    var entry = Accounts.find(accountList, accountId)
-    var address = entry ? String(entry.email || "") : ""
-    return address === "" ? "" : address.charAt(0).toUpperCase()
   }
 
   // Which mailbox the open message belongs to, for a list that has to tell two

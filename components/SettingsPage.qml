@@ -136,9 +136,13 @@ Column {
         required property var modelData
         required property int index
 
+        // Whether this mailbox's custom-colour field is showing.
+        property bool customOpen: false
+
         width: parent.width
         implicitHeight: Math.max(rowText.implicitHeight, rowActions.implicitHeight)
           + Style.space(16)
+          + (row.customOpen ? customColor.implicitHeight + Style.space(8) : 0)
         radius: Style.cornerRadius
         color: modelData.active
           ? Style.selectedFillFor(root.textColor, root.accentColor)
@@ -180,6 +184,34 @@ Column {
             font.family: root.panelFontFamily
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
+          }
+        }
+
+        // Shown only while the custom swatch is open, and under the row rather
+        // than in it: a field wide enough to type a hex value into does not
+        // fit beside seven swatches and two buttons.
+        TextField {
+          id: customColor
+          visible: row.customOpen
+          anchors.left: parent.left
+          anchors.leftMargin: Style.space(12)
+          anchors.bottom: parent.bottom
+          anchors.bottomMargin: Style.space(6)
+          width: Style.space(120)
+          foreground: root.textColor
+          font.family: root.panelFontFamily
+          font.pixelSize: Style.font.caption
+          placeholderText: "#4c9ede"
+          onVisibleChanged: if (visible) {
+            text = String(row.modelData.color || "")
+            forceActiveFocus()
+          }
+          // Applied on Enter rather than per keystroke: "#4c9" is a valid
+          // colour on the way to "#4c9ede", and painting it would make the
+          // stripe flicker through whatever the user typed through.
+          onAccepted: {
+            root.colorChosen(row.index, text)
+            row.customOpen = false
           }
         }
 
@@ -231,8 +263,55 @@ Column {
               MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.colorChosen(row.index, String(parent.modelData))
+                onClicked: {
+                  row.customOpen = false
+                  root.colorChosen(row.index, String(parent.modelData))
+                }
               }
+            }
+          }
+
+          // Any colour the six presets do not cover. Kept behind a swatch of
+          // its own rather than always shown: a hex field beside every mailbox
+          // is a lot of chrome for something most people set once.
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(16)
+            height: width
+            radius: width / 2
+            // Ringed like a chosen preset when the colour in use is not one of
+            // them, so the row still says where its colour came from.
+            readonly property bool holdsCustom: {
+              var current = String(row.modelData.color || "")
+              if (current === "") return false
+              var presets = root.accountColors
+              for (var i = 0; i < presets.length; i++) {
+                if (String(presets[i]) === current) return false
+              }
+              return true
+            }
+            color: holdsCustom ? String(row.modelData.color) : "transparent"
+            border.width: holdsCustom || row.customOpen
+              ? Style.normalBorderWidth * 2 : Style.normalBorderWidth
+            border.color: holdsCustom || row.customOpen
+              ? root.textColor
+              : Style.hoverBorderFor(root.textColor, root.accentColor)
+
+            Text {
+              anchors.centerIn: parent
+              visible: !parent.holdsCustom
+              textFormat: Text.PlainText
+              text: "+"
+              color: root.dimColor
+              font.family: root.panelFontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: row.customOpen = !row.customOpen
             }
           }
 

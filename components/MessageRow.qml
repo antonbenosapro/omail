@@ -22,7 +22,6 @@ Rectangle {
   // than one. Empty means a single-account list, where every row would carry
   // the same mark and it would say nothing.
   property string accountColor: ""
-  property string accountInitial: ""
 
   signal activated()
   signal starToggled()
@@ -93,24 +92,6 @@ Rectangle {
     radius: width / 2
     visible: root.summary.unread
     color: root.accentColor
-  }
-
-  // The account's initial beside the stripe. `docs/DESIGN.md` is explicit that
-  // colour never carries state alone, and two generated-looking colours can
-  // land close together on a theme that never expected several — so the letter
-  // is what actually disambiguates and the colour is what makes it quick.
-  Text {
-    anchors.right: parent.right
-    anchors.rightMargin: Style.space(6)
-    anchors.top: parent.top
-    anchors.topMargin: Style.space(10)
-    visible: root.accountInitial !== "" && !root.hot && !root.summary.starred
-    textFormat: Text.PlainText
-    text: root.accountInitial
-    color: root.dimColor
-    font.family: root.panelFontFamily
-    font.pixelSize: Style.font.caption
-    font.bold: true
   }
 
   Column {

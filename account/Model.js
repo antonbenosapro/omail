@@ -201,6 +201,67 @@ function isUnifiedMailbox(key) {
   return false
 }
 
+// Newest first, for a list merged from several mailboxes whose servers
+// answered independently.
+//
+// The order is by when the message was *received* — `summarize` takes `date`
+// from IMAP's INTERNALDATE and Gmail's internalDate, not from the sender's
+// own Date header, which is sender-controlled and can be wrong by days.
+//
+// A summary with no date does not sort to the bottom. A page fetched while a
+// server was throttling can arrive with content and no INTERNALDATE, and a
+// comparator that called every such row equal collapsed half a list out of
+// order. The numeric part of the id is the fallback: an IMAP UID rises with
+// arrival within a folder, so it orders those rows among themselves the same
+// way the date would have.
+//
+// Ties break on account and then id so the order is total. Two messages
+// sharing a timestamp must not swap places between relayouts, or a row moves
+// under the pointer for no reason the user can see.
+function receivedRank(summary) {
+  if (!summary) return 0
+  var at = summary.date ? Number(summary.date) : 0
+  if (isFinite(at) && at > 0) return at
+  return 0
+}
+
+function arrivalRank(summary) {
+  var match = String((summary && summary.id) || "").match(/^(\d+)/)
+  return match ? Number(match[1]) : 0
+}
+
+function byReceivedDescending(a, b) {
+  var left = receivedRank(a)
+  var right = receivedRank(b)
+  // Both dated, or both undated: compare like with like.
+  if (left > 0 && right > 0 && left !== right) return right - left
+  if ((left > 0) !== (right > 0)) {
+    // One is dated and the other is not. The undated one is placed by its
+    // arrival number against the other's, so it lands near where it belongs
+    // rather than at the end of the list.
+    var known = left > 0 ? a : b
+    var unknown = left > 0 ? b : a
+    var sameAccount = String((known && known.accountId) || "")
+      === String((unknown && unknown.accountId) || "")
+    if (sameAccount) {
+      var byArrival = arrivalRank(b) - arrivalRank(a)
+      if (byArrival !== 0) return byArrival
+    } else {
+      // Nothing comparable across two mailboxes, so the dated one leads: it
+      // is the row whose position the user can actually verify.
+      return left > 0 ? -1 : 1
+    }
+  } else if (left === 0 && right === 0) {
+    var undated = arrivalRank(b) - arrivalRank(a)
+    if (undated !== 0) return undated
+  }
+
+  var leftAccount = String((a && a.accountId) || "")
+  var rightAccount = String((b && b.accountId) || "")
+  if (leftAccount !== rightAccount) return leftAccount < rightAccount ? -1 : 1
+  return String((a && a.id) || "") < String((b && b.id) || "") ? -1 : 1
+}
+
 // A message is addressed by its id *and* the mailbox it came from.
 //
 // An IMAP UID is unique only inside one folder and a Gmail id only inside one
