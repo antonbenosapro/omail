@@ -93,6 +93,38 @@ Reusable behavior and presentation remain separate without introducing a framewo
 
 Provider differences end at the provider boundary. Code above that boundary asks about capabilities and consumes the common message resource. It does not branch on provider IDs.
 
+## The IMAP connection model
+
+The IMAP transport is one process and one TLS connection per request, by design. `scripts/mail-transport.sh` is one `curl` invocation: it opens a connection, authenticates, selects a folder when the URL names one, runs the request's commands as `--next` sections on that connection, and logs out. Nothing is held open between requests, and nothing is shared between accounts.
+
+This is a trade-off rather than an oversight, and it is worth stating what it costs. A list load is two processes — a SEARCH, then a FETCH of the ids it returned, because the FETCH needs the parsed UIDs. Opening a message is one. An action is two: the action itself, then a count refresh. Startup for one account is four plus a poll, and a cold per-host capability probe adds one more.
+
+### Why not a persistent connection
+
+The alternative is a long-lived `openssl s_client` per account driven over `Process` stdin and stdout. That means writing the IMAP client itself in QML JavaScript: tag generation, literal framing, an idle keepalive, reconnection, and `stdbuf -o0 base64 -w0` in the pipe to preserve the octet invariant that the base64 transport exists for.
+
+The breaker is authentication. `openssl s_client` gives a byte stream and no SASL, so every mechanism would be hand-rolled — and the host that motivated this work offers CRAM-MD5 and DIGEST-MD5 and no PLAIN. Implementing HMAC-MD5 in QML JavaScript, on the thread that draws the user's whole desktop, to save TLS handshakes is not a trade worth making. curl already speaks those mechanisms, which is the reason it is the transport.
+
+### What follows from it
+
+Three things in the codebase exist because of this model, and should not be removed without replacing it:
+
+- **The retry and its backoff** (`mail-transport.sh`). A server that rations concurrent connections drops some of a burst outright. curl reports those as exit 35, 52, 55 or 56 — connection-level, never a protocol `NO` — and the same command succeeds a moment later. Four attempts over roughly seven seconds, because measured against the host this exists for, a dozen attempts one second apart were all refused while a longer wait was answered. Exit 3 is a malformed URL and is not retried: it is permanent.
+- **The poll stagger and the open stagger** (`Model.pollOffsetMs`, `Model.openOffsetMs`). Several mailboxes on one server would otherwise open their connections in the same tick, forever, because every account's timers start when the shell does. Both offsets are derived from the account id so they are stable across restarts, and both are bounded to a fraction of what they delay.
+- **The per-host capability probe cache** (`mail-transport.sh`). A probe answered by a throttled server names no mechanism, which puts curl back on its own ranking and onto GSSAPI, which fails without a ticket. The first answer is cached so the rest of a burst reads it rather than asking again.
+
+None of those would become unnecessary with a persistent connection, because a reconnection after a dropped session meets the same rationing. What would change is their magnitude.
+
+### Coalescing is the mechanism that is available
+
+`--next` sections are how several commands share one connection, and that is where the cost comes down. Two things must be true of anything folded this way.
+
+The first is `--fail-early`. curl's default is to run the remaining sections after one fails and to exit with the code of the *last* transfer, which meant a COPY answered `NO` was followed by the STORE and EXPUNGE that delete the original, and the whole thing exited 0. Coalescing without that flag widens the blast radius of every partial failure.
+
+The second is that the commands must be independent of each other's parsed output. SEARCH-then-FETCH cannot be folded, because the FETCH names the UIDs the SEARCH returned; doing it in one connection needs SEARCHRES (RFC 5182), which Dovecot and Cyrus have and others may not.
+
+The fold that is done: marking a message read. `UID STORE +FLAGS.SILENT (\Seen)` rides on the same connection as the FETCH that opens the message, after it, so `BODY.PEEK` still reads an unread message as unread. Opening an unread message is two processes rather than three, and there is no longer a window in which the fetch succeeded and the flag was never set. It is declared as the `fetchMarksRead` provider capability rather than assumed: Gmail's API cannot fetch and modify in one request, so there it stays a second call, and `MailAccount` drives both through the same interface.
+
 ## Vocabulary is an interface contract
 
 Follow the Coding Guides' vocabulary and API naming rules. Omamail keeps one canonical name for each mail object, command, and state across QML properties, signals, actions, sidebar rows, settings, menus, tooltips, notices, shortcuts, errors, and documentation. The project-specific distinction between `cursorKey` and `selectedKey` is load-bearing: the former is the keyboard position and the latter is the message shown by the reader. Both are row keys — an account id and a message id together, because neither provider's message id is unique across the accounts a merged list holds.

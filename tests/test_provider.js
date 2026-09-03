@@ -37,6 +37,16 @@ assert.strictEqual(provider.can("imap", "star"), true, "\\Flagged is a star")
 assert.strictEqual(provider.can("imap", "web"), false, "no web UI to open a message in")
 assert.strictEqual(provider.can("gmail", "web"), true)
 assert.strictEqual(provider.can("gmail", "invented"), false, "an unknown capability is a no")
+
+// Whether opening a message marks it read as part of the same request. IMAP's
+// transport carries several commands on one connection, so the STORE rides on
+// the FETCH: two processes for an unread open rather than three, and no window
+// in which the fetch succeeded and the flag was never set. Gmail's API has no
+// way to fetch and modify at once, so there it stays a second request.
+assert.strictEqual(provider.can("imap", "fetchMarksRead"), true)
+assert.strictEqual(provider.can("gmail", "fetchMarksRead"), false)
+assert.strictEqual(provider.can("hey", "fetchMarksRead"), false,
+  "a provider that declares nothing gets the no")
 assert.strictEqual(provider.can("hey", "send"), false, "HEY has nothing behind it")
 
 // HEY is present as a future integration, but cannot connect until its client

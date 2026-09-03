@@ -115,7 +115,13 @@ Item {
       })
   }
 
-  function getMessage(id, full, callback) {
+  // `markSeen` is accepted and ignored: Gmail's API has no way to fetch and
+  // modify in one request, so marking read stays the separate call it always
+  // was. The argument is here because `MailAccount` drives both clients through
+  // one interface — same names, same arguments — and the provider declares
+  // whether the fold happened through `fetchMarksRead` rather than by having a
+  // different signature.
+  function getMessage(id, full, callback, markSeen) {
     return request("GET", Api.messagePath(id),
       full ? Api.fullQuery() : Api.metadataQuery(), null,
       function(status, payload, error) {

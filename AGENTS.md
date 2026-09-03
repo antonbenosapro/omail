@@ -195,6 +195,19 @@ key. What matters while working:
   it base64-encoded on one line of stdin, so a password never reaches the
   process table and nothing needs escaping on the way; the config carrying it
   goes to curl's own stdin rather than to a file that would be on disk.
+- **One process and one TLS connection per request, by design.** Nothing is
+  held open between requests. `docs/ARCHITECTURE.md` has the reasoning, what a
+  persistent connection would cost — hand-rolled SASL in QML JS, because the
+  host this exists for offers CRAM-MD5 and no PLAIN — and the three things that
+  exist because of the model: the retry, the two staggers, and the capability
+  probe cache. Do not remove any of them without replacing the model.
+- Several commands share one connection as `--next` sections, and that is where
+  the cost comes down. Two rules for anything folded that way: `--fail-early`
+  must be passed, or curl runs the rest of the sequence after one fails and
+  exits with the last transfer's code — which deleted a message whose COPY had
+  been refused; and the commands must not depend on each other's parsed output,
+  which is why SEARCH-then-FETCH is two processes and marking read is folded
+  into the FETCH.
 - **The response comes back base64 too, and that is load-bearing.** IMAP
   measures a literal in octets. Read as UTF-8 text, 2048 octets of a message
   with an accent in it is fewer than 2048 characters, and the parser walks off

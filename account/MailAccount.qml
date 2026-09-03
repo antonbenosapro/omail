@@ -100,6 +100,10 @@ Item {
   readonly property bool hasLabels: Provider.can(providerId, "labels")
   readonly property bool canOpenOnWeb: Provider.can(providerId, "web")
   readonly property bool canSend: Provider.can(providerId, "send")
+  // Whether opening a message marks it read as part of the same request. On
+  // IMAP the STORE rides on the FETCH's connection; Gmail has no way to fetch
+  // and modify at once, so there it stays the separate call it always was.
+  readonly property bool fetchMarksRead: Provider.can(providerId, "fetchMarksRead")
 
   // What the cache is keyed on. The page size is part of it: the same query at
   // a different size is a different result set, not a stale one.
@@ -726,6 +730,15 @@ Item {
     if (serial !== root.detailSerial) return
     var plan = Model.detailFetchPlan(root.detailCached, root.detailCached)
     var whole = plan.whole
+    // Whether this open should also mark the message read, decided from the
+    // row the list holds rather than from the answer that has not arrived. On
+    // a provider that folds it, the STORE goes out on the fetch's own
+    // connection; everywhere else this stays false and the separate call below
+    // does it once the answer says the message really was unread.
+    var known = Model.indexById(root.messages, messageId, root.accountId)
+    var wasUnread = known >= 0 && root.messages[known].unread === true
+    var folded = root.fetchMarksRead && wasUnread
+
     detailHandle = api.getMessage(messageId, whole, function(payload, error) {
       if (serial !== root.detailSerial) return
       root.detailLoading = false
@@ -752,7 +765,7 @@ Item {
       // nothing. The list row and the read flag are all this answer carries.
       if (!whole) {
         root.messages = Model.replaceById(root.messages, summary)
-        if (summary.unread) root.act(messageId, "markRead", true)
+        root.markOpenedRead(messageId, summary, folded)
         return
       }
 
@@ -797,10 +810,28 @@ Item {
       // there at once the next time this message is opened.
       root.loadInvite(messageId, serial, Calendar.pendingPart(payload.payload), record)
       root.messages = Model.replaceById(root.messages, summary)
-      // Opening a message is the one place Gmail's own clients mark it read
-      // without being asked, and a reader that leaves it bold is confusing.
-      if (summary.unread) root.act(messageId, "markRead", true)
-    })
+      root.markOpenedRead(messageId, summary, folded)
+    }, folded)
+  }
+
+  // Opening a message is the one place Gmail's own clients mark it read
+  // without being asked, and a reader that leaves it bold is confusing.
+  //
+  // Where the fetch carried the STORE, the server has already been told and
+  // there is nothing to send — but the answer describes the message as it was
+  // *before* that STORE, because the FETCH ran first so a BODY.PEEK would read
+  // an unread message as unread. So the row is corrected here rather than left
+  // showing a flag the server no longer holds.
+  function markOpenedRead(messageId, summary, folded) {
+    if (!summary || !summary.unread) return
+    if (!folded) {
+      root.act(messageId, "markRead", true)
+      return
+    }
+    var read = Model.applyLabelChange(summary, "markRead")
+    root.selectedMessage = read
+    root.messages = Model.replaceById(root.messages, read)
+    root.refreshCounts()
   }
 
   // The invitation the message pointed at. Nothing happens for the messages
