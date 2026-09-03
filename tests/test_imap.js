@@ -479,6 +479,42 @@ assert.strictEqual(imap.isFailure("A1 OK completed\r\n"), false)
 assert.strictEqual(imap.isFailure("A1 NO [AUTHENTICATIONFAILED] nope\r\n"), true)
 assert.strictEqual(imap.isFailure("A1 BAD syntax\r\n"), true)
 assert.strictEqual(imap.isFailure("* OK still going\r\n"), false, "untagged OK is not a failure")
+
+// A FETCH carries the whole message, and the message has lines of its own. The
+// tag was matched as "any run of non-space characters", which a header name is:
+// "X-Postal-Spam: no" is such a run, whitespace, and the word "no". A message
+// its own spam filter had cleared was therefore read as a server refusal, and
+// the reader stayed empty with the next header quoted back as the reason.
+var cleared = [
+  "* 1 FETCH (UID 12002 FLAGS () RFC822.SIZE 22370 BODY[] {120}",
+  "Return-Path: <sender@example.org>",
+  "X-Postal-Spam: no",
+  "X-Postal-Spam-Threshold: 3.0",
+  "X-Postal-Threat: no",
+  "DomainKey-Status: no signature",
+  "X-AXIGEN-DK-Result: No records",
+  "Subject: no way",
+  "",
+  "body",
+  ")"
+].join("\r\n")
+assert.strictEqual(imap.isFailure(cleared), false,
+  "a mail header is not a tagged NO")
+assert.strictEqual(imap.failureDetail(cleared), "",
+  "and there is no failure to describe")
+
+// A tag is alphanumerics and a few symbols (RFC 3501) and never contains a
+// colon, which is what separates one from a header name.
+assert.strictEqual(imap.isFailure("X-Postal-Spam: no"), false)
+assert.strictEqual(imap.isFailure("Subject: bad news"), false)
+// Case matters too: the protocol capitalises, the header did not.
+assert.strictEqual(imap.isFailure("A1 no such thing"), false,
+  "lower-case no is not the protocol word")
+// Real refusals still are ones.
+assert.strictEqual(imap.isFailure("a1 NO Mailbox does not exist"), true)
+assert.strictEqual(imap.failureDetail("a1 NO Mailbox does not exist"),
+  "Mailbox does not exist")
+assert.strictEqual(imap.isFailure("A17 BAD Command unrecognized"), true)
 assert.strictEqual(imap.failureDetail("A1 NO [AUTHENTICATIONFAILED] Invalid credentials\r\n"),
   "[AUTHENTICATIONFAILED] Invalid credentials")
 

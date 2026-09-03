@@ -848,12 +848,26 @@ function redact(text) {
 
 // Whether the tagged completion said OK. curl hides the tag from us for a
 // custom request, so this reads what it does surface.
+//
+// The tag is matched as a tag rather than as "any non-space run", because a
+// FETCH carries the whole message and the message has its own lines. `\S+`
+// matched a header — "X-Postal-Spam: no" is a non-space run, whitespace, and
+// the word "no" — so a message whose spam filter had cleared it was read as a
+// server refusal, and the reader stayed empty with the header quoted at the
+// user as the reason. RFC 3501 says a tag is alphanumerics and a few symbols,
+// and in particular contains no colon, which is what every header line has.
+//
+// `NO`/`BAD` are also matched case-sensitively: the protocol writes them in
+// capitals, and the header that started this says "no" in lower case.
+var TAGGED_FAILURE = /^[A-Za-z0-9][A-Za-z0-9.\-_]*[ \t]+(?:NO|BAD)[ \t]/m
+
 function isFailure(text) {
-  return /^\S+\s+(NO|BAD)\s/im.test(String(text || ""))
+  return TAGGED_FAILURE.test(String(text || ""))
 }
 
 function failureDetail(text) {
-  var match = String(text || "").match(/^\S+\s+(?:NO|BAD)\s+([\s\S]*)$/im)
+  var match = String(text || "")
+    .match(/^[A-Za-z0-9][A-Za-z0-9.\-_]*[ \t]+(?:NO|BAD)[ \t]+([\s\S]*)$/m)
   return match ? trimmed(match[1].split(/[\r\n]/)[0]) : ""
 }
 
