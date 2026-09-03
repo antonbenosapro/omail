@@ -52,7 +52,9 @@ b64() {
 # The script answers with three lines: the exit code, base64 stdout, base64
 # stderr. The stub echoes the config, so decoding line 2 is the config.
 config_for() {
-  printf '%s\n' "$1" | PATH="$work/bin:$PATH" sh "$script" | sed -n '2p' | base64 -d
+  printf '%s\n' "$1" \
+    | XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" \
+    | sed -n '2p' | base64 -d
 }
 
 check() {
@@ -99,7 +101,7 @@ check "mail transport bypasses desktop HTTP/SOCKS proxies" "$config" 'noproxy = 
 header_reply='* 1 FETCH (UID 7 FLAGS ())'
 out=$(printf '%s\n' "$request" \
   | CURL_STUB_HEADER="$header_reply" \
-    PATH="$work/bin:$PATH" sh "$script")
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
 decoded=$(printf '%s\n' "$out" | sed -n '2p' | base64 -d)
 if [ "$decoded" = "$header_reply" ]; then
   printf '  ok   IMAP protocol headers are returned when curl puts FETCH there\n'
@@ -114,7 +116,7 @@ body_reply='* 1 FETCH (UID 7 BODY[] {4}
 mail'
 out=$(printf '%s\n' "$request" \
   | CURL_STUB_HEADER='partial protocol preamble' CURL_STUB_BODY="$body_reply" \
-    PATH="$work/bin:$PATH" sh "$script")
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
 decoded=$(printf '%s\n' "$out" | sed -n '2p' | base64 -d)
 if [ "$decoded" = "$body_reply" ]; then
   printf '  ok   IMAP stdout wins when curl returns a complete BODY FETCH there\n'
@@ -159,7 +161,7 @@ check "a quoted folder name survives into the command" "$config" 'UID COPY 4 \"S
 
 for bad in 'file:///etc/passwd' 'https://evil.example.com/' 'ftp://example.com/'; do
   if printf '%s\n' "imap $(b64 "$bad") $(b64 'jane:pw') $(b64 'NOOP')" \
-    | PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then
+    | XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then
     printf '  FAIL %s was accepted\n' "$bad"
     failures=$(( failures + 1 ))
   else
@@ -169,7 +171,7 @@ done
 
 for good in 'imaps://a.example.org/INBOX' 'imap://127.0.0.1:1143/INBOX' 'smtps://a.example.org'; do
   if printf '%s\n' "imap $(b64 "$good") $(b64 'jane:pw') $(b64 'NOOP')" \
-    | PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then
+    | XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then
     printf '  ok   %s is accepted\n' "$good"
   else
     printf '  FAIL %s was refused\n' "$good"
@@ -199,9 +201,13 @@ check_absent "SMTP does not emit --next sections" "$config" 'next'
 
 axigen_imap='* CAPABILITY IMAP4rev1 IDLE STARTTLS AUTH=CRAM-MD5 AUTH=DIGEST-MD5 AUTH=GSSAPI ACL RIGHTS=texkbn'
 
+# The capability answer is cached per host, so each case gets a cache of its
+# own: without this the first probe's mechanisms decide every later assertion.
 probe_config_for() {
+  rm -rf "$work/cache"
   printf '%s\n' "$1" \
-    | CURL_STUB_CAPABILITY="$2" PATH="$work/bin:$PATH" sh "$script" \
+    | CURL_STUB_CAPABILITY="$2" XDG_CACHE_HOME="$work/cache" \
+      PATH="$work/bin:$PATH" sh "$script" \
     | sed -n '2p' | base64 -d
 }
 
@@ -266,13 +272,56 @@ check_absent "and names no mechanism it cannot complete" "$config" 'login-option
 
 lines=$(printf '%s\n' "$imap_req" \
   | CURL_STUB_CAPABILITY='* CAPABILITY IMAP4rev1 AUTH=GSSAPI' \
-    PATH="$work/bin:$PATH" sh "$script" | wc -l | tr -d ' ')
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" | wc -l | tr -d ' ')
 if [ "$lines" = "3" ]; then
   printf '  ok   a GSSAPI-only server still gets a three-line reply\n'
 else
   printf '  FAIL expected 3 lines from a GSSAPI-only server, got %s\n' "$lines"
   failures=$(( failures + 1 ))
 fi
+
+
+# The capability answer is cached per host. Several accounts on one server open
+# their connections together at startup, and a server that throttles concurrent
+# ones answers some with nothing at all — which named no mechanism, put curl
+# back on its own ranking and back onto GSSAPI, and produced the exit 94 this
+# whole probe exists to prevent. The second connection therefore reads the
+# first one's answer instead of asking again.
+rm -rf "$work/cache"
+printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY="$axigen_imap" XDG_CACHE_HOME="$work/cache" \
+    PATH="$work/bin:$PATH" sh "$script" >/dev/null
+cached=$(find "$work/cache/omamail/capabilities" -type f 2>/dev/null | wc -l | tr -d ' ')
+if [ "$cached" = "1" ]; then
+  printf '  ok   a probe answer is cached for the next connection\n'
+else
+  printf '  FAIL expected 1 cached capability file, found %s\n' "$cached"
+  failures=$(( failures + 1 ))
+fi
+
+# A throttled probe returns nothing, and caching that would make one bad
+# moment permanent for as long as the cache lives.
+rm -rf "$work/cache"
+printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY='' XDG_CACHE_HOME="$work/cache" \
+    PATH="$work/bin:$PATH" sh "$script" >/dev/null
+empty=$(find "$work/cache/omamail/capabilities" -type f 2>/dev/null | wc -l | tr -d ' ')
+if [ "$empty" = "0" ]; then
+  printf '  ok   an empty probe answer is not cached\n'
+else
+  printf '  FAIL an empty probe answer was cached\n'
+  failures=$(( failures + 1 ))
+fi
+
+# The cached answer is the one that decides, so a second connection whose own
+# probe would fail still names the mechanism the first one found.
+config=$(printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY="$axigen_imap" XDG_CACHE_HOME="$work/cache" \
+    PATH="$work/bin:$PATH" sh "$script" | sed -n '2p' | base64 -d)
+config=$(printf '%s\n' "$imap_req" \
+  | CURL_STUB_CAPABILITY='' XDG_CACHE_HOME="$work/cache" \
+    PATH="$work/bin:$PATH" sh "$script" | sed -n '2p' | base64 -d)
+check "a throttled second connection reuses the cached mechanism" "$config" 'login-options = "AUTH=CRAM-MD5"'
 
 # The bearer-token path names no mechanism: curl selects XOAUTH2 from the
 # option carrying the token, and a password mechanism would be wrong.
@@ -294,7 +343,7 @@ check_absent "SMTP does not choose GSSAPI without a ticket" "$config" 'AUTH=GSSA
 # The exit code is curl's own, so a transport failure is distinguishable from
 # a server that answered with NO.
 out=$(printf '%s\n' "imap $(b64 'imaps://a.example.org/INBOX') $(b64 'j:p') $(b64 'NOOP')" \
-  | CURL_STUB_EXIT=7 PATH="$work/bin:$PATH" sh "$script")
+  | CURL_STUB_EXIT=7 XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
 first=$(printf '%s' "$out" | sed -n '1p')
 if [ "$first" = "7" ]; then
   printf "  ok   curl's exit code is the first line\n"
@@ -304,7 +353,7 @@ else
 fi
 
 lines=$(printf '%s\n' "imap $(b64 'imaps://a.example.org/INBOX') $(b64 'j:p') $(b64 'NOOP')" \
-  | PATH="$work/bin:$PATH" sh "$script" | wc -l | tr -d ' ')
+  | XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" | wc -l | tr -d ' ')
 if [ "$lines" = "3" ]; then
   printf '  ok   three lines out: code, stdout, stderr\n'
 else
@@ -313,7 +362,7 @@ else
 fi
 
 # A malformed request must fail rather than run curl with something guessed.
-if printf 'not-base64-at-all\n' | PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then
+if printf 'not-base64-at-all\n' | XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then
   printf '  FAIL a malformed request was accepted\n'
   failures=$(( failures + 1 ))
 else

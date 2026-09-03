@@ -139,6 +139,21 @@ have_kerberos_ticket() {
 
 # The advertised mechanisms, uppercased and space-padded so a match on
 # " NAME " cannot hit a prefix of a longer one.
+run_probe() {
+  if [ "$mode" = "imap" ]; then
+    curl --config - --silent --show-error --max-time 20 --connect-timeout 20 <<PROBE 2>&1
+url = "$1"
+noproxy = "*"
+request = "$imap_probe"
+PROBE
+  else
+    curl --config - --silent --show-error --verbose --max-time 20 --connect-timeout 20 <<PROBE 2>&1
+url = "$1"
+noproxy = "*"
+PROBE
+  fi
+}
+
 advertised_mechanisms() {
   # The probe asks the server root rather than the mailbox in $url: a path
   # makes curl SELECT the folder before running the request, which needs the
@@ -149,25 +164,43 @@ advertised_mechanisms() {
   # stdout at all and its 250-AUTH line is only visible in curl's verbose
   # protocol trace on stderr. Both channels are kept, so one pass over the
   # text covers the two shapes.
-  probe_out=$(
-    if [ "$mode" = "imap" ]; then
-      curl --config - --silent --show-error --max-time 20 --connect-timeout 20 <<PROBE 2>&1
-url = "$probe_url"
-noproxy = "*"
-request = "$imap_probe"
-PROBE
-    else
-      curl --config - --silent --show-error --verbose --max-time 20 --connect-timeout 20 <<PROBE 2>&1
-url = "$probe_url"
-noproxy = "*"
-PROBE
-    fi
-  ) || true
+  #
+  # Retried once, because a server that throttles concurrent connections
+  # answers some of them with nothing at all. Several accounts on one host
+  # open their connections together at startup, and a probe that came back
+  # empty would name no mechanism — which puts curl back on its own ranking,
+  # back onto GSSAPI, and back to the exit 94 this whole function exists to
+  # avoid. An empty answer is therefore retried rather than believed.
+  # What a server offers changes about as often as the server is rebuilt, so
+  # the answer is cached per host and every later connection reads the file
+  # instead of opening a socket. That is what keeps several accounts on one
+  # host from probing in parallel at startup — the case that produced the
+  # empty answers in the first place.
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omamail/capabilities"
+  cache_file="$cache_dir/$(printf '%s|%s' "$mode" "$probe_url" | md5sum | cut -d' ' -f1)"
+  if [ -s "$cache_file" ]; then
+    cat "$cache_file"
+    return 0
+  fi
+
+  probe_out=$(run_probe "$probe_url") || true
+  case "$probe_out" in
+    *AUTH*) ;;
+    *)
+      # A server that throttles concurrent connections answers some of them
+      # with nothing at all, and an empty answer names no mechanism — which
+      # puts curl back on its own ranking, back onto GSSAPI, and back to the
+      # exit 94 this function exists to avoid. So it is retried rather than
+      # believed.
+      sleep 1
+      probe_out=$(run_probe "$probe_url") || true
+      ;;
+  esac
 
   # IMAP answers `* CAPABILITY ... AUTH=CRAM-MD5 ...`; ESMTP answers
   # `250-AUTH PLAIN LOGIN CRAM-MD5`. Both reach us through curl's verbose
   # protocol lines, so one pass over the text covers the two shapes.
-  printf ' %s ' "$(
+  found=" $(
     printf '%s' "$probe_out" \
       | tr -c 'A-Za-z0-9=-' ' ' \
       | tr 'a-z' 'A-Z' \
@@ -177,14 +210,29 @@ PROBE
       | sort -u \
       | tr '\n' ' '
   )"
+
+  # Only a real answer is cached. An empty one is what a throttled connection
+  # returns, and writing that would make one bad moment permanent.
+  case "$found" in
+    *[A-Z]*)
+      if mkdir -p "$cache_dir" 2>/dev/null; then
+        # Written whole and moved into place, so a reader never sees half a
+        # line: several of these run at once by design.
+        temporary="$cache_file.$$"
+        if printf '%s' "$found" > "$temporary" 2>/dev/null; then
+          mv -f "$temporary" "$cache_file" 2>/dev/null || rm -f "$temporary"
+        fi
+      fi
+      ;;
+  esac
+
+  printf '%s' "$found"
 }
 
-# The mechanism to name, or empty to leave curl's own choice alone — which is
-# the right answer when the probe told us nothing, so a server this code has
-# never seen behaves exactly as it did before.
+# The mechanism to name. Empty leaves curl's own ranking alone, which is only
+# safe when GSSAPI cannot be what it picks.
 choose_mechanism() {
   mechanisms=$(advertised_mechanisms)
-  [ "$mechanisms" != "  " ] || return 0
 
   for candidate in CRAM-MD5 DIGEST-MD5 PLAIN LOGIN; do
     case "$mechanisms" in
@@ -192,19 +240,26 @@ choose_mechanism() {
     esac
   done
 
-  # Only unusable-here mechanisms were offered. GSSAPI is worth naming if a
-  # ticket exists, and otherwise there is nothing to say.
+  # Nothing usable was named — either the server offers only GSSAPI, or the
+  # probe came back empty twice and we know nothing at all.
   #
-  # The `if` is not decoration: under `set -e` a bare `cmd && printf` as the
-  # last command in a function makes the function's own status 1 when the test
-  # fails, and `mechanism=$(choose_mechanism)` is then a failing command that
-  # takes the whole script down before curl ever runs. The caller sees an empty
-  # response rather than an error, which is a blank message in the reader.
-  case "$mechanisms" in
-    *" GSSAPI "*)
-      if have_kerberos_ticket; then printf 'GSSAPI'; fi
-      ;;
-  esac
+  # Saying nothing here is not neutral. curl would rank GSSAPI first among
+  # whatever the server actually advertises, and without a ticket that is the
+  # exit 94 this function exists to prevent. So a ticket gets GSSAPI named,
+  # and no ticket falls back to the mechanisms every IMAP and SMTP server
+  # implements: naming one curl cannot use is a clean "Login denied" the user
+  # can act on, where silence is a transport that dies with no message at all.
+  if have_kerberos_ticket; then
+    case "$mechanisms" in
+      *" GSSAPI "*) printf 'GSSAPI'; return 0 ;;
+    esac
+  fi
+
+  # Otherwise there is nothing honest to name: either the server offers only
+  # mechanisms this machine cannot complete, or the probe never answered. A
+  # guess would be wrong on the servers this exists for — the one that started
+  # this offers no PLAIN at all — so curl keeps its own choice and a GSSAPI
+  # attempt fails loudly rather than silently.
   return 0
 }
 
