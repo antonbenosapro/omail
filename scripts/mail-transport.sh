@@ -48,9 +48,24 @@ decode() {
 }
 
 # curl's config format quotes with "..." and escapes with a backslash. Only two
-# characters need it, and both turn up in real passwords.
+# characters need that, and both turn up in real passwords.
+#
+# A newline needs something else. curl's config parser is line-oriented and no
+# escape re-joins a split line, so a CR or an LF inside a value does not stay
+# inside it: the tail of the value becomes the next config line, and curl reads
+# a line as a directive. A password containing a newline could therefore add
+# `upload-file` or `output` to the request that carries it. Quoting cannot
+# express such a value, so it is removed rather than escaped — no IMAP command,
+# URL, address or credential may legally contain a bare CR or LF anyway.
+#
+# This is the transport's own guard, not the callers'. `ImapProtocol.js` strips
+# or encodes every value it composes, and did so before this existed; the point
+# is that a script holding a password must not depend on that being true of
+# whoever calls it next. Every value that becomes a config directive passes
+# through here and nothing else does — the SMTP message body is written to a
+# file, so a legitimately multi-line message never reaches this function.
 escape() {
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+  printf '%s' "$1" | tr -d '\r\n' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
 # One line, never wrapped and with no trailing newline of its own — the caller
