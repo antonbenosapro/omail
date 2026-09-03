@@ -483,7 +483,20 @@ Item {
   // ------------------------------------------------------------- forwarding
 
   property bool windowOpen: false
-  onWindowOpenChanged: if (current) current.windowOpen = windowOpen
+  // While unified every account is on screen, so every account has to know the
+  // window opened — not just `current`. Without this the others never run the
+  // refresh that `onWindowOpenChanged` does, and their half of a merged list
+  // stays as old as the last time they happened to be the active mailbox.
+  onWindowOpenChanged: {
+    if (root.unified) {
+      for (var i = 0; i < accountHosts.count; i++) {
+        var host = accountHosts.objectAt(i)
+        if (host) host.windowOpen = windowOpen
+      }
+      return
+    }
+    if (current) current.windowOpen = windowOpen
+  }
 
   readonly property var auth: current ? current.auth : null
   readonly property bool ready: !!current && current.ready
