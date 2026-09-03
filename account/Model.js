@@ -274,6 +274,46 @@ function byReceivedDescending(a, b) {
   return leftId < rightId ? -1 : 1
 }
 
+// ----------------------------------------------------------- spreading load
+//
+// Several mailboxes on one server open their connections in the same tick, and
+// a server that rations concurrent connections refuses some of them outright.
+// The unread poll already spreads itself this way; the window-open and startup
+// loads did not, and they are the bigger burst: opening the window runs a
+// profile read, a send-as read, a count and a list load per account, so five
+// accounts is twenty processes at once, which is the shape the server was
+// refusing.
+//
+// Derived from the account id so it is stable across restarts rather than
+// random — the same mailbox waits the same fraction every time, which is
+// debuggable — and bounded to a fraction of the interval so no mailbox is ever
+// meaningfully later than any other.
+function spreadHash(accountId) {
+  var id = String(accountId || "")
+  var hash = 0
+  for (var i = 0; i < id.length; i++) hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0
+  return Math.abs(hash)
+}
+
+// The poll's own offset: a quarter of the refresh interval, which spreads four
+// mailboxes on one host across the gap between polls.
+function pollOffsetMs(accountId, refreshIntervalSec) {
+  if (String(accountId || "") === "") return 0
+  var spread = Math.max(1, Math.floor(Number(refreshIntervalSec) * 250))
+  return spreadHash(accountId) % spread
+}
+
+// The offset before a window-open or startup load. Much shorter than the
+// poll's, because this one is in front of somebody who has just opened the
+// window: it has to spread the connections without the list visibly waiting
+// for them. Under a second across any number of mailboxes.
+var OPEN_SPREAD_MS = 900
+
+function openOffsetMs(accountId) {
+  if (String(accountId || "") === "") return 0
+  return spreadHash(accountId) % OPEN_SPREAD_MS
+}
+
 // --------------------------------------------------------- rebuilding a list
 //
 // Whether a new page of summaries is worth assigning over the list that is on

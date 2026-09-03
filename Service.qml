@@ -113,16 +113,13 @@ Item {
       var host = accountHosts.objectAt(i)
       if (!host) continue
       host.active = everyone || host === next
-      if (everyone) host.windowOpen = windowOpen
     }
 
     // `current` stays the mailbox the window would come back to, and is what
     // compose, sign-in and the settings page still speak to. What it is not,
     // while unified, is the owner of the message being read — that is resolved
     // per message by `hostForMessage`.
-    if (next === current) return
     current = next
-    if (current) current.windowOpen = windowOpen
   }
 
   // The whole point of switching is that it is instant, which it is because
@@ -485,21 +482,14 @@ Item {
 
   // ------------------------------------------------------------- forwarding
 
+  // Which accounts are on screen: every one while unified, otherwise the one
+  // the window came back to. The delegate binds its own `windowOpen` to this,
+  // rather than three places pushing the value in — `refreshCurrent` did it
+  // twice and `onWindowOpenChanged` a third time, and none of them ever set it
+  // false again, so after leaving unified the other hosts believed the window
+  // was open forever. That was inert only because `active` gates every load as
+  // well; two sources of truth for one fact is the bug waiting behind it.
   property bool windowOpen: false
-  // While unified every account is on screen, so every account has to know the
-  // window opened — not just `current`. Without this the others never run the
-  // refresh that `onWindowOpenChanged` does, and their half of a merged list
-  // stays as old as the last time they happened to be the active mailbox.
-  onWindowOpenChanged: {
-    if (root.unified) {
-      for (var i = 0; i < accountHosts.count; i++) {
-        var host = accountHosts.objectAt(i)
-        if (host) host.windowOpen = windowOpen
-      }
-      return
-    }
-    if (current) current.windowOpen = windowOpen
-  }
 
   readonly property var auth: current ? current.auth : null
   readonly property bool ready: !!current && current.ready
@@ -928,6 +918,10 @@ Item {
       // only the first one may claim it.
       mayAdoptLegacyToken: index === 0 && (!entry || entry.provider === "gmail")
       settings: root.settings
+      // One binding rather than a value pushed in from wherever somebody
+      // remembered to. It is false for a host that is not on screen, which is
+      // what nothing used to say.
+      windowOpen: root.windowOpen && (root.unified || root.current === this)
       // Every mailbox obeys the one answer: it is about what the reader is
       // willing to tell a sender, not about which account the mail came to.
       alwaysShowImages: root.alwaysShowImages

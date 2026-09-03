@@ -403,6 +403,60 @@ const untagged = [{ id: "7:INBOX", subject: "old cache" }]
 assert.strictEqual(model.indexById(untagged, "7:INBOX", "imap:a@example.org"), 0)
 assert.strictEqual(model.removeById(untagged, "7:INBOX", "imap:a@example.org").length, 0)
 
+// --------------------------------------------------------- spreading load
+//
+// Several mailboxes on one server open their connections in the same tick, and
+// a server that rations them refuses some outright. The poll already spread
+// itself; the window-open and startup loads did not, and they are the bigger
+// burst — a profile read, a send-as read, a count and a list load per account.
+
+const spreadIds = ["imap:a@example.org", "imap:b@example.org", "imap:c@example.org",
+  "imap:d@example.org", "imap:e@example.org"]
+
+// Stable across restarts, because it is derived from the id rather than drawn
+// at random: the same mailbox waits the same fraction every time, which is
+// what makes a refused connection reproducible.
+for (const id of spreadIds) {
+  assert.strictEqual(model.openOffsetMs(id), model.openOffsetMs(id))
+  assert.strictEqual(model.pollOffsetMs(id, 120), model.pollOffsetMs(id, 120))
+}
+
+// Bounded. The poll's offset is a quarter of the interval, so no mailbox is
+// polled meaningfully less often than any other.
+for (const id of spreadIds) {
+  const poll = model.pollOffsetMs(id, 120)
+  assert.ok(poll >= 0 && poll < 120 * 250,
+    "the poll offset stays inside a quarter of the interval")
+  const open = model.openOffsetMs(id)
+  assert.ok(open >= 0 && open < 1000,
+    "the open offset stays under a second, because somebody is waiting on it")
+}
+
+// And they actually spread: five mailboxes on one host must not land together.
+{
+  const offsets = spreadIds.map(function(id) { return model.openOffsetMs(id) })
+  const distinct = {}
+  for (const value of offsets) distinct[value] = true
+  assert.strictEqual(Object.keys(distinct).length, spreadIds.length,
+    "five accounts get five different open offsets: " + offsets.join(", "))
+
+  // Spread across the range rather than clustered in one corner of it.
+  offsets.sort(function(a, b) { return a - b })
+  assert.ok(offsets[offsets.length - 1] - offsets[0] > 200,
+    "and they are spread across the window, not bunched: " + offsets.join(", "))
+}
+
+// An account with no id yet is a mailbox still being added. It has nothing to
+// derive an offset from and nothing to collide with, so it waits for nothing.
+assert.strictEqual(model.openOffsetMs(""), 0)
+assert.strictEqual(model.pollOffsetMs("", 120), 0)
+assert.strictEqual(model.openOffsetMs(null), 0)
+
+// A refresh interval of zero must not divide by it or return NaN, which would
+// be an interval Qt reads as "never".
+assert.strictEqual(model.pollOffsetMs("imap:a@example.org", 0), 0)
+assert.ok(isFinite(model.pollOffsetMs("imap:a@example.org", 0)))
+
 // -------------------------------------------------------- rebuilding a list
 //
 // `messages` is a plain array bound to a Repeater, so a new array identity

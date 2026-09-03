@@ -1423,24 +1423,68 @@ Item {
 
   // ------------------------------------------------------------- lifecycle
 
+  // Opening the window runs a profile read, a send-as read and a list load, and
+  // becoming ready adds a count — four processes per account, launched in the
+  // same tick for every account at once. Five mailboxes is twenty connections
+  // opened together, and a server that rations concurrent ones refuses some of
+  // them outright: that is the burst the retry and the poll stagger exist to
+  // survive, arriving from the one path neither of them covered.
+  //
+  // So it is spread the way the poll is, by an offset derived from the account
+  // id. Under a second across any number of mailboxes, because unlike the poll
+  // this one is in front of somebody who has just opened the window.
+  readonly property int openOffsetMs: Model.openOffsetMs(root.accountId)
+
+  // What the burst is for, so a stagger has one thing to delay rather than a
+  // handler each. Either reason may arrive first, and both may arrive before
+  // the timer fires, so they accumulate into the pending set rather than
+  // replacing one another.
+  property bool openBurstReady: false
+  property bool openBurstWindow: false
+
   onWindowOpenChanged: {
     if (!windowOpen) return
     clearNotice()
     if (!ready) return
-    loadProfile()
-    loadSendAs()
-    if (!listLoaded) loadMessages(false)
-    else refresh()
+    openBurstWindow = true
+    openBurst.restart()
   }
 
   onReadyChanged: {
     if (!ready) return
+    openBurstReady = true
+    openBurst.restart()
+  }
+
+  function runOpenBurst() {
+    var becameReady = openBurstReady
+    var opened = openBurstWindow
+    openBurstReady = false
+    openBurstWindow = false
+    if (!ready) return
+
     loadProfile()
     loadSendAs()
-    refreshCounts()
+    // The count is what the bar badge reads, and it is polled whether or not
+    // the window is open — so becoming ready asks for it and opening the
+    // window does not need to.
+    if (becameReady) refreshCounts()
     if (!active) return
-    loadLabels()
-    if (windowOpen && !listLoaded) loadMessages(false)
+    if (becameReady) loadLabels()
+    if (!listLoaded) {
+      // A list is worth loading only where one would be looked at. Becoming
+      // ready with the window shut leaves it to the open that follows.
+      if (windowOpen) loadMessages(false)
+    } else if (opened) {
+      refresh()
+    }
+  }
+
+  Timer {
+    id: openBurst
+    interval: root.openOffsetMs
+    repeat: false
+    onTriggered: root.runOpenBurst()
   }
 
   // Becoming the account on screen is what earns a list.
@@ -1578,16 +1622,8 @@ Item {
   // is derived from the account id so it is stable across restarts rather than
   // random, and it is only ever a fraction of the interval, so a mailbox is
   // never polled meaningfully less often than any other.
-  readonly property int pollOffsetMs: {
-    var id = String(root.accountId || "")
-    if (id === "") return 0
-    var hash = 0
-    for (var i = 0; i < id.length; i++) hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0
-    // A quarter of the interval, which spreads four mailboxes on one host
-    // across the gap between polls without delaying any of them noticeably.
-    var spread = Math.max(1, Math.floor(root.refreshIntervalSec * 250))
-    return Math.abs(hash) % spread
-  }
+  readonly property int pollOffsetMs: Model.pollOffsetMs(root.accountId,
+    root.refreshIntervalSec)
 
   Timer {
     id: pollStagger
