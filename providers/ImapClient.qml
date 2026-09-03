@@ -227,9 +227,15 @@ Item {
             callback(null, error)
             return
           }
-          var uids = Imap.parseSearch(text)
-          // Ascending from the server; the newest message has the highest UID.
-          uids.reverse()
+          // Sorted rather than reversed. RFC 3501 does not oblige a server to
+          // return SEARCH results in any order, and Axigen answers in more
+          // than one ascending run — 1404 UIDs rising to 12009 and then
+          // restarting at 10374. Reversing that put the tail of the second run
+          // at the top of the list, so the newest mail on the server was
+          // simply absent from the page and the list appeared to stop days
+          // ago. Highest UID is newest within a folder, so sorting is what
+          // "newest first" actually means here.
+          var uids = Imap.parseSearch(text).sort(function(a, b) { return b - a })
           var page = uids.slice(offset, offset + limit)
           var ids = []
           for (var i = 0; i < page.length; i++) ids.push(Imap.messageId(page[i], folder))

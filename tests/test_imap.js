@@ -480,6 +480,22 @@ assert.strictEqual(imap.isFailure("A1 NO [AUTHENTICATIONFAILED] nope\r\n"), true
 assert.strictEqual(imap.isFailure("A1 BAD syntax\r\n"), true)
 assert.strictEqual(imap.isFailure("* OK still going\r\n"), false, "untagged OK is not a failure")
 
+// SEARCH results are not obliged to arrive in any order, and a real server
+// does not. Axigen answers in more than one ascending run — UIDs rising to
+// 12009, then restarting lower — so a client that reversed the list to get
+// "newest first" took the tail of the second run instead and the newest mail
+// on the server never appeared in the page at all.
+var twoRuns = "* SEARCH 10 11 12009 12008 12007 5 6 7\r\nA1 OK SEARCH completed\r\n"
+var found = imap.parseSearch(twoRuns)
+assert.strictEqual(found.length, 8, "every UID is parsed whatever the order")
+// Reversing is wrong; sorting is what newest-first means when the highest UID
+// in a folder is the newest message.
+var newestFirst = found.slice().sort(function(a, b) { return b - a })
+assert.strictEqual(newestFirst[0], 12009)
+assert.strictEqual(newestFirst[1], 12008)
+assert.strictEqual(found.slice().reverse()[0], 7,
+  "which reversing would have called the newest")
+
 // A FETCH carries the whole message, and the message has lines of its own. The
 // tag was matched as "any run of non-space characters", which a header name is:
 // "X-Postal-Spam: no" is such a run, whitespace, and the word "no". A message
