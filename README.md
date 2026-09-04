@@ -11,6 +11,12 @@ Works with **Gmail**, **Fastmail**, **iCloud Mail**, **Outlook**, **Yahoo**,
 **Zoho**, **GMX**, **Proton Mail** (through its Bridge), and any other IMAP
 server — including one you run yourself.
 
+> Originally forked from [huacnlee/omamail](https://github.com/huacnlee/omamail)
+> by [Jason Lee](https://github.com/huacnlee), whose work is the foundation this
+> is built on. This fork adds a unified inbox with per-account colours,
+> attachment saving, independent list and message zoom, and a number of IMAP
+> protocol fixes. See [Credit](#credit).
+
 ## Features
 
 - **Designed, not assembled.** Monospace, square-cornered, and built to sit
@@ -20,9 +26,23 @@ server — including one you run yourself.
 - **Gmail and IMAP.** Sign in to Gmail with Google directly, or add any IMAP
   mailbox with an address and an app password. Several accounts at once, each
   with its own inbox, cache and unread count.
+- **Every mailbox in one list.** "All mailboxes" merges every account's Inbox —
+  or Unread — into a single list, newest first, and a coloured bar down the
+  leading edge of each row says which mailbox it came from. The colour is
+  chosen per account on the settings page from a fixed set, so two mailboxes
+  are never told apart by shades nobody can distinguish. Replying answers from
+  the account that received the message, not the one on screen.
+- **Attachments you can open.** Click an attachment to save it to your
+  downloads directory and hand it to the desktop. The filename comes from the
+  sender, so it is reduced to a single path component before anything touches
+  the disk, and an existing file is never overwritten.
 - **Keyboard-first.** `j`/`k` to move, `e` to archive, `s` to star, `r` to
   reply, `c` to compose, `Alt+1`…`0` for the mailboxes — hold Alt and the rail says
   which is which — `Alt+A` to switch account, `/` to search, `?` for the rest.
+- **Sized for how you read.** `Ctrl+=` and `Ctrl+-` size the pane you are in.
+  The open message and the list keep separate sizes, because a message is read
+  and a list is scanned — a dense list beside a large message is a real way to
+  work on a wide screen. Both survive a close.
 - **Always counting.** The unread badge keeps working while the window is shut,
   for every account, with a desktop notification when new mail lands.
 - **One window.** Read, archive, star, trash, search, and answer without a
@@ -47,6 +67,11 @@ server — including one you run yourself.
 - **Keyring-backed.** The Gmail refresh token and every IMAP password live in
   GNOME Keyring — never in a config file, never on a command line.
 
+![Omamail: every mailbox in one list, each row striped in its account's colour](assets/unified-inbox.png)
+
+*Five mailboxes merged into one list. The bar down each row — and beside each
+address on the rail — is the account it arrived in.*
+
 <img width="800" alt="Omamail preview" src="https://github.com/user-attachments/assets/9da73cf7-9b08-421f-b818-bf4fe0e99c00" />
 
 And with mini size mode:
@@ -67,7 +92,7 @@ Three parts, one plugin:
 ## Add it to Omarchy
 
 ```bash
-omarchy plugin add https://github.com/huacnlee/omamail.git --enable
+omarchy plugin add https://github.com/jonathangeller/omail.git --enable
 ```
 
 Then click the envelope in the bar. To open it from the keyboard, add this to
@@ -173,7 +198,7 @@ and the client itself are console-only; there is no CLI for them.
 | `/` or `Ctrl+K` | Search |
 | `Alt+1` … `Alt+0` | The mailbox with that number on the rail |
 | `Alt+A` | Switch account |
-| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom what you are reading, or reset it. The list and the reader keep their own sizes; the focused one is what changes |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom the pane you are in, or reset it. The list and the open message keep their own sizes; the focused one is what changes |
 | `F5` | Check for mail |
 | `Ctrl+?` | Every shortcut |
 
@@ -191,7 +216,8 @@ trash, spam, star and read/unread without leaving the keyboard cursor behind.
   written in. A browser engine cannot be embedded in a plugin at all:
   `QtWebEngineQuick::initialize()` has to run before the host process builds
   its `QGuiApplication`, and a plugin loads long after that.
-- **No attachment downloads.** Not yet.
+- **No attachment previews.** An attachment is saved and handed to the desktop
+  to open; nothing is rendered inside the window.
 
 Remote images in a message body are blocked until you ask for them, and asking
 covers that one message. Qt really does fetch an `<img src="https://…">`, so
@@ -209,7 +235,12 @@ rather than to an address — so adding a second mailbox is a sign-in, not anoth
 trip through the console. Mailboxes are added and removed on the settings page,
 and switched from the menu, the user bar at the foot of the rail, or `Alt+A` —
 which opens the same switcher with the keyboard on the mailbox you are in:
-`j`/`k` move, `Enter` or `o` takes one.
+`j`/`k` move, `Enter` or `o` takes one. The same switcher offers **All
+mailboxes**, which merges every account's Inbox or Unread into one list and
+stripes each row in the colour that mailbox was given on the settings page.
+Archive, trash, star, RSVP and unsubscribe all resolve through the message
+rather than the account on screen, so they reach the right server in a merged
+list.
 
 The message list, labels and profile are cached per account so switching never
 waits on the network. Message bodies are cached one file per message — a
@@ -239,6 +270,28 @@ make validate         # node tests, source regressions, qmllint, manifest check
 
 Working agreements are in [AGENTS.md](AGENTS.md) and the specification is in
 [docs/SPEC.md](docs/SPEC.md).
+
+## Credit
+
+Omamail was created by **[Jason Lee](https://github.com/huacnlee)**
+(`huacnlee`) at [huacnlee/omamail](https://github.com/huacnlee/omamail), and
+this is a fork of it. The design, the three-entry-point plugin architecture,
+the Gmail API and IMAP providers, the Qt rich-text rendering with remote images
+blocked, the calendar invitations and one-click unsubscribe — all of that is
+his work, and it is what this is built on.
+
+The fork diverged at upstream's 0.3.0 and adds:
+
+- a **unified inbox** across every account, with a colour per mailbox and a
+  stripe on every row
+- **attachment saving**, with a sanitised filename and no overwrite
+- **independent zoom** for the list and the open message
+- IMAP fixes: SASL mechanism selection, capability caching, `SEARCH` result
+  ordering, `INTERNALDATE` parsing, connection reuse against servers that
+  ration connections, and a `NO`-in-a-header false positive
+
+Both the original and this fork are under the MIT License, and the copyright
+notice in [LICENSE](LICENSE) remains Jason Lee's.
 
 Omamail is an independent project and is not affiliated with Google.
 Gmail is a trademark of Google LLC.
