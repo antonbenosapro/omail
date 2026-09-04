@@ -43,6 +43,28 @@ var BINDINGS = [
   { id: "backToList", keys: ["u"], contexts: ["reader"],
     group: "Moving", label: "Back to the list" },
 
+  // The selection: what the next action acts on, which is neither where the
+  // keyboard is nor what the reader has open. `x` is the convention every
+  // webmail uses for it, and the acting keys below need no row of their own —
+  // `e` archives the set when there is one and the cursor's row when there is
+  // not, which is the same key meaning the same thing at two sizes.
+  //
+  // The list only. Selecting several messages is something done to a list, and
+  // the reader is showing exactly one — `x` there would mark a row nobody can
+  // see the marker on.
+  { id: "toggleMark", keys: ["x"], contexts: ["list"],
+    group: "Selecting", label: "Select or deselect this message",
+    hint: { list: "select" } },
+  // Shift+J and Shift+K rather than Shift+Down: the pair reads as the
+  // capitalised form of the movement keys, which is what it is.
+  { id: "extendDown", keys: ["Shift+J"], contexts: ["list"],
+    group: "Selecting", label: "Select and move down",
+    hintKey: "Shift+J / K" },
+  { id: "extendUp", keys: ["Shift+K"], contexts: ["list"],
+    group: "Selecting", label: "Select and move up" },
+  { id: "markAll", keys: ["Ctrl+A"], contexts: ["list"],
+    group: "Selecting", label: "Select everything loaded" },
+
   { id: "archive", keys: ["e"], contexts: MAIL,
     group: "Acting", label: "Archive",
     hint: { list: "archive", reader: "archive" } },

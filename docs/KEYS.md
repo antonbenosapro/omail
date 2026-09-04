@@ -87,6 +87,10 @@ used to exist, and they had.
 | `cursorUp` | `k`, `Up` | mail | Move up |
 | `open` | `Return`, `o` | mail | Open the selected message |
 | `backToList` | `u` | reader | Back to the list |
+| `toggleMark` | `x` | list | Select or deselect this message |
+| `extendDown` | `Shift+J` | list | Select and move down |
+| `extendUp` | `Shift+K` | list | Select and move up |
+| `markAll` | `Ctrl+A` | list | Select everything loaded |
 | `archive` | `e` | mail | Archive |
 | `trash` | `d` | mail | Move to trash |
 | `star` | `s` | mail | Star or unstar |
@@ -203,6 +207,18 @@ scroller goes, leaving it alone while the row is already visible so stepping one
 row does not drag the list under someone reading it. It is called from
 `moveCursor`, not from `cursorKey` changing, because hovering a row moves the
 cursor too and scrolling under the pointer fights the mouse.
+
+## The selection
+
+`cursorKey` is where the keyboard is, `selectedKey` is what the reader has open, and the selection is what the next action will act on. Three things that look alike and answer different questions: walking the list with `j` must not act on anything, and opening a message must not quietly enlist it in a bulk trash. Collapsing any pair of them would be the tempting simplification and each one is wrong.
+
+`x` toggles the row under the cursor, `Shift+J` and `Shift+K` mark both ends of a step, `Ctrl+A` takes everything loaded, and `Escape` clears — first, before it leaves anything else, because a set on screen is the nearest thing to put down. The acting keys need no rows of their own: `e`, `d`, `s`, `Shift+I` and `Shift+U` act on the set when there is one and on the cursor's row when there is not, which is one key meaning one thing at two sizes.
+
+The set holds row keys, like the cursor, and it holds them for **one mailbox**. A selection spanning three merged accounts would be three separate batch requests with three ways to half-fail and no useful way to report the three together; marking a row from another mailbox replaces the set rather than joining it, and switching account drops it. That keeps a bulk action to one `batchModify`.
+
+Extending only ever adds. `Shift+K` after three `Shift+J`s would otherwise have to un-mark, which needs an anchor and a direction — a range selection rather than an extension — and the two disagree the moment the cursor is moved by anything else in between. `x` is what un-marks one row.
+
+The rules are `Model.isMarked`, `toggleMark`, `addMark`, `marksForAll`, `marksAfterExtend`, `marksAfterReload`, `selectedRows` and `markedIdsFor`, all in `account/Model.js` so the node tests reach them. `markedIdsFor` is the one place the account half of a key is dropped, because that is the provider boundary and a client's batch path takes ids.
 
 ## The mouse
 

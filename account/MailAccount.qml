@@ -1071,6 +1071,108 @@ Item {
     }
   }
 
+  // The same action over a set, in one request rather than one per message.
+  // Shaped like `act` deliberately — optimistic first, reconcile after, put it
+  // back on failure — because the two are one behaviour at two sizes and a
+  // second shape would be a second set of bugs.
+  //
+  // What is different is the reporting. A batch can genuinely land on part of
+  // a set: Gmail has no batch trash so that path is a request per message, and
+  // `--fail-early` in the IMAP transport stops a folded sequence at its first
+  // failure. So the clients hand back how many actually moved, and the notice
+  // says "9 of 12 moved to trash" rather than claiming the set.
+  //
+  // Ids rather than keys, because this is inside one account: the account half
+  // of the key was resolved at the Service boundary, which is where the set
+  // was filtered to this mailbox in the first place.
+  function actOnMany(ids, action) {
+    var wanted = Array.isArray(ids) ? ids : []
+    if (!ready || wanted.length === 0) return
+    var verb = String(action || "")
+    if (verb === "") return
+
+    var before = messages.slice()
+    var beforeUnread = inboxUnread
+    var survives = Model.survivesAction(mailboxKey, verb)
+    var next = []
+    var touched = 0
+    for (var i = 0; i < messages.length; i++) {
+      var row = messages[i]
+      if (wanted.indexOf(row.id) < 0) {
+        next.push(row)
+        continue
+      }
+      touched++
+      if (verb === "markRead" && row.unread) inboxUnread = Math.max(0, inboxUnread - 1)
+      if (verb === "markUnread" && !row.unread) inboxUnread = inboxUnread + 1
+      // The reader is showing one of these and it is about to leave the list.
+      // Closing it here rather than after the request lands keeps the row and
+      // what is on screen telling the same story while the network works.
+      if (!survives && selectedId === row.id) clearSelection()
+      if (survives) next.push(Model.applyLabelChange(row, verb))
+    }
+    if (touched === 0) return
+    messages = next
+
+    function restore(error) {
+      root.messages = before
+      root.inboxUnread = beforeUnread
+      root.refreshCounts()
+      root.fail(error)
+    }
+
+    pendingAction = verb
+    var done = function(payload, error) {
+      root.pendingAction = ""
+      var moved = payload && payload.done !== undefined
+        ? Math.max(0, Math.floor(Number(payload.done) || 0))
+        : (error ? 0 : touched)
+      // Nothing landed, so nothing on screen should look as though it did.
+      // A partial result keeps its rows where they went: putting nine trashed
+      // messages back because three failed would be a worse lie than the one
+      // this is avoiding.
+      if (moved === 0) {
+        restore(error || "Nothing changed")
+        return
+      }
+      if (error) root.lastError = error
+      root.note(Model.bulkResultLabel(verb, moved, touched))
+      root.refreshCounts()
+      // A partial failure leaves the list disagreeing with the server about
+      // the messages that did not move, and only the server knows which.
+      if (moved < touched) root.refresh()
+    }
+
+    if (verb === "trash") {
+      api.batchTrash(wanted, done)
+      return
+    }
+    if (verb === "untrash") {
+      // No provider offers a batch untrash, so this is the one action that
+      // stays a request per message. Counted the same way, so the notice reads
+      // the same whichever route it took.
+      var remaining = wanted.length
+      var restored = 0
+      var firstError = ""
+      for (var u = 0; u < wanted.length; u++) {
+        api.untrashMessage(wanted[u], function(payload, error) {
+          if (error && firstError === "") firstError = error
+          if (!error) restored++
+          remaining--
+          if (remaining === 0) done({ done: restored }, firstError)
+        })
+      }
+      return
+    }
+    var change = Model.labelChangesFor(verb)
+    if (!change) {
+      pendingAction = ""
+      messages = before
+      return
+    }
+    api.batchModify(wanted, change.add, change.remove, done)
+  }
+
   function actionLabel(action) {
     if (action === "archive") return "Archived"
     if (action === "trash") return "Moved to trash"

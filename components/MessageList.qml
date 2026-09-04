@@ -18,6 +18,7 @@ Column {
 
   required property var service
   required property color textColor
+  required property color backgroundColor
   required property color accentColor
   required property color dimColor
   required property string panelFontFamily
@@ -58,6 +59,7 @@ Column {
 
       summary: modelData
       textColor: root.textColor
+      backgroundColor: root.backgroundColor
       accentColor: root.accentColor
       dimColor: root.dimColor
       panelFontFamily: root.panelFontFamily
@@ -72,12 +74,19 @@ Column {
       // draw as the cursor and as the open message.
       hasCursor: Model.keyMatches(root.cursorKey, modelData)
       selected: Model.keyMatches(root.service.selectedKey, modelData)
+      // In the set the next action acts on, which is neither of the two above.
+      // Compared on the whole key like they are, and for the same reason.
+      marked: Model.isMarked(root.service.markedKeys, Model.rowKey(modelData))
       // The row's own account's answer. Taking `current`'s drew an archive
       // button on every merged row whether or not the account behind it has
       // one — and a button that fails after the row has already moved is
       // worse than one that was never offered.
       canArchive: root.service.capabilityFor(Model.rowKey(modelData), "archive")
       onActivated: root.messageActivated(Model.rowKey(modelData))
+      // The box is the one place a click marks rather than opens. It goes
+      // straight to the service, like starring does, because marking is not a
+      // navigation the window has to follow.
+      onMarkToggled: root.service.toggleMark(Model.rowKey(modelData))
       onStarToggled: root.service.toggleStar(Model.rowKey(modelData))
       onArchiveRequested: root.service.act(Model.rowKey(modelData), "archive")
       onTrashRequested: root.service.act(Model.rowKey(modelData), "trash")
