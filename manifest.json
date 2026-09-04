@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omail",
   "name": "Omail",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Jonathan Geller <jonathangeller@users.noreply.github.com>",
   "credits": "Originally Omamail by Jason Lee <huacnlee@gmail.com>, https://github.com/huacnlee/omamail",
   "license": "MIT",
