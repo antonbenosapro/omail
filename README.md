@@ -173,7 +173,7 @@ and the client itself are console-only; there is no CLI for them.
 | `/` or `Ctrl+K` | Search |
 | `Alt+1` … `Alt+0` | The mailbox with that number on the rail |
 | `Alt+A` | Switch account |
-| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom the message body, or reset it |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom what you are reading, or reset it. The list and the reader keep their own sizes; the focused one is what changes |
 | `F5` | Check for mail |
 | `Ctrl+?` | Every shortcut |
 

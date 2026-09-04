@@ -36,7 +36,7 @@ readonly property string keyContext:
 | Context | What it is | What it binds |
 |---|---|---|
 | `list` | The message list | The mailbox keys |
-| `reader` | A message open | The mailbox keys, plus reply/forward and zoom. `j`/`k` move the cursor without opening; `o` or `Enter` opens what they landed on |
+| `reader` | A message open | The mailbox keys, plus reply/forward. `j`/`k` move the cursor without opening; `o` or `Enter` opens what they landed on |
 | `search` | A query being typed | `Escape`, and the modified keys |
 | `compose` | A draft being written | `Escape`, `Ctrl+Return`, and the modified keys |
 | `page` | Setup or settings | `Escape`, and the modified keys |
@@ -101,9 +101,9 @@ used to exist, and they had.
 | `searchAnywhere` | `Ctrl+K` | all | Search from anywhere |
 | `goMailbox` | `Alt+1`, `Alt+2`, `Alt+3`, `Alt+4`, `Alt+5`, `Alt+6`, `Alt+7`, `Alt+8`, `Alt+9`, `Alt+0` | mail | Go to that mailbox |
 | `switchAccount` | `Alt+A` | mail | Switch account |
-| `zoomIn` | `Ctrl++`, `Ctrl+=` | reader | Zoom the message body in |
-| `zoomOut` | `Ctrl+-` | reader | Zoom the message body out |
-| `zoomReset` | `Ctrl+0` | reader | Reset the zoom |
+| `zoomIn` | `Ctrl++`, `Ctrl+=` | mail | Zoom what you are reading in |
+| `zoomOut` | `Ctrl+-` | mail | Zoom what you are reading out |
+| `zoomReset` | `Ctrl+0` | mail | Reset the zoom |
 | `refresh` | `F5` | all | Check for mail |
 | `help` | `?`, `Ctrl+/`, `Ctrl+?` | mail | Toggle this sheet |
 | `back` | `Escape` | all | Back, or close the window |

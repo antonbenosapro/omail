@@ -32,4 +32,21 @@ if grep -q 'panelOpen' Service.qml; then
   fail "panelOpen is the old name; the window entry point sets windowOpen"
 fi
 
+# Zoom is two persisted values, and one of them has a previous name. Somebody
+# upgrading has `bodyZoom` on disk from when it sized only the message body;
+# that is the size they read messages at, so it has to land on readingZoom
+# rather than resetting them to 1.0. The fallback is easy to drop in a later
+# edit of applyWindowPrefs and nothing at runtime would complain — the zoom
+# would just quietly be gone the next time they opened the window.
+grep -q 'property real readingZoom' Service.qml \
+  || fail "Service.qml must hold the reader's zoom as readingZoom"
+grep -q 'property real listZoom' Service.qml \
+  || fail "Service.qml must hold the list's zoom separately as listZoom"
+grep -q 'parsed.bodyZoom' Service.qml \
+  || fail "applyWindowPrefs must still read the old bodyZoom key, or an upgrade loses the zoom"
+grep -q 'readingZoom: readingZoom' Service.qml \
+  || fail "saveWindowPrefs must persist readingZoom"
+grep -q 'listZoom: listZoom' Service.qml \
+  || fail "saveWindowPrefs must persist listZoom"
+
 printf 'test_service_source.sh ok\n'

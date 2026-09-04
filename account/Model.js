@@ -159,6 +159,8 @@ function applyLabelChange(summary, action) {
 var ZOOM_MIN = 0.6
 var ZOOM_MAX = 2.5
 var ZOOM_STEPS_PER_UNIT = 20
+// Below this a caption stops being text and becomes texture.
+var ZOOM_FONT_MIN = 7
 
 // What a zoom read back off disk means. Anything that is not a number is a
 // file that was hand-edited or never written, and the answer to both is the
@@ -174,6 +176,18 @@ function clampZoom(value) {
 function zoomAfterStep(zoom, step) {
   var by = Number(step)
   return clampZoom(clampZoom(zoom) + (isFinite(by) ? by : 0))
+}
+
+// A size in pixels, once a zoom has been applied to it. Every scaled piece of
+// text in the window asks this rather than doing the arithmetic itself: the
+// floor is the point of it. At the bottom of the range a caption rounds to 6px
+// and a snippet becomes a grey smear that reports nothing — so nothing drawn
+// goes below 7, whatever the zoom says. Written out at each call site it was a
+// rule in eleven places, which is a rule that drifts.
+function zoomedFontSize(size, zoom) {
+  var base = Number(size)
+  if (!isFinite(base) || base <= 0) return ZOOM_FONT_MIN
+  return Math.max(ZOOM_FONT_MIN, Math.round(base * clampZoom(zoom)))
 }
 
 function showInitialListSkeleton(loading, messageCount) {

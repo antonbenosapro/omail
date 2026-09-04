@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import qs.Commons
 import qs.Ui
+import "../account/Model.js" as Model
 import "../message/Html.js" as Html
 import "../message/Message.js" as Mail
 
@@ -175,7 +176,11 @@ Item {
         selectionColor: Style.selectionFillFor(root.textColor, root.accentColor)
         selectedTextColor: root.textColor
         font.family: root.panelFontFamily
-        font.pixelSize: Style.font.subtitle
+        // The header scales with the body it belongs to. Somebody who said "I
+        // read at this size" said it about the message, not about one paragraph
+        // of it — a subject fixed above a body at 2.5x is one message drawn at
+        // two sizes.
+        font.pixelSize: Model.zoomedFontSize(Style.font.subtitle, root.zoom)
         font.bold: true
         wrapMode: TextEdit.Wrap
       }
@@ -196,7 +201,7 @@ Item {
         selectionColor: Style.selectionFillFor(root.textColor, root.accentColor)
         selectedTextColor: root.textColor
         font.family: root.panelFontFamily
-        font.pixelSize: Style.font.bodySmall
+        font.pixelSize: Model.zoomedFontSize(Style.font.bodySmall, root.zoom)
         wrapMode: TextEdit.Wrap
       }
 
@@ -213,7 +218,7 @@ Item {
         selectionColor: Style.selectionFillFor(root.textColor, root.accentColor)
         selectedTextColor: root.dimColor
         font.family: root.panelFontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
         wrapMode: TextEdit.Wrap
       }
     }
@@ -373,7 +378,7 @@ Item {
       // scanned. At bodySmall it was 11px against the 9pt — twelve — of the
       // terminal beside it, so the message was the smallest text on a screen
       // whose owner had already said what size they read at.
-      font.pixelSize: Math.max(7, Math.round(Style.font.body * root.zoom))
+      font.pixelSize: Model.zoomedFontSize(Style.font.body, root.zoom)
       onLinkActivated: function(link) {
         var image = Html.imageLinkIndex(link)
         if (image > 0) {

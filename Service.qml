@@ -341,7 +341,14 @@ Item {
   // Somebody who needed the text bigger needs it bigger for their mail, not for
   // the message that made them reach for it. The same goes for reading it as
   // plain text: that is a way of reading mail, not a way of reading one.
-  property real bodyZoom: 1.0
+  //
+  // Two sizes, not one. A message is read and a list is scanned, and on a wide
+  // screen those are different jobs at different sizes — a dense list beside a
+  // large message is a real way to work, and one shared value cannot express
+  // it. Each is set from the pane it applies to, so the keys mean "bigger than
+  // this" wherever they are pressed.
+  property real readingZoom: 1.0
+  property real listZoom: 1.0
   property bool plainTextForced: false
   // Off until somebody says otherwise, and then it stays said. Loading a
   // remote image tells its host that this address opened this message, at this
@@ -358,7 +365,13 @@ Item {
     try { parsed = JSON.parse(String(raw || "")) } catch (e) { parsed = null }
     if (parsed && typeof parsed === "object") {
       sidebarCollapsed = parsed.sidebarCollapsed === true
-      bodyZoom = Model.clampZoom(parsed.bodyZoom)
+      // `bodyZoom` is what this was called when it sized only the body. Somebody
+      // who set one is telling us the size they read messages at, so it becomes
+      // the reading zoom rather than resetting to 1.0 on upgrade. The list had
+      // no zoom to inherit and starts where it shipped.
+      readingZoom = Model.clampZoom(
+        parsed.readingZoom === undefined ? parsed.bodyZoom : parsed.readingZoom)
+      listZoom = Model.clampZoom(parsed.listZoom)
       plainTextForced = parsed.plainTextForced === true
       alwaysShowImages = parsed.alwaysShowImages === true
     }
@@ -379,7 +392,8 @@ Item {
     windowPrefsSettling.stop()
     windowWritePayload = JSON.stringify({
       sidebarCollapsed: sidebarCollapsed,
-      bodyZoom: bodyZoom,
+      readingZoom: readingZoom,
+      listZoom: listZoom,
       plainTextForced: plainTextForced,
       alwaysShowImages: alwaysShowImages
     })
@@ -394,10 +408,17 @@ Item {
     saveWindowPrefs()
   }
 
-  function setBodyZoom(value) {
+  function setReadingZoom(value) {
     var next = Model.clampZoom(value)
-    if (next === bodyZoom) return
-    bodyZoom = next
+    if (next === readingZoom) return
+    readingZoom = next
+    saveWindowPrefs()
+  }
+
+  function setListZoom(value) {
+    var next = Model.clampZoom(value)
+    if (next === listZoom) return
+    listZoom = next
     saveWindowPrefs()
   }
 

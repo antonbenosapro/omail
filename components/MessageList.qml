@@ -21,6 +21,8 @@ Column {
   required property color accentColor
   required property color dimColor
   required property string panelFontFamily
+  // The list's own reading size, held apart from the reader's.
+  property real zoom: 1.0
   // Where the keyboard is, as a row key: the account and the id together. A
   // bare id is not an address in a merged list — two mailboxes can hold one —
   // and deriving the account from the id afterwards answered with whichever
@@ -59,6 +61,7 @@ Column {
       accentColor: root.accentColor
       dimColor: root.dimColor
       panelFontFamily: root.panelFontFamily
+      zoom: root.zoom
       // The stripe that says which mailbox this arrived in, and only where
       // there is more than one: in a single-account list every row would
       // carry the same colour, which says nothing.
@@ -108,7 +111,7 @@ Column {
           : ""
       color: root.dimColor
       font.family: root.panelFontFamily
-      font.pixelSize: Style.font.bodySmall
+      font.pixelSize: Model.zoomedFontSize(Style.font.bodySmall, root.zoom)
       wrapMode: Text.WordWrap
     }
   }

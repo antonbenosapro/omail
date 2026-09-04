@@ -77,12 +77,31 @@ Item {
   // the theme's font scale, which is Omarchy's to set, not this app's. The
   // service holds it because it is written to disk: a size somebody reached for
   // is theirs until they change it, not until they close the window.
-  readonly property real bodyZoom: service ? service.bodyZoom : 1.0
+  readonly property real readingZoom: service ? service.readingZoom : 1.0
+  readonly property real listZoom: service ? service.listZoom : 1.0
   // 0 means "proportional"; anything else is a width somebody dragged to.
   property real listWidth: 0
 
+  // The pane the keyboard is in is the pane that resizes. One key pair, two
+  // sizes: pressed in the reader it means "this message bigger", pressed in the
+  // list it means "these rows bigger" — which is what "bigger" means to
+  // somebody who is looking at one of them.
+  function zoomTargetIsList() {
+    return focusScope.keyContext === "list"
+  }
+
   function zoomBy(step) {
-    if (service) service.setBodyZoom(Model.zoomAfterStep(service.bodyZoom, step))
+    if (!service) return
+    if (zoomTargetIsList())
+      service.setListZoom(Model.zoomAfterStep(service.listZoom, step))
+    else
+      service.setReadingZoom(Model.zoomAfterStep(service.readingZoom, step))
+  }
+
+  function zoomReset() {
+    if (!service) return
+    if (zoomTargetIsList()) service.setListZoom(1.0)
+    else service.setReadingZoom(1.0)
   }
   property bool shortcutHelpVisible: false
   property bool setupVisible: false
@@ -347,7 +366,7 @@ Item {
     if (id === "switchAccount") return accountSwitcher.openCentered()
     if (id === "zoomIn") return zoomBy(0.1)
     if (id === "zoomOut") return zoomBy(-0.1)
-    if (id === "zoomReset") { if (service) service.setBodyZoom(1.0); return }
+    if (id === "zoomReset") return zoomReset()
     if (id === "refresh") {
       if (service) service.refresh()
       return
@@ -866,6 +885,7 @@ Item {
               accentColor: root.accent
               dimColor: root.dim
               panelFontFamily: root.fontFamily
+              zoom: root.listZoom
               cursorKey: root.cursorKey
               onMessageActivated: function(key) { root.openMessage(key) }
               onMenuRequested: function(key, sceneX, sceneY) {
@@ -939,13 +959,18 @@ Item {
           popupBorderColor: root.popupBorder
           leadingBoundaryOverlap: listSplitter.visible ? listSplitter.width : 0
           panelFontFamily: root.fontFamily
-          zoom: root.bodyZoom
+          zoom: root.readingZoom
           showBack: root.compact
           forcePlainText: root.plainTextForced
           onTogglePlainTextRequested: if (root.service)
             root.service.setPlainTextForced(!root.service.plainTextForced)
-          onZoomRequested: function(step) { root.zoomBy(step) }
-          onZoomResetRequested: if (root.service) root.service.setBodyZoom(1.0)
+          // The wheel is over the message, so it sizes the message — the
+          // keyboard context does not enter into it.
+          onZoomRequested: function(step) {
+            if (root.service) root.service.setReadingZoom(
+              Model.zoomAfterStep(root.service.readingZoom, step))
+          }
+          onZoomResetRequested: if (root.service) root.service.setReadingZoom(1.0)
           onBackRequested: root.backToList()
           onComposeRequested: function(mode) {
             root.composeReturnView = root.currentView

@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../account/Model.js" as Model
 
 // One message in the list. Unread is carried by weight and by the dot on the
 // left, never by colour alone — the accent is a theme value that some themes
@@ -15,6 +16,9 @@ Rectangle {
   required property string panelFontFamily
   // Passed down rather than read off a service: a row draws one message and
   // has no other use for one.
+  // The list keeps its own reading size, separate from the reader's: a dense
+  // list beside a large message is a real way to work on a wide screen.
+  property real zoom: 1.0
   property bool canArchive: true
   property bool hasCursor: false
   property bool selected: false
@@ -124,7 +128,7 @@ Rectangle {
         text: root.summary.subject
         color: root.textColor
         font.family: root.panelFontFamily
-        font.pixelSize: Style.font.body
+        font.pixelSize: Model.zoomedFontSize(Style.font.body, root.zoom)
         font.bold: root.summary.unread
         elide: Text.ElideRight
       }
@@ -137,7 +141,7 @@ Rectangle {
         text: root.summary.time
         color: root.dimColor
         font.family: root.panelFontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
       }
     }
 
@@ -147,7 +151,7 @@ Rectangle {
       text: root.summary.from.display
       color: root.dimColor
       font.family: root.panelFontFamily
-      font.pixelSize: Style.font.bodySmall
+      font.pixelSize: Model.zoomedFontSize(Style.font.bodySmall, root.zoom)
       elide: Text.ElideRight
     }
 
@@ -158,7 +162,7 @@ Rectangle {
       text: root.summary.snippet
       color: Qt.rgba(root.textColor.r, root.textColor.g, root.textColor.b, 0.42)
       font.family: root.panelFontFamily
-      font.pixelSize: Style.font.caption
+      font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
       elide: Text.ElideRight
       maximumLineCount: 1
     }
