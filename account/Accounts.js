@@ -121,7 +121,12 @@ function makeAccount(account) {
     clientSecret: trimmed(raw.clientSecret),
     imap: makeImapSettings(raw.imap),
     label: trimmed(raw.label),
-    color: normalizeColor(raw.color)
+    color: normalizeColor(raw.color),
+    // Whether this mailbox is one of the ones the merged view merges. Absent
+    // means yes: every account written before this field existed was in the
+    // merged list, and so is every account added afterwards, so an install
+    // that never opens this setting behaves exactly as it did.
+    merged: raw.merged !== false
   }
 }
 
@@ -299,18 +304,126 @@ function discardDraftAt(list, index) {
   return removeAt(source, at)
 }
 
+// ------------------------------------------------------- what gets merged
+//
+// Which mailboxes the merged view draws from. An account is in it unless the
+// user took it out, so an install that never opens this setting sees exactly
+// what it saw before the setting existed, and an account added later joins the
+// merged list rather than silently staying out of a view the user is looking at.
+//
+// This is only about the merged view. An excluded mailbox is untouched
+// everywhere else: it still polls, still counts toward the bar's badge, and is
+// still one row in the switcher that shows its own mail when chosen.
+
+function isMerged(account) {
+  var entry = account || {}
+  return entry.merged !== false
+}
+
+// Only accounts that could appear in a list at all. A row still being filled
+// in has no id, so it has nothing to merge and cannot be counted as one of the
+// two mailboxes that make a merged view mean something.
+function mergedAccounts(list) {
+  var source = list || {}
+  var values = Array.isArray(source.accounts) ? source.accounts : []
+  var out = []
+  for (var i = 0; i < values.length; i++) {
+    var entry = values[i] || {}
+    if (trimmed(entry.id) === "") continue
+    if (isMerged(entry)) out.push(entry)
+  }
+  return out
+}
+
+function mergedCount(list) {
+  return mergedAccounts(list).length
+}
+
+// The ids the merged view draws from. A QML binding cannot depend on what a
+// function reads, so the merging bindings in `Service.qml` name this value and
+// then re-evaluate when it changes — which is what makes taking a mailbox out
+// of the merged view redraw the list rather than leaving mail in it that the
+// view no longer merges.
+function mergedIds(list) {
+  var values = mergedAccounts(list)
+  var out = []
+  for (var i = 0; i < values.length; i++) out.push(String(values[i].id))
+  return out
+}
+
+// Membership in that list, kept here beside what builds it: a caller that
+// compared with `indexOf` would be one place that could disagree about how an
+// id is normalised.
+function includesId(ids, id) {
+  var values = Array.isArray(ids) ? ids : []
+  var key = trimmed(id)
+  if (!key) return false
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i]) === key) return true
+  }
+  return false
+}
+
+// Taking a mailbox in or out. By position rather than by id, for the same
+// reason colours are: a mailbox that has not signed in yet has no id, and it
+// is still a row with a switch on it.
+//
+// Nothing here turns the merged view off. Deselecting down to one mailbox
+// makes `isUnified` false on its own — the view falls back to the single
+// mailbox `activeId` still names — and the stored `unified` flag is kept, so
+// putting a second mailbox back restores the merged view the user chose.
+//
+// The input list is handed straight back when nothing would change, so the
+// caller's `next === list` test is an honest "nothing to save": a binding that
+// re-evaluates does not rewrite accounts.json and restart every fetch.
+function setMergedAt(list, index, on) {
+  if (!isObject(list)) return copyList(list)
+  var at = Math.floor(Number(index))
+  var values = Array.isArray(list.accounts) ? list.accounts : []
+  if (!isFinite(at) || at < 0 || at >= values.length) return list
+  if (isMerged(values[at]) === (on === true)) return list
+
+  var next = copyList(list)
+  var entry = next.accounts[at]
+  var wanted = on === true
+  // Rebuilt through makeAccount rather than edited, so an entry cannot end up
+  // with a shape the rest of this file does not expect.
+  var replacement = {}
+  for (var key in entry) replacement[key] = entry[key]
+  replacement.merged = wanted
+  next.accounts = next.accounts.slice()
+  next.accounts[at] = makeAccount(replacement)
+  return next
+}
+
 // Turning the unified view on and off. `activeId` is untouched, so the view
 // remembers which mailbox to come back to.
 function setUnified(list, on) {
   var next = copyList(list)
-  next.unified = on === true && next.accounts.length > 1
+  next.unified = on === true && mergedCount(next) > 1
   return next
 }
 
+// One mailbox is not several, and that is true whether the second one was
+// never added or was taken out of the merged view. Below two included
+// mailboxes there is nothing to merge, so the window shows the single mailbox
+// `activeId` names instead of a "merged" list with one account in it.
 function isUnified(list) {
   var source = list || {}
-  var accounts = Array.isArray(source.accounts) ? source.accounts : []
-  return source.unified === true && accounts.length > 1
+  return source.unified === true && mergedCount(source) > 1
+}
+
+// Whether the merged view is worth offering at all: the switcher's row and the
+// settings switches are drawn from this rather than from the raw account
+// count, so a row never promises a view that would show one mailbox.
+function offersUnified(list) {
+  var source = list || {}
+  var values = Array.isArray(source.accounts) ? source.accounts : []
+  var named = 0
+  for (var i = 0; i < values.length; i++) {
+    if (trimmed((values[i] || {}).id) !== "") named++
+  }
+  return named > 1
 }
 
 // The colour a mailbox's rows are striped with. Addressed by position rather
@@ -364,9 +477,11 @@ function load(text) {
 
   var wanted = trimmed(raw.activeId).toLowerCase()
   next.activeId = indexOfId(next.accounts, wanted) >= 0 ? wanted : nextActiveId(next.accounts, 0)
-  // One mailbox is not several, so a unified view over a single account is
-  // just that account — and saying so here keeps every caller from having to.
-  next.unified = raw.unified === true && next.accounts.length > 1
+  // One mailbox is not several, so a unified view over a single included
+  // account is just that account — and saying so here keeps every caller from
+  // having to. A hand-edited file that excludes everything reads back the same
+  // way the UI would have left it: not unified, and still showing `activeId`.
+  next.unified = raw.unified === true && mergedCount(next) > 1
   return next
 }
 

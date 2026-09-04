@@ -25,6 +25,7 @@ Column {
   signal addRequested()
   signal editRequested(int index)
   signal colorChosen(int index, string color)
+  signal mergedToggled(int index, bool merged)
 
   // The colours a mailbox may be given, and the only ones offered: a fixed set
   // keeps two mailboxes from being told apart by shades nobody can distinguish,
@@ -37,6 +38,12 @@ Column {
 
   readonly property var accounts: service ? service.accountSummaries : []
   readonly property var auth: service ? service.auth : null
+
+  // Which mailboxes the merged view draws from is a question only a window
+  // with more than one mailbox has, so the switches appear with the second
+  // account and not before.
+  readonly property bool offersUnified: !!service && service.offersUnified
+  readonly property int mergedCount: service ? service.mergedCount : 0
 
   spacing: Style.space(16)
 
@@ -122,6 +129,24 @@ Column {
     font.family: root.panelFontFamily
     font.pixelSize: Style.font.caption
     font.letterSpacing: 1
+  }
+
+  // What the switches on the rows below do, said once here rather than on
+  // every row. Shown only where there is a merged view to be in.
+  Text {
+    width: parent.width
+    visible: root.offersUnified
+    text: {
+      var included = root.mergedCount
+      var of = included === 1
+        ? "All mailboxes is drawing from one mailbox, so it shows that mailbox on its own"
+        : "All mailboxes is drawing from " + included + " of them"
+      return of + ". A mailbox left out still has its own row above and in the switcher."
+    }
+    color: root.dimColor
+    font.family: root.panelFontFamily
+    font.pixelSize: Style.font.caption
+    wrapMode: Text.WordWrap
   }
 
   Column {
@@ -313,6 +338,33 @@ Column {
               cursorShape: Qt.PointingHandCursor
               onClicked: row.customOpen = !row.customOpen
             }
+          }
+
+          // Whether All mailboxes draws from this one. A button rather than a
+          // switch: the row already carries seven swatches and Edit, and a
+          // switch wide enough to read beside them does not fit — and a button
+          // can say in words which of the two states it is in.
+          //
+          // Taking out the second-to-last mailbox is allowed and is not an
+          // error: it leaves one mailbox included, All mailboxes has nothing
+          // to merge, and the window shows that mailbox on its own. Nothing is
+          // hidden by it — every mailbox is still its own row in the switcher.
+          IconTextButton {
+            visible: root.offersUnified
+            // The label says which state the mailbox is in, not what the
+            // button would do: with a glyph and a fill saying the same thing
+            // three ways over, a label that named the action would be the one
+            // of the four that disagreed.
+            iconName: row.modelData.merged === false ? "" : "check"
+            text: row.modelData.merged === false ? "Not in All mailboxes" : "In All mailboxes"
+            selected: row.modelData.merged !== false
+            foreground: root.textColor
+            accent: root.accentColor
+            fontFamily: root.panelFontFamily
+            tooltipText: row.modelData.merged === false
+              ? "Include this mailbox in the All mailboxes view"
+              : "Leave this mailbox out of the All mailboxes view"
+            onClicked: root.mergedToggled(row.index, row.modelData.merged === false)
           }
 
           IconTextButton {
