@@ -816,6 +816,15 @@ Item {
   readonly property bool sending: !!current && current.sending
   readonly property string lastError: current ? current.lastError : ""
   readonly property string actionStatus: current ? current.actionStatus : ""
+  // What the status-bar notice offers alongside its sentence, empty when it
+  // offers nothing. Read off the same account the sentence came from, so the
+  // two cannot describe different mailboxes.
+  readonly property string undoLabel: current ? current.undoLabel : ""
+  readonly property bool undoBusy: !!current && current.undoBusy
+  // The row an undo would bring back, as a row key. The window reads it before
+  // undoing, because taking the offer spends it: afterwards there is nothing
+  // left to ask where the cursor should go.
+  readonly property string undoKey: current ? current.undoKey : ""
   readonly property string signInProgress: current ? current.signInProgress : ""
   readonly property string syncedLabel: current ? current.syncedLabel : ""
 
@@ -916,6 +925,14 @@ Item {
   function act(key, action, quiet) {
     var host = hostForMessage(key)
     if (host) host.act(Model.keyId(key), action, quiet)
+  }
+
+  // The account whose notice is on screen, which is `current` for the same
+  // reason `actionStatus` is: the offer and the sentence beside it are one
+  // thing, and taking one from a different mailbox than the other is how an
+  // undo lands somewhere nobody was looking.
+  function undo() {
+    if (current) current.undo()
   }
   function toggleStar(key) {
     var host = hostForMessage(key)

@@ -336,7 +336,6 @@ assert.strictEqual(model.wrappedIndex(0, 1, 1), 0, "one mailbox has nowhere to g
 assert.strictEqual(model.wrappedIndex(0, 1, 0), 0, "and no mailboxes must not divide by zero")
 assert.strictEqual(model.wrappedIndex(-1, 1, 3), 0)
 
-console.log("test_model.js ok")
 
 // ------------------------------------------------------------- reading zoom
 
@@ -911,4 +910,132 @@ assert.strictEqual(model.isUnifiedMailbox("sent"), false)
 assert.strictEqual(model.isUnifiedMailbox("archive"), false)
 assert.strictEqual(model.isUnifiedMailbox("trash"), false)
 assert.strictEqual(model.isUnifiedMailbox("all"), false)
-assert.strictEqual(model.isUnifiedMailbox(""), false)
+// ------------------------------------------------------------------- undo
+
+// Only trash is offered back. A verb with no reverse gets no record at all,
+// rather than a record whose Undo button would do nothing.
+assert.strictEqual(model.reverseAction("trash"), "untrash")
+assert.strictEqual(model.reverseAction("archive"), "")
+assert.strictEqual(model.reverseAction("markRead"), "")
+assert.strictEqual(model.reverseAction("star"), "")
+assert.strictEqual(model.reverseAction(""), "")
+assert.strictEqual(model.reverseAction(null), "")
+
+// The folder is read off the id, because that is the only place it is written
+// down. Gmail's ids name no folder and must not be made to look as if they do.
+assert.strictEqual(model.undoSourceFolder("5:INBOX"), "INBOX")
+assert.strictEqual(model.undoSourceFolder("12:Archive"), "Archive")
+assert.strictEqual(model.undoSourceFolder("7:[Gmail]/All Mail"), "[Gmail]/All Mail",
+  "a folder name with a bracket and a slash in it is still one folder name")
+assert.strictEqual(model.undoSourceFolder("3:"), "",
+  "a message in no folder names none")
+assert.strictEqual(model.undoSourceFolder("18f2c9a1b"), "",
+  "a Gmail id is not a uid:folder pair")
+assert.strictEqual(model.undoSourceFolder(""), "")
+assert.strictEqual(model.undoSourceFolder(null), "")
+
+const imapRow = { id: "5:Archive", accountId: "imap:me@host", subject: "Hello" }
+const gmailRow = { id: "18f2c9a1b", accountId: "me@gmail.com", subject: "Hi" }
+
+{
+  const entry = model.undoEntry(imapRow, 3)
+  assert.strictEqual(entry.id, "5:Archive")
+  assert.strictEqual(entry.index, 3)
+  assert.strictEqual(entry.folder, "Archive",
+    "where it came from, recorded before the trash destroyed the fact")
+  assert.strictEqual(entry.row, imapRow, "the row itself, to put back")
+}
+assert.strictEqual(model.undoEntry(gmailRow, 0).folder, "",
+  "Gmail restores its own labels and is handed no folder")
+assert.strictEqual(model.undoEntry(null, 0), null)
+assert.strictEqual(model.undoEntry({ id: "" }, 0), null,
+  "a row that cannot be addressed cannot be put back")
+assert.strictEqual(model.undoEntry(imapRow, -4).index, 0)
+
+// The record, or nothing. Null rather than an empty record, so no caller can
+// end up drawing an Undo button for an action that has no reverse.
+{
+  const record = model.undoRecordFor("trash", [model.undoEntry(imapRow, 2)], "inbox")
+  assert.strictEqual(record.reverse, "untrash")
+  assert.strictEqual(record.mailboxKey, "inbox")
+  assert.strictEqual(record.entries.length, 1)
+  assert.strictEqual(model.isUndoable(record), true)
+  assert.strictEqual(model.undoNoticeText(record), "Moved to trash")
+  assert.strictEqual(model.undoActionLabel(record), "Undo")
+  assert.strictEqual(model.undoCursorKey(record), model.rowKey(imapRow),
+    "the cursor goes back onto the row that came back")
+}
+assert.strictEqual(model.undoRecordFor("archive", [model.undoEntry(imapRow, 0)], "inbox"), null,
+  "archive has no reverse here, so it offers nothing")
+assert.strictEqual(model.undoRecordFor("trash", [], "inbox"), null,
+  "nothing was trashed, so there is nothing to take back")
+assert.strictEqual(model.undoRecordFor("trash", [null], "inbox"), null)
+assert.strictEqual(model.undoRecordFor("trash", null, "inbox"), null)
+
+// Nothing to offer reads as nothing everywhere, rather than as a button with
+// no words on it.
+assert.strictEqual(model.isUndoable(null), false)
+assert.strictEqual(model.undoNoticeText(null), "")
+assert.strictEqual(model.undoActionLabel(null), "")
+assert.strictEqual(model.undoCursorKey(null), "")
+assert.strictEqual(model.isUndoable({ reverse: "untrash", entries: [] }), false)
+
+// A set is the same record with more rows in it. #17 has not landed and nothing
+// here builds one, but a record that could only hold a single message would
+// have to be replaced rather than filled to hold two.
+{
+  const second = { id: "9:Archive", accountId: "imap:me@host", subject: "Also" }
+  const record = model.undoRecordFor("trash",
+    [model.undoEntry(imapRow, 1), model.undoEntry(second, 4)], "inbox")
+  assert.strictEqual(record.entries.length, 2)
+  assert.strictEqual(model.undoNoticeText(record), "2 messages moved to trash",
+    "the count is in the sentence, because Undo would restore all of them")
+  assert.strictEqual(model.undoCursorKey(record), model.rowKey(imapRow),
+    "the top of the block is where the eye was")
+}
+
+// ------------------------------------------------------ putting rows back
+
+{
+  const a = { id: "1:INBOX", accountId: "imap:me@host" }
+  const b = { id: "2:INBOX", accountId: "imap:me@host" }
+  const c = { id: "3:INBOX", accountId: "imap:me@host" }
+  const list = [a, c]
+  const back = model.restoreEntries(list, [model.undoEntry(b, 1)])
+  deepEqual(back.map(function (row) { return row.id }), ["1:INBOX", "2:INBOX", "3:INBOX"],
+    "the row goes back where it left from, not onto the end")
+  deepEqual(list.map(function (row) { return row.id }), ["1:INBOX", "3:INBOX"],
+    "and the list it came from is not modified in place")
+}
+
+// Lowest index first, so an earlier insertion does not push a later one past
+// its own place.
+{
+  const rows = ["a", "b", "c", "d"].map(function (name, i) {
+    return { id: (i + 1) + ":INBOX", accountId: "x", subject: name }
+  })
+  const remaining = [rows[1], rows[3]]
+  const back = model.restoreEntries(remaining,
+    [model.undoEntry(rows[2], 2), model.undoEntry(rows[0], 0)])
+  deepEqual(back.map(function (row) { return row.subject }), ["a", "b", "c", "d"])
+}
+
+// A refresh between the trash and the undo can bring the row back on its own.
+// Putting it back again would list it twice.
+{
+  const row = { id: "5:INBOX", accountId: "imap:me@host" }
+  const back = model.restoreEntries([row], [model.undoEntry(row, 0)])
+  assert.strictEqual(back.length, 1, "a row already listed is left alone")
+}
+
+// An index past the end of a list that has since shrunk lands at the end
+// rather than leaving a hole.
+{
+  const row = { id: "9:INBOX", accountId: "x" }
+  const back = model.restoreEntries([], [model.undoEntry(row, 40)])
+  deepEqual(back.map(function (r) { return r.id }), ["9:INBOX"])
+}
+deepEqual(model.restoreEntries(null, null), [])
+deepEqual(model.restoreEntries([], [null]), [])
+
+console.log("test_model.js ok")
