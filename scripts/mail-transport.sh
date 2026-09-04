@@ -191,7 +191,7 @@ advertised_mechanisms() {
   # instead of opening a socket. That is what keeps several accounts on one
   # host from probing in parallel at startup — the case that produced the
   # empty answers in the first place.
-  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omamail/capabilities"
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omail/capabilities"
   cache_file="$cache_dir/$(printf '%s|%s' "$mode" "$probe_url" | md5sum | cut -d' ' -f1)"
   if [ -s "$cache_file" ]; then
     cat "$cache_file"
@@ -279,7 +279,7 @@ choose_mechanism() {
 }
 
 umask 077
-work=$(mktemp -d "${TMPDIR:-/tmp}/omamail.XXXXXX") || fail 'mail-transport.sh: no temporary directory'
+work=$(mktemp -d "${TMPDIR:-/tmp}/omail.XXXXXX") || fail 'mail-transport.sh: no temporary directory'
 trap 'rm -rf "$work"' EXIT INT TERM HUP
 
 # OAuth carries a bearer token rather than a password, and curl selects the

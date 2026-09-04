@@ -8,7 +8,7 @@ set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 script="$root/scripts/save-attachment.sh"
-work=$(mktemp -d "${TMPDIR:-/tmp}/omamail-attachment-test.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/omail-attachment-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM HUP
 
 # xdg-open must not actually run: these tests would open a viewer per case.

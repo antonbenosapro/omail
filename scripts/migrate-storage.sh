@@ -1,7 +1,12 @@
 #!/bin/sh
-# One-time rename of the old app's on-disk state. Existing Omamail state
-# always wins: combining two stores without understanding their contents could
+# One-time rename of the old app's on-disk state. Existing Omail state always
+# wins: combining two stores without understanding their contents could
 # overwrite a newer account or cache.
+#
+# This has run twice now — omarchy-gmail -> omamail, then omamail -> omail — so
+# the moves are a chain rather than a pair. A machine still on the oldest
+# layout is carried the whole way in one run, because each step reads what the
+# step before it just wrote.
 set -eu
 
 move_once() {
@@ -17,3 +22,6 @@ cache_home=${XDG_CACHE_HOME:-$HOME/.cache}
 
 move_once "$config_home/omarchy-gmail" "$config_home/omamail"
 move_once "$cache_home/omarchy-gmail" "$cache_home/omamail"
+
+move_once "$config_home/omamail" "$config_home/omail"
+move_once "$cache_home/omamail" "$cache_home/omail"

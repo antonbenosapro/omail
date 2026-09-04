@@ -58,7 +58,7 @@ Item {
       Text {
         width: parent.width
         textFormat: Text.PlainText
-        text: "This mailbox will be removed from Omamail."
+        text: "This mailbox will be removed from Omail."
         color: root.dimColor
         font.family: root.panelFontFamily
         font.pixelSize: Style.font.bodySmall

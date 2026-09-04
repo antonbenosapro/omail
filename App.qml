@@ -26,7 +26,7 @@ Item {
   property bool closingFromHost: false
 
   readonly property string pluginId: manifest && manifest.id
-    ? String(manifest.id) : "omamail"
+    ? String(manifest.id) : "omail"
 
   readonly property color foreground: Color.foreground
   readonly property color background: Color.background
@@ -562,7 +562,7 @@ Item {
   FloatingWindow {
     id: window
     visible: root.opened
-    title: "Omamail"
+    title: "Omail"
     color: root.background
     implicitWidth: Style.space(980)
     implicitHeight: Style.space(720)
@@ -667,7 +667,7 @@ Item {
           Text {
             anchors.verticalCenter: parent.verticalCenter
             visible: !root.compact
-            text: "Omamail"
+            text: "Omail"
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
