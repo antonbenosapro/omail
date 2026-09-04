@@ -92,6 +92,7 @@ used to exist, and they had.
 | `star` | `s` | mail | Star or unstar |
 | `markRead` | `Shift+I` | mail | Mark read |
 | `markUnread` | `Shift+U` | mail | Mark unread |
+| `undo` | `z` | mail | Undo the last trash |
 | `reply` | `r` | mail | Reply |
 | `replyAll` | `a` | mail | Reply to all |
 | `forward` | `f` | mail | Forward |
@@ -114,6 +115,20 @@ Two rows are split on purpose. `search` keeps the bare `/` in the mailbox while
 cannot live in a text-entry context, and the modified one should. `help` is a
 mailbox action rather than a global one: the sheet lists what the mailbox
 answers to, and a draft is not a mailbox.
+
+## Why `z` undoes, and why nothing deletes
+
+`d` moves a message to trash and asks nothing first. That is the right trade only because `z` takes it back: a confirmation interrupts every correct action to guard against the rare wrong one, and people asked the same question on every delete learn to dismiss it without reading it. Undo costs nothing until something goes wrong.
+
+`z` is bare, which the scarce bare letters have to be earned for. It earns one on the grounds the others are spent on. It is the key a mail user already reaches for — Gmail has bound it to exactly this for twenty years — so there is nothing to learn. It sits in the far corner of the keyboard, next to nothing destructive, so no slip reaches it. And a mistake is the moment with the least patience for a modifier: an undo behind `Ctrl` is one the hand does not find while it is still surprised.
+
+Not `Ctrl+Z`. Nothing in the mailbox is text being edited, so there is nothing to confuse it with, and the one context where `Ctrl+Z` means something else — a draft — is a text-entry context, which binds no bare key and does not bind this row at all.
+
+The offer lives exactly as long as the notice that makes it, which is a few seconds. Once the sentence is gone the action is gone: an undo that still worked minutes later would be a message reappearing for a reason nobody could still connect to a keystroke.
+
+And it is offered only where the provider can honour it — `undo` is a capability in `providers/Registry.js` like `archive` and `spam`, and a capability the provider does not declare is a button the panel does not draw. Gmail declares it, because a message id survives a trash. IMAP does not: a UID belongs to the folder holding the message, so moving one to Trash issues a new id, and the server reports it in the tagged OK response that curl removes before the transport ever sees it. `z` there finds nothing to take back and says nothing, which is the honest answer until the client can search Trash for the message again.
+
+**There is no `Del`, and adding one would make this worse rather than better.** `d` is deliberate — it belongs to the bare-letter home-row set with `e`, `s`, `r`, `a`, `f`, `c`. `Del` is the key muscle memory fires *without* deliberation, and it sits beside the arrow keys that `j` and `k` are aliased to: cursoring down a list and clipping Delete would silently trash whatever was under the cursor. Every other binding here that is destructive or leaves the screen is bare-letter or modified, never a reach key. `tests/test_keymap.js` asserts nothing in the table binds `Del`, `Delete` or `Backspace`, so the reasoning cannot be lost and the key added back by someone who only read the row.
 
 ## Why the rail is numbered and not chorded
 

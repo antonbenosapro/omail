@@ -306,6 +306,31 @@ Item {
     revealCursorRow()
   }
 
+  // Takes back whatever the status line is offering to take back, and does
+  // nothing at all when it is offering nothing — the offer is the only input,
+  // so there is no "last action" for this to reconstruct and get wrong. Bound
+  // to `z` as well as to the button, because a keyboard-first window that made
+  // its one safety net reachable only by pointer would be offering it to the
+  // wrong hand.
+  function undoLastAction() {
+    if (!service) return
+    // Read before the offer is spent: taking it clears the record, and after
+    // that nothing can say which row came back.
+    var restored = service.undoKey
+    service.undo()
+    if (restored === "") return
+    // The row took the cursor with it when it left, and the reader moved on to
+    // whatever was next. Both come back, or the undo has restored the message
+    // without restoring where the user was standing — which is the half of it
+    // they would actually notice.
+    if (currentView === "reader") {
+      openMessage(restored)
+      return
+    }
+    cursorKey = restored
+    revealCursorRow()
+  }
+
   function goMailbox(key) {
     if (!service) return
     service.selectMailbox(key)
@@ -353,6 +378,7 @@ Item {
     }
     if (id === "markRead") return actOnCursor("markRead")
     if (id === "markUnread") return actOnCursor("markUnread")
+    if (id === "undo") return undoLastAction()
     if (id === "reply") return composeFromCursor("reply")
     if (id === "replyAll") return composeFromCursor("replyAll")
     if (id === "forward") return composeFromCursor("forward")
@@ -1167,27 +1193,45 @@ Item {
           || (!!root.service
             && (root.service.actionStatus !== "" || root.service.lastError !== ""))
 
-        Text {
+        // The sentence and, when the action it describes can be taken back, the
+        // key that takes it back. `d` asks nothing before it trashes a message,
+        // which is the right trade only because this is here: a confirmation
+        // interrupts every correct action to guard against the rare wrong one,
+        // and undo costs nothing until something goes wrong.
+        //
+        // The offer lives exactly as long as the sentence. The account clears
+        // both on one timer, so there is never an Undo standing beside a
+        // different sentence, and nothing left to press minutes later that
+        // would resurrect a message for no reason anybody could still connect
+        // to a keystroke.
+        StatusNotice {
           id: notice
           anchors.right: parent.right
           anchors.rightMargin: Style.space(14)
           anchors.verticalCenter: parent.verticalCenter
           visible: statusBar.hasNotice
-          width: Math.min(implicitWidth, parent.width / 2)
-          horizontalAlignment: Text.AlignRight
-          textFormat: Text.PlainText
+          maximumWidth: parent.width / 2
+          textColor: root.foreground
+          dimColor: root.dim
+          urgentColor: root.urgent
+          accentColor: root.accent
+          panelFontFamily: root.fontFamily
           text: {
             if (root.notice !== "") return root.notice
             if (!root.service) return ""
             if (root.service.actionStatus !== "") return root.service.actionStatus
             return root.service.lastError
           }
-          color: root.service && root.service.lastError !== "" && root.service.actionStatus === ""
-            ? root.urgent
-            : root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          urgent: !!root.service && root.service.lastError !== ""
+            && root.service.actionStatus === ""
+          // Only ever beside the account's own sentence. The window's `notice`
+          // is its own thing — a refused duplicate mailbox — and has nothing
+          // to take back.
+          actionLabel: root.notice === "" && !!root.service
+            && root.service.actionStatus !== "" ? root.service.undoLabel : ""
+          busy: !!root.service && root.service.undoBusy
+          busyLabel: "Undoing…"
+          onActivated: root.undoLastAction()
         }
 
         KeyHints {
