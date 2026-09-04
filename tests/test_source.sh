@@ -24,11 +24,9 @@ while IFS= read -r -d '' found; do JS_FILES+=("$found"); done \
 
 # 1. No hard-coded colours in QML. Every colour comes from the active Omarchy
 #    theme, or a light theme renders unreadable text.
-# gmailRed in ActionIcon is the single declared exception: the M inside the
-# Gmail mark is a brand asset, the same carve-out this author's other plugins
-# make for an official logo. Everything else takes the theme.
-if grep -nE '(color|Color)\s*:\s*"#[0-9A-Fa-f]{3,8}"' -- "${QML_FILES[@]}" \
-   | grep -v 'gmailRed'; then
+# There is no exception any more: the mark is an O in an envelope, drawn in the
+# theme's own foreground like every other glyph, so no QML file names a colour.
+if grep -nE '(color|Color)\s*:\s*"#[0-9A-Fa-f]{3,8}"' -- "${QML_FILES[@]}"; then
   fail "hard-coded colour in QML: use Color.* or a colour passed in from App.qml"
 fi
 if grep -nE ':\s*"(red|blue|green|white|black|yellow|orange|purple|gray|grey)"' -- "${QML_FILES[@]}"; then
