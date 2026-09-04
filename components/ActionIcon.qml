@@ -13,11 +13,6 @@ Canvas {
   property string name: ""
   property color color: Color.foreground
 
-  // The one brand colour in the project, and it applies to exactly one glyph:
-  // the M inside the Gmail mark. Everything else in this app takes the Omarchy
-  // theme — see AGENTS.md. Set `brand: false` for a monochrome mark.
-  readonly property color gmailRed: "#EA4335"
-  property bool brand: false
   property real iconSize: Style.font.icon
   property real strokeScale: 1.4
 
@@ -30,7 +25,6 @@ Canvas {
   onNameChanged: requestPaint()
   onColorChanged: requestPaint()
   onIconSizeChanged: requestPaint()
-  onBrandChanged: requestPaint()
 
   onPaint: {
     var ctx = getContext("2d")
@@ -148,15 +142,20 @@ Canvas {
       line(1.5, 7.6); ctx.closePath()
       move(5.7, 4.5); arc(4.5, 4.5, 1.2, 0, Math.PI * 2)
     } else if (root.name === "gmail") {
-      // The Gmail mark: the envelope body, with the M fold inset inside it. A
-      // plain envelope with a V fold is the generic mail glyph — the M is the
-      // whole difference. The two are stroked separately so the M can carry
-      // the brand red while the envelope stays themed.
+      // An envelope whose flap is drawn as a real fold — two strokes meeting
+      // at a point below the top edge — with the O sitting over that fold
+      // rather than inside an empty box. A ring centred in a plain rectangle
+      // is the camera icon whatever the flap does around it; letting the O
+      // overlap the fold line is what makes this read as a letter instead.
+      // The fold is the full V, because a short one leaves a plain box and a
+      // ring in a plain box is the camera icon. The O is centred over the
+      // fold and drawn last, so the two cross: the ring stays whole and the
+      // envelope stays an envelope. Nothing here is a brand colour.
       ctx.rect(1 * s, 3 * s, 14 * s, 10 * s)
+      move(1, 3); line(8, 8.6); line(15, 3)
       ctx.stroke()
       ctx.beginPath()
-      if (root.brand) ctx.strokeStyle = root.gmailRed
-      move(3.6, 13); line(3.6, 5.6); line(8, 9.3); line(12.4, 5.6); line(12.4, 13)
+      move(10.6, 8.4); arc(8, 8.4, 2.6, 0, Math.PI * 2)
     } else if (root.name === "sidebar") {
       ctx.rect(1.5 * s, 2.5 * s, 13 * s, 11 * s)
       move(6, 2.5); line(6, 13.5)

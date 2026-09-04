@@ -662,7 +662,6 @@ Item {
             name: "gmail"
             iconSize: Style.font.iconLarge
             color: root.foreground
-            brand: true
           }
 
           Text {

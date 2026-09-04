@@ -5,10 +5,12 @@ import qs.Ui
 // The mark, drawn rather than rasterised from an SVG: the bar slot is about
 // 16px and Qt's SVG renderer smears strokes at that size.
 //
-// The fold is an M, not the V of a generic mail glyph — that is the whole
-// difference between this application's mark and every other envelope in the
-// bar. Monochrome here: the bar paints its own foreground, and a brand colour
-// in a row of themed glyphs reads as a rendering fault rather than as identity.
+// An O in the mouth of an envelope — Omarchy's letter, not a maker's initial.
+// The O is what separates this from every other envelope in the bar, so it is
+// the one shape allowed to take up room; the flap is two short strokes off the
+// top corners, enough to say "envelope" without closing the O's counter.
+// Monochrome here: the bar paints its own foreground, and a brand colour in a
+// row of themed glyphs reads as a rendering fault rather than as identity.
 Item {
   id: root
 
@@ -48,32 +50,51 @@ Item {
       var bottom = h * 0.80
       var stroke = Math.max(1, w * 0.085)
 
+      var innerW = right - left
+      var innerH = bottom - top
+
       ctx.strokeStyle = root.color
       ctx.lineWidth = stroke
       ctx.lineJoin = "round"
       ctx.lineCap = "round"
 
+      // Rounded corners rather than square: the shell's own surfaces are
+      // rounded, and at 16px a hard corner is the one pixel that reads as a
+      // rendering seam.
+      var corner = innerH * 0.18
       ctx.beginPath()
-      ctx.rect(left, top, right - left, bottom - top)
+      ctx.moveTo(left + corner, top)
+      ctx.lineTo(right - corner, top)
+      ctx.quadraticCurveTo(right, top, right, top + corner)
+      ctx.lineTo(right, bottom - corner)
+      ctx.quadraticCurveTo(right, bottom, right - corner, bottom)
+      ctx.lineTo(left + corner, bottom)
+      ctx.quadraticCurveTo(left, bottom, left, bottom - corner)
+      ctx.lineTo(left, top + corner)
+      ctx.quadraticCurveTo(left, top, left + corner, top)
+      ctx.closePath()
       ctx.stroke()
 
-      // The M, inset inside the body: down the left stem, into the valley, back
-      // up, and down the right stem.
-      //
-      // Smaller and lighter than the frame around it. At bar size the two
-      // strokes at equal weight put more ink in a 12px square than it can hold,
-      // and the mark turns into a solid block; letting the M sit clear of the
-      // envelope on all four sides, at about two thirds the stroke, keeps both
-      // shapes readable.
-      var innerW = right - left
-      var innerH = bottom - top
-      ctx.lineWidth = Math.max(1, stroke * 0.54)
+      // The O, centred in the body at the frame's own weight. A lighter or
+      // smaller ring loses its counter at bar size and fills in to a dot, which
+      // is the one thing it must not look like — the unread badge is a dot.
+      // 0.34 of the body height is the largest radius that still leaves clear
+      // air between the ring and the frame on a 16px square.
       ctx.beginPath()
-      ctx.moveTo(left + innerW * 0.30, bottom - innerH * 0.18)
-      ctx.lineTo(left + innerW * 0.30, top + innerH * 0.36)
-      ctx.lineTo(left + innerW * 0.50, top + innerH * 0.60)
-      ctx.lineTo(left + innerW * 0.70, top + innerH * 0.36)
-      ctx.lineTo(left + innerW * 0.70, bottom - innerH * 0.18)
+      ctx.arc(left + innerW * 0.5, top + innerH * 0.5, innerH * 0.34, 0, Math.PI * 2)
+      ctx.stroke()
+
+      // The flap, as two short strokes falling from the top corners. Drawn
+      // lighter and stopped well short of the centre: carried any further they
+      // meet the top of the O and the pair reads as a horned head rather than
+      // as a letter, and at bar size a full-weight flap just thickens the top
+      // edge into a bar.
+      ctx.lineWidth = Math.max(1, stroke * 0.7)
+      ctx.beginPath()
+      ctx.moveTo(left, top)
+      ctx.lineTo(left + innerW * 0.16, top + innerH * 0.20)
+      ctx.moveTo(right, top)
+      ctx.lineTo(right - innerW * 0.16, top + innerH * 0.20)
       ctx.stroke()
     }
   }

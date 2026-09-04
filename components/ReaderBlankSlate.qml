@@ -47,7 +47,6 @@ Item {
     ActionIcon {
       anchors.horizontalCenter: parent.horizontalCenter
       name: "gmail"
-      brand: true
       iconSize: Style.space(44)
       strokeScale: 1.0
       color: Qt.rgba(root.dimColor.r, root.dimColor.g, root.dimColor.b, 0.5)
