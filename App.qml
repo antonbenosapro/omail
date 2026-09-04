@@ -1256,11 +1256,54 @@ Item {
           }
         }
 
+        // The set's own actions, beside the count that says how big it is.
+        // The keys do this and the shortcut sheet lists them, but a selection
+        // made with the mouse had nothing to press — the badge said "3
+        // selected" and offered no way to act on three.
+        Row {
+          id: selectionActions
+          anchors.left: selectionBadge.right
+          anchors.leftMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(6)
+          visible: selectionBadge.visible && !root.compact
+
+          IconTextButton {
+            iconName: "archive"
+            text: "Archive"
+            foreground: root.foreground
+            accent: root.accent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: root.actOnSelection("archive")
+          }
+          IconTextButton {
+            iconName: "trash"
+            text: "Trash"
+            foreground: root.urgent
+            accent: root.urgent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: root.actOnSelection("trash")
+          }
+          IconTextButton {
+            iconName: "close"
+            text: "Clear"
+            foreground: root.foreground
+            accent: root.accent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: if (root.service) root.service.clearMarks()
+          }
+        }
+
         Text {
           id: accountLine
-          anchors.left: selectionBadge.visible
-            ? selectionBadge.right
-            : (railToggle.visible ? railToggle.right : parent.left)
+          anchors.left: selectionActions.visible
+            ? selectionActions.right
+            : (selectionBadge.visible
+              ? selectionBadge.right
+              : (railToggle.visible ? railToggle.right : parent.left))
           anchors.leftMargin: selectionBadge.visible
             ? Style.space(8)
             : (railToggle.visible ? Style.space(8) : Style.space(14))
@@ -1438,7 +1481,13 @@ Item {
           root.openMessage(key)
           root.startCompose(mode)
         }
+        // A menu opened on a marked row acts on the whole set; one opened on
+        // an unmarked row acts on that row alone, the way a right-click names
+        // its own target everywhere else. Without this the menu was the one
+        // path that could not see a selection the user was looking at.
         onActionRequested: function(action, key) {
+          if (root.service && Model.menuActsOnSet(root.service.markedKeys, key))
+            return root.actOnMarks(action)
           root.cursorKey = key
           root.actOnCursor(action)
         }

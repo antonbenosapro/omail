@@ -1185,6 +1185,32 @@ assert.strictEqual(model.undoRecordFor("trash", [], "inbox"), null,
 assert.strictEqual(model.undoRecordFor("trash", [null], "inbox"), null)
 assert.strictEqual(model.undoRecordFor("trash", null, "inbox"), null)
 
+// A menu opened on a marked row acts on the set; one opened on an unmarked row
+// acts on that row alone, the way a right-click names its own target in every
+// file manager. Without this the menu was the one path that could not see a
+// selection the user was looking at.
+{
+  const acct = "imap:me@host"
+  const rows = [1, 2, 3].map(function (n) {
+    return { id: n + ":INBOX", accountId: acct }
+  })
+  const marks = [model.rowKey(rows[0]), model.rowKey(rows[1])]
+  assert.strictEqual(model.menuActsOnSet(marks, model.rowKey(rows[0])), true,
+    "the row is in the set, so the set is what the menu acts on")
+  assert.strictEqual(model.menuActsOnSet(marks, model.rowKey(rows[2])), false,
+    "an unmarked row names itself")
+  assert.strictEqual(model.menuActsOnSet([], model.rowKey(rows[0])), false,
+    "no selection means no set to act on")
+}
+
+// The label cannot claim a size the action does not have: "Archive" over twelve
+// selected messages is a promise about one that twelve are about to break.
+assert.strictEqual(model.menuActionLabel("Archive", 1), "Archive")
+assert.strictEqual(model.menuActionLabel("Archive", 12), "Archive 12")
+assert.strictEqual(model.menuActionLabel("Move to trash", 3), "Move to trash 3")
+assert.strictEqual(model.menuActionLabel("Archive", 0), "Archive",
+  "nothing selected still reads as the single-message action")
+
 // The entry carries the identity that survives the move. The id names a UID
 // the folder issued, and Trash reissues it; the Message-ID is what finds the
 // message again.

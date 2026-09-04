@@ -221,6 +221,28 @@ function undoRecordFor(action, entries, mailboxKey) {
   }
 }
 
+// What a menu opened on a row should act on. Inside the selection means the
+// whole set — the row was one of the marked ones and acting on it alone would
+// ignore the marks the user can see. Outside it means that row by itself,
+// which is also what right-clicking an unmarked row means in every file
+// manager and mail client: the click names its own target.
+//
+// The set is not cleared by the outside case here, because that is a question
+// about what happens next rather than about what this action applies to.
+function menuActsOnSet(keys, key) {
+  return isMarked(keys, key)
+}
+
+// What a menu row should say it will do, so the label cannot claim a size the
+// action does not have. "Archive" over a set of twelve is a promise about one
+// message that twelve messages are about to break.
+function menuActionLabel(base, count) {
+  var text = String(base || "")
+  var many = Math.floor(Number(count) || 0)
+  if (many < 2) return text
+  return text + " " + many
+}
+
 // Whether a finished bulk action still has an honest offer behind it. Only a
 // set that moved in full does: after a partial the record names messages that
 // never left, and restoring those would move mail the user never trashed. The
