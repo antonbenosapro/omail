@@ -603,6 +603,107 @@ assert.strictEqual(message.extractHtml({
       "a < b and c > d\r\n"))),
     "", "prose that merely contains brackets is not promoted to markup")
 
+  // --- an embedded message
+  //
+  // A forward, or the ticket-system notification that wraps the mail it is
+  // telling you about. The octets are a whole RFC 822 message rather than a
+  // body, so the text is one parse further down. Left unopened it is a
+  // childless leaf that is neither text/plain nor text/html: every reader
+  // skips it, the message draws blank, and `isAttachment` is false, so there
+  // is not even a file to fall back on.
+
+  const embedded = message.parseRfc822(bytes(
+    "Content-Type: multipart/mixed; boundary=OUT\r\n\r\n" +
+    "--OUT\r\n" +
+    "Content-Type: message/rfc822\r\n" +
+    "Content-Disposition: inline\r\n\r\n" +
+    "From: someone@example.com\r\n" +
+    "Subject: the message this is about\r\n" +
+    "Content-Type: multipart/alternative; boundary=IN\r\n\r\n" +
+    "--IN\r\n" +
+    "Content-Type: text/plain\r\n\r\n" +
+    "the comment\r\n" +
+    "--IN\r\n" +
+    "Content-Type: text/html\r\n\r\n" +
+    "<p>the comment</p>\r\n" +
+    "--IN--\r\n" +
+    "--OUT--\r\n"))
+  assert.strictEqual(message.extractBody(embedded).text, "the comment",
+    "an embedded message is opened rather than left as opaque octets")
+  assert.strictEqual(message.extractHtml(embedded), "<p>the comment</p>")
+  // The wrapper keeps its own type and gains the message as its one child, at
+  // the part path a later FETCH would ask for.
+  assert.strictEqual(embedded.parts[0].mimeType, "message/rfc822")
+  assert.strictEqual(embedded.parts[0].parts[0].partId, "1.1")
+
+  // The embedded message may itself be base64: parsing the encoded form would
+  // find no headers at all and lose the message a second way.
+  const embeddedBase64 = message.parseRfc822(bytes(
+    "Content-Type: message/rfc822\r\n" +
+    "Content-Transfer-Encoding: base64\r\n\r\n" +
+    Buffer.from(
+      "Content-Type: text/plain\r\n\r\ninside the base64\r\n", "utf8"
+    ).toString("base64") + "\r\n"))
+  assert.strictEqual(message.extractBody(embeddedBase64).text, "inside the base64\n")
+
+  // --- a boundary is a whole line, not a substring
+  //
+  // RFC 2046 puts the delimiter at the start of a line with only linear
+  // whitespace after it. Matching it anywhere lets one boundary answer for
+  // another whose name it merely begins — "--AAA" also occurs inside
+  // "--AAAx" — which shreds the inner container. Where the outer name is a
+  // prefix ending in "--", the closing delimiter is found early and the whole
+  // message reads as empty.
+
+  const sharedPrefix = message.parseRfc822(bytes(
+    "Content-Type: multipart/related; boundary=AAA\r\n\r\n" +
+    "--AAA\r\n" +
+    "Content-Type: multipart/alternative; boundary=AAAx\r\n\r\n" +
+    "--AAAx\r\n" +
+    "Content-Type: text/plain\r\n\r\n" +
+    "the text\r\n" +
+    "--AAAx\r\n" +
+    "Content-Type: text/html\r\n\r\n" +
+    "<p>the markup</p>\r\n" +
+    "--AAAx--\r\n" +
+    "--AAA--\r\n"))
+  assert.strictEqual(sharedPrefix.parts.length, 1,
+    "an inner boundary that merely begins with the outer one is not a delimiter")
+  assert.strictEqual(message.extractBody(sharedPrefix).text, "the text")
+  assert.strictEqual(message.extractHtml(sharedPrefix), "<p>the markup</p>")
+
+  const prefixWithDashes = message.parseRfc822(bytes(
+    "Content-Type: multipart/related; boundary=AAA\r\n\r\n" +
+    "--AAA\r\n" +
+    "Content-Type: multipart/alternative; boundary=AAA--B\r\n\r\n" +
+    "--AAA--B\r\n" +
+    "Content-Type: text/html\r\n\r\n" +
+    "<p>still here</p>\r\n" +
+    "--AAA--B--\r\n" +
+    "--AAA--\r\n"))
+  assert.strictEqual(message.extractHtml(prefixWithDashes), "<p>still here</p>",
+    "an inner boundary of outer + '--' is not read as the closing delimiter")
+
+  // Transport-padding: linear whitespace may follow the boundary before the
+  // line ends, and a delimiter that carries it is still a delimiter.
+  const padded = message.parseRfc822(bytes(
+    "Content-Type: multipart/alternative; boundary=AAA\r\n\r\n" +
+    "--AAA \t\r\n" +
+    "Content-Type: text/plain\r\n\r\n" +
+    "padded\r\n" +
+    "--AAA-- \r\n"))
+  assert.strictEqual(message.extractBody(padded).text, "padded")
+
+  // A boundary that appears mid-line is text, not structure.
+  const midLine = message.parseRfc822(bytes(
+    "Content-Type: multipart/alternative; boundary=AAA\r\n\r\n" +
+    "--AAA\r\n" +
+    "Content-Type: text/plain\r\n\r\n" +
+    "a line that says --AAA in the middle\r\n" +
+    "--AAA--\r\n"))
+  assert.strictEqual(message.extractBody(midLine).text,
+    "a line that says --AAA in the middle")
+
   // --- depth is bounded
   //
   // Everything downstream walks this tree by recursion, in the process that

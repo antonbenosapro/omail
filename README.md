@@ -67,7 +67,7 @@ server — including one you run yourself.
 - **Keyring-backed.** The Gmail refresh token and every IMAP password live in
   GNOME Keyring — never in a config file, never on a command line.
 
-![Omamail: every mailbox in one list, each row striped in its account's colour](assets/unified-inbox.png)
+![Omamail: every mailbox in one list, each row striped in its account's colour](assets/unified-inbox.svg)
 
 *Five mailboxes merged into one list. The bar down each row — and beside each
 address on the rail — is the account it arrived in.*

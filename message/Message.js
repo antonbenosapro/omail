@@ -557,34 +557,62 @@ function mimeTypeOf(contentType) {
   return value === "" ? "text/plain" : value
 }
 
+// A delimiter is a whole line, not a substring: RFC 2046 puts it at the start
+// of a line and allows only linear whitespace (transport-padding) between the
+// boundary and the CRLF. Matching it anywhere would let one boundary answer
+// for another whose name it merely begins — "--AAA" also occurs inside
+// "--AAAx", which is legal and which some senders really do emit. That shreds
+// the inner container, and where the outer name is a prefix ending in "--"
+// the whole message reads as empty.
+//
+// `from` is where to start looking, so the scan walks forward without
+// re-searching what it has already passed.
+function delimiterAt(text, boundary, from) {
+  var marker = "--" + boundary
+  var index = from
+  while (index <= text.length) {
+    var found = text.indexOf(marker, index)
+    if (found < 0) return null
+    // Start of a line, or the very start of the body.
+    var atLineStart = found === 0 || text.charAt(found - 1) === "\n"
+    if (atLineStart) {
+      var after = found + marker.length
+      var closing = text.substr(after, 2) === "--"
+      var rest = after + (closing ? 2 : 0)
+      // Only whitespace may follow before the line ends.
+      var tail = text.substring(rest)
+      var padding = tail.match(/^[ \t]*(\r?\n|$)/)
+      if (padding)
+        return { start: found, end: rest + padding[0].length, closing: closing }
+    }
+    index = found + 1
+  }
+  return null
+}
+
 // Splits a multipart body on its boundary. Everything before the first
 // delimiter is the preamble and everything after the closing one is the
 // epilogue; both are for clients that do not understand MIME, and neither is
 // part of the message.
 function splitMultipart(body, boundary) {
   var text = String(body || "")
-  var marker = "--" + String(boundary || "")
-  if (boundary === "" || boundary === undefined || boundary === null) return []
+  var name = String(boundary || "")
+  if (name === "") return []
 
   var parts = []
-  var index = text.indexOf(marker)
-  if (index < 0) return []
+  var opening = delimiterAt(text, name, 0)
+  if (!opening || opening.closing) return []
 
-  while (index >= 0) {
-    var afterMarker = index + marker.length
-    // The closing delimiter is the boundary followed by "--".
-    if (text.substr(afterMarker, 2) === "--") break
-    var start = text.indexOf("\n", afterMarker)
-    if (start < 0) break
-    start += 1
-    var next = text.indexOf(marker, start)
-    var end = next < 0 ? text.length : next
+  var start = opening.end
+  while (true) {
+    var next = delimiterAt(text, name, start)
+    var end = next ? next.start : text.length
     // The CRLF that precedes the next delimiter belongs to the delimiter, not
     // to the part — a body that keeps it gains a trailing blank line, and a
     // base64 part gains bytes that were never in the attachment.
-    var chunk = text.substring(start, end).replace(/\r?\n$/, "")
-    parts.push(chunk)
-    index = next
+    parts.push(text.substring(start, end).replace(/\r?\n$/, ""))
+    if (!next || next.closing) break
+    start = next.end
   }
   return parts
 }
@@ -650,6 +678,25 @@ function parseMimeEntity(raw, partId, depth) {
     // Relabelling is what makes those octets reachable.
     if (entity.parts.length > 0) return entity
     entity.mimeType = looksLikeHtml(body) ? "text/html" : "text/plain"
+  }
+
+  // An embedded message — a forward, or the ticket-system notification that
+  // wraps the mail it is telling you about. Its octets are a whole RFC 822
+  // message, headers and all, so the text is one more parse down rather than
+  // in this entity's body. Without this it is a childless leaf whose type is
+  // neither text/plain nor text/html, which every reader skips: the message
+  // draws blank, and `isAttachment` is false too, so there is not even a file
+  // to fall back on.
+  //
+  // The wrapper keeps its own type and gains the message as its single child,
+  // which is the part path a later FETCH would ask for.
+  if (mimeType === "message/rfc822" && depth < MAX_MIME_DEPTH) {
+    // Decoded first: an embedded message may itself be base64, and parsing the
+    // encoded form would find no headers at all.
+    var inner = bytesToLatin1(decodeTransfer(body, headerFrom(headers, "Content-Transfer-Encoding")))
+    var innerId = entity.partId === "" ? "1" : entity.partId + ".1"
+    entity.parts.push(parseMimeEntity(inner, innerId, depth + 1))
+    return entity
   }
 
   var bytes = decodeTransfer(body, headerFrom(headers, "Content-Transfer-Encoding"))
