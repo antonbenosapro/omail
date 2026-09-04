@@ -135,8 +135,22 @@ function listQuery(query, maxResults, pageToken) {
   }
 }
 
-// `metadata` is a quarter of the payload of `full` and is all a list row needs.
-var LIST_HEADERS = ["From", "To", "Subject", "Date", "List-Unsubscribe"]
+// `metadata` is a fraction of the payload of `full`, and is what a list row
+// needs — plus the three headers a *reader* needs, because this format now
+// answers an open as well as a list. A message the body cache already holds is
+// opened with a metadata fetch: the body cannot have changed, so the only
+// thing left to ask for is the read flag. That answer is still summarised into
+// `selectedMessage`, and the reader replies out of it.
+//
+// Reply-To and Message-ID decide where an answer goes and what it threads
+// under; Cc is half of reply-all, and half of which alias a thread reached you
+// at. Left out, they came back empty for exactly the messages that had been
+// opened before — so a reply to a cached message went to the From address
+// instead of Reply-To, threaded under nothing, and dropped every Cc.
+var LIST_HEADERS = [
+  "From", "To", "Cc", "Subject", "Date",
+  "Reply-To", "Message-ID", "List-Unsubscribe"
+]
 
 function metadataQuery() {
   return { format: "metadata", metadataHeaders: LIST_HEADERS }

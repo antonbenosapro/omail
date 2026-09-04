@@ -167,6 +167,29 @@ assert.strictEqual(api.sendAsFor(aliases, "waiting@example.org"), null)
 assert.strictEqual(api.sendAsFor(aliases, ""), null)
 assert.strictEqual(api.sendAsFor(null, "me@example.com"), null)
 
+// ------------------------------------------------- what metadata asks for
+//
+// `metadata` answers an open as well as a list. A message the body cache
+// already holds is opened with this format — the body cannot have changed, so
+// the only thing left to ask for is the read flag — and the answer is still
+// summarised into the message the reader replies out of.
+//
+// So the headers a reply is built from have to survive the format. They did
+// not: Reply-To, Message-ID and Cc were absent, and came back empty for
+// exactly the messages that had been opened before. A reply to a cached
+// message went to From instead of Reply-To, threaded under nothing, and
+// dropped every Cc — the more a message had been read, the worse it answered.
+
+{
+  const headers = api.metadataQuery().metadataHeaders
+  assert.strictEqual(api.metadataQuery().format, "metadata")
+  for (const needed of ["Reply-To", "Message-ID", "Cc"])
+    assert.ok(headers.indexOf(needed) >= 0,
+      needed + " has to survive a metadata fetch: the reader replies out of it")
+  for (const row of ["From", "To", "Subject", "Date", "List-Unsubscribe"])
+    assert.ok(headers.indexOf(row) >= 0, row + " is what a list row draws")
+}
+
 // -------------------------------------------------------------- browsing
 
 assert.strictEqual(api.webMessageUrl("18f3a", 0), "https://mail.google.com/mail/u/0/#all/18f3a")
