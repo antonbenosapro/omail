@@ -193,7 +193,11 @@ function undoEntry(summary, index) {
     id: id,
     index: Math.max(0, Math.floor(Number(index) || 0)),
     row: summary,
-    folder: undoSourceFolder(id)
+    folder: undoSourceFolder(id),
+    // The identity that survives the move. A UID is issued by the folder
+    // holding the message, so the id above names nothing once the message is
+    // in Trash; the Message-ID the sender wrote is what finds it again.
+    messageId: String(summary.messageId || "")
   }
 }
 

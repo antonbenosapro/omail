@@ -1185,6 +1185,20 @@ assert.strictEqual(model.undoRecordFor("trash", [], "inbox"), null,
 assert.strictEqual(model.undoRecordFor("trash", [null], "inbox"), null)
 assert.strictEqual(model.undoRecordFor("trash", null, "inbox"), null)
 
+// The entry carries the identity that survives the move. The id names a UID
+// the folder issued, and Trash reissues it; the Message-ID is what finds the
+// message again.
+{
+  const row = { id: "5:Archive", accountId: "imap:me@host",
+    messageId: "<kept@example.com>" }
+  const entry = model.undoEntry(row, 3)
+  assert.strictEqual(entry.messageId, "<kept@example.com>")
+  assert.strictEqual(entry.folder, "Archive",
+    "and where it goes back to, which the move also destroys")
+  assert.strictEqual(model.undoEntry({ id: "5:Archive" }, 0).messageId, "",
+    "a row with no Message-ID says so rather than carrying undefined")
+}
+
 // A bulk action offers its undo only when the whole set moved. After a partial
 // the record still names every row the action started with, and restoring those
 // would move mail that was never trashed — so the offer is withheld and the

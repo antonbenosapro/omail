@@ -1277,7 +1277,8 @@ Item {
         // The folder it came from travels with the entry, because the trash is
         // what destroyed that fact: on IMAP the message is in Trash now, and
         // nothing in its new address says where it had been.
-        if (reverse === "untrash") api.untrashMessage(entry.id, done, entry.folder)
+        if (reverse === "untrash")
+          api.untrashMessage(entry.id, done, entry.folder, entry.messageId)
         else settle()
       })(entries[i])
     }

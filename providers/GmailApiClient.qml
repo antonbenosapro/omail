@@ -291,7 +291,7 @@ Item {
   // folders, and untrash restores the labels the message carried before it was
   // trashed. Both clients keep one interface, which is what lets MailAccount
   // drive either without asking which it holds.
-  function untrashMessage(id, callback, folder) {
+  function untrashMessage(id, callback, folder, messageId) {
     return request("POST", Api.untrashPath(id), null, null,
       function(status, payload, error) {
         if (typeof callback === "function") callback(payload, error)

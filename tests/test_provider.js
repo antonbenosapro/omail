@@ -39,13 +39,13 @@ assert.strictEqual(provider.can("gmail", "web"), true)
 assert.strictEqual(provider.can("gmail", "invented"), false, "an unknown capability is a no")
 
 // Undo is a question about identity, not about folders. Gmail's id survives a
-// trash, so untrash addresses the same message; an IMAP UID is issued by the
+// trash, so untrash addresses the same message. An IMAP UID is issued by the
 // folder holding the message, so a move reissues it and the transport is never
-// told the new one. A button that fails after the user has committed to it is
-// worse than no button, so IMAP declares this off rather than offering one.
+// told the new one — which is why the client finds the message again by the
+// Message-ID the sender wrote, the one identifier a move does not rewrite.
 assert.strictEqual(provider.can("gmail", "undo"), true)
-assert.strictEqual(provider.can("imap", "undo"), false,
-  "a move reissues the UID, so there is no id left that names the message")
+assert.strictEqual(provider.can("imap", "undo"), true,
+  "the UID is reissued, so the restore searches Trash for the Message-ID")
 assert.strictEqual(provider.can("hey", "undo"), false,
   "a provider with no client behind it can do nothing at all")
 
