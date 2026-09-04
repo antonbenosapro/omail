@@ -229,6 +229,15 @@ Item {
     // it read without having looked at any of it. Enter and "o" open.
   }
 
+  // Marking both ends of a step. The set is extended first and the cursor
+  // moves after, so the row being left is in its own selection — extending to
+  // the destination alone leaves the row the extension started from out of it.
+  function extendSelection(delta) {
+    if (!service || cursorKey === "") return
+    service.extendMarks(cursorKey, delta)
+    moveCursor(delta)
+  }
+
   // An answer needs the message it is answering, and opening one only starts
   // the fetch — select() clears the summary and the body first. Beginning the
   // draft in the same breath addressed nobody and quoted nothing, which is what
@@ -282,6 +291,41 @@ Item {
     composeReturnView = ""
     if (service) service.endCompose()
     if (from === "list" && currentView === "reader") backToList()
+  }
+
+  // One action, two sizes. Every acting key comes through here: the set when
+  // there is one, the cursor's row when there is not. Generalised rather than
+  // duplicated, because a second path would be a second place to get the
+  // reader, the cursor and the notice wrong.
+  function actOnSelection(action) {
+    if (!service) return
+    if (service.hasMarks) return actOnMarks(action)
+    actOnCursor(action)
+  }
+
+  // The set is about to move or change. The rows go with it, so anything the
+  // reader is showing from inside the set goes too — the account closes it,
+  // and the window follows it back to the list.
+  function actOnMarks(action) {
+    if (!service) return
+    var wasOpen = currentView === "reader"
+      && Model.isMarked(service.markedKeys, service.selectedKey)
+    var leaves = !Model.survivesAction(service.mailboxKey, action)
+    // Worked out while the rows still have neighbours, the same way the single
+    // path does: a cursor inside a set that is leaving would be unfindable
+    // afterwards, and an unfindable cursor sends the next j to the top.
+    var next = leaves
+      ? Model.cursorAfterMarkedRemoval(service.messages, cursorKey, service.markedKeys)
+      : cursorKey
+    service.actOnMarks(action)
+    if (!leaves) return
+    if (wasOpen) {
+      if (next !== "") openMessage(next)
+      else backToList()
+      return
+    }
+    cursorKey = next
+    revealCursorRow()
   }
 
   // Acting on the open message closes it: it is about to leave this list.
@@ -343,16 +387,32 @@ Item {
     if (id === "cursorUp") return moveCursor(-1)
     if (id === "open") return openMessage(cursorKey)
     if (id === "backToList") return backToList()
-    if (id === "archive") return actOnCursor("archive")
-    if (id === "trash") return actOnCursor("trash")
-    // Through the same guard actOnCursor applies rather than around it:
-    // starring with nothing selected used to call through with an empty id.
-    if (id === "star") {
-      if (service && cursorKey !== "") service.toggleStar(cursorKey)
+    if (id === "toggleMark") {
+      if (service && cursorKey !== "") service.toggleMark(cursorKey)
       return
     }
-    if (id === "markRead") return actOnCursor("markRead")
-    if (id === "markUnread") return actOnCursor("markUnread")
+    if (id === "extendDown") return extendSelection(1)
+    if (id === "extendUp") return extendSelection(-1)
+    if (id === "markAll") {
+      if (service) service.markAll(cursorKey)
+      return
+    }
+    if (id === "archive") return actOnSelection("archive")
+    if (id === "trash") return actOnSelection("trash")
+    // Through the same guard the acting path applies rather than around it:
+    // starring with nothing selected used to call through with an empty id.
+    // Over a set it is one action for the whole set rather than a toggle per
+    // row — toggling a mixed selection row by row leaves it exactly as mixed
+    // as it started, which is the one outcome nobody pressed `s` for.
+    if (id === "star") {
+      if (!service) return
+      if (service.hasMarks)
+        return actOnMarks(Model.bulkStarAction(service.markedRows))
+      if (cursorKey !== "") service.toggleStar(cursorKey)
+      return
+    }
+    if (id === "markRead") return actOnSelection("markRead")
+    if (id === "markUnread") return actOnSelection("markUnread")
     if (id === "reply") return composeFromCursor("reply")
     if (id === "replyAll") return composeFromCursor("replyAll")
     if (id === "forward") return composeFromCursor("forward")
@@ -384,6 +444,11 @@ Item {
   // never run.
   function goBack() {
     if (shortcutHelpVisible) shortcutHelpVisible = false
+    // A selection is the nearest thing there is to put down, and putting it
+    // down is not leaving anywhere — so it comes before every branch below.
+    // Escape out of a reader with twelve rows still marked behind it would
+    // leave the set live over a list nobody is looking at.
+    else if (service && service.hasMarks) service.clearMarks()
     // A query being typed is the nearest thing to leave: clear it if there is
     // one, then hand the keyboard back to the mailbox. This used to live in
     // SearchBar as its own Keys handler, which a window Shortcut silently beats.
@@ -429,6 +494,10 @@ Item {
     function onMessagesChanged() {
       root.cursorKey = Model.cursorAfterReload(
         root.service ? root.service.messages : [], root.cursorKey)
+      // The set gets the same treatment for the same reason: a key naming a
+      // row the list no longer holds cannot be acted on, and counting it is a
+      // lie about how many messages are about to move.
+      if (root.service) root.service.reconcileMarks()
     }
     // A new account has no mailbox yet, so the only useful place to be is the
     // page that gives it one.
@@ -881,6 +950,7 @@ Item {
               width: listFlick.width
               service: root.service
               textColor: root.foreground
+              backgroundColor: root.background
               accentColor: root.accent
               dimColor: root.dim
               panelFontFamily: root.fontFamily
@@ -1132,10 +1202,42 @@ Item {
           onClicked: root.toggleSidebar()
         }
 
-        Text {
-          id: accountLine
+        // How many messages the next action will act on. A selection changes
+        // what `e` and `d` mean, so it may never be something only the rows
+        // themselves say: a set scrolled off the top of the list would be
+        // invisible and still live. It sits ahead of the sync label because it
+        // is the more urgent of the two whenever it is there at all, and it
+        // survives a notice, because the notice is usually about the very
+        // action this is the subject of.
+        Rectangle {
+          id: selectionBadge
           anchors.left: railToggle.visible ? railToggle.right : parent.left
           anchors.leftMargin: railToggle.visible ? Style.space(8) : Style.space(14)
+          anchors.verticalCenter: parent.verticalCenter
+          visible: !!root.service && root.service.hasMarks
+          width: selectionCount.implicitWidth + Style.space(10)
+          height: selectionCount.implicitHeight + Style.space(4)
+          radius: Style.cornerRadius
+          color: Style.selectedFillFor(root.foreground, root.accent)
+
+          Text {
+            id: selectionCount
+            anchors.centerIn: parent
+            text: root.service ? root.service.selectionLabel : ""
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        Text {
+          id: accountLine
+          anchors.left: selectionBadge.visible
+            ? selectionBadge.right
+            : (railToggle.visible ? railToggle.right : parent.left)
+          anchors.leftMargin: selectionBadge.visible
+            ? Style.space(8)
+            : (railToggle.visible ? Style.space(8) : Style.space(14))
           // An invisible sibling still holds its place, so the hints must only
           // take room from this line while they are actually on screen.
           anchors.right: statusBar.hasNotice

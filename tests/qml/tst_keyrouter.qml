@@ -176,6 +176,54 @@ Item {
       compare(host.lastSequence, "Alt+0")
     }
 
+    // Selecting several messages is something done to a list. The reader is
+    // showing exactly one, so `x` there would mark a row nobody can see the
+    // marker on — and Shift+J would move a cursor that is not on screen.
+    function test_selecting_is_a_list_key() {
+      keyClick(Qt.Key_X)
+      compare(host.lastId, "toggleMark")
+    }
+
+    function test_selecting_is_dead_in_the_reader() {
+      host.context = "reader"
+      wait(20)
+      keyClick(Qt.Key_X)
+      compare(host.lastId, "", "there is nothing to select beside one open message")
+    }
+
+    // The capitalised form of the movement keys, which is what it is. Bare j
+    // and k stay movement; the shifted pair marks both ends of the step.
+    function test_shifted_movement_extends_the_selection() {
+      keyClick(Qt.Key_J, Qt.ShiftModifier)
+      compare(host.lastId, "extendDown")
+      keyClick(Qt.Key_K, Qt.ShiftModifier)
+      compare(host.lastId, "extendUp")
+    }
+
+    function test_but_bare_movement_is_still_movement() {
+      keyClick(Qt.Key_J)
+      compare(host.lastId, "cursorDown", "Shift is the whole difference")
+    }
+
+    function test_select_all_is_a_modified_key() {
+      keyClick(Qt.Key_A, Qt.ControlModifier)
+      compare(host.lastId, "markAll")
+    }
+
+    // A bare `a` is reply-all and has been all along. Ctrl+A taking the list
+    // must not have taken the letter with it.
+    function test_and_the_bare_letter_is_still_reply_all() {
+      keyClick(Qt.Key_A)
+      compare(host.lastId, "replyAll")
+    }
+
+    function test_selecting_stands_down_behind_the_sheet() {
+      host.overlay = true
+      wait(20)
+      keyClick(Qt.Key_X)
+      compare(host.lastId, "", "nothing selects mail behind the shortcut sheet")
+    }
+
     function test_a_digit_is_dead_in_a_draft() {
       host.context = "compose"
       wait(20)

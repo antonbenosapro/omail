@@ -496,12 +496,19 @@ Item {
     var handle = existingHandle || newHandle()
     var groups = Imap.groupByFolder(ids)
     if (groups.length === 0) {
-      if (typeof callback === "function") callback(null, "")
+      if (typeof callback === "function") callback({ done: 0 }, "")
       return handle
     }
 
     var remaining = groups.length
     var firstError = ""
+    // How many of the ids actually landed, so a caller acting on a set can say
+    // "9 of 12" rather than claiming the whole set moved. Counted per folder
+    // group, because that is the unit the server answers in: `--fail-early`
+    // stops a folded sequence at its first failure, so a group that errored
+    // counts as none of it. That under-reports rather than over-reports, which
+    // is the direction a claim about somebody's mail should err in.
+    var done = 0
 
     for (var g = 0; g < groups.length; g++) {
       (function(group) {
@@ -535,22 +542,29 @@ Item {
             if (!firstError)
               firstError = "This server supports neither MOVE nor UIDPLUS, so a message cannot be moved without leaving a deleted copy behind"
             remaining--
-            if (remaining === 0 && typeof callback === "function") callback(null, firstError)
+            if (remaining === 0 && typeof callback === "function")
+              callback({ done: done }, firstError)
             return
           }
         }
 
         if (commands.length === 0) {
+          // Nothing for this group to do, which is not a failure: its ids are
+          // as changed as they were ever going to be.
+          done += group.uids.length
           remaining--
-          if (remaining === 0 && typeof callback === "function") callback(null, firstError)
+          if (remaining === 0 && typeof callback === "function")
+            callback({ done: done }, firstError)
           return
         }
 
         var child = root.run(group.folder, commands, function(text, error) {
           if (handle.aborted) return
           if (error && !firstError) firstError = error
+          if (!error) done += group.uids.length
           remaining--
-          if (remaining === 0 && typeof callback === "function") callback(null, firstError)
+          if (remaining === 0 && typeof callback === "function")
+            callback({ done: done }, firstError)
         })
         handle.children.push(child)
       })(groups[g])
@@ -559,6 +573,14 @@ Item {
   }
 
   function trashMessage(id, callback) {
+    return batchTrash([id], callback)
+  }
+
+  // A whole set in one connection, which is what `applyPlan` was already for:
+  // it groups by folder and `sequenceSet` collapses each group's UIDs into one
+  // legal IMAP set, so twelve messages in one folder are one MOVE rather than
+  // twelve. `trashMessage` is the single-message case of it.
+  function batchTrash(ids, callback) {
     var handle = newHandle()
     ensureFolders(function(folderError) {
       if (handle.aborted) return
@@ -572,7 +594,8 @@ Item {
           callback(null, "This server has no Trash folder to move the message to")
         return
       }
-      root.applyPlan([id], { add: [], remove: [], move: trash }, callback, handle)
+      root.applyPlan(Array.isArray(ids) ? ids : [ids],
+        { add: [], remove: [], move: trash }, callback, handle)
     })
     return handle
   }
