@@ -34,7 +34,24 @@ var CAPABILITIES = {
   web: false,
   // The transport carries several commands on one connection, so the STORE
   // that marks a message read rides along with the FETCH that opens it.
-  fetchMarksRead: true
+  fetchMarksRead: true,
+  // Off, and this is the same judgement that turns `spam` off: a capability
+  // the provider cannot honour is a button it must not draw.
+  //
+  // A message id here is `<uid>:<folder>`, and a UID is issued by the folder
+  // that holds the message. Moving one to Trash therefore gives it a new id,
+  // and the server reports that new UID in the tagged OK response — which the
+  // transport never sees, because curl removes the tagged completion around a
+  // custom IMAP request. So after a trash there is no id that names the
+  // message any more: the one the panel holds addresses a UID that is gone
+  // from the folder it names, and the undo would move nothing while reporting
+  // success.
+  //
+  // Making this true means teaching the client to find the message again —
+  // a SEARCH of the Trash folder for its Message-ID — and that is a fetch this
+  // has no reason to make until somebody is standing behind the button. The
+  // seam is here, declared off, rather than absent.
+  undo: false
 }
 
 // Folders, not queries. The `folder:` DSL is read by `ImapProtocol.parseQuery`

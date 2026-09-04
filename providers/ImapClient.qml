@@ -577,15 +577,27 @@ Item {
     return handle
   }
 
-  function untrashMessage(id, callback) {
+  // Back to the folder it came from, when the caller can say which that was. A
+  // move destroys the fact — the message's address now names Trash and nothing
+  // else — so this moved everything to INBOX, which filed a message restored
+  // from Archive somewhere it had never been.
+  //
+  // INBOX remains the fallback for a caller with nothing to say, and that is
+  // the Trash mailbox's own restore: a message reached by browsing Trash has no
+  // earlier folder on record anywhere, and the inbox is the one place a user
+  // will look for it.
+  function untrashMessage(id, callback, folder) {
     var handle = newHandle()
+    var wanted = Imap.trimmed(folder)
     ensureFolders(function(folderError) {
       if (handle.aborted) return
       if (folderError) {
         if (typeof callback === "function") callback(null, folderError)
         return
       }
-      root.applyPlan([id], { add: [], remove: ["\\Deleted"], move: "INBOX" }, callback, handle)
+      var destination = wanted === "" ? "INBOX" : Imap.resolveFolder(wanted, root.special)
+      root.applyPlan([id], { add: [], remove: ["\\Deleted"], move: destination },
+        callback, handle)
     })
     return handle
   }

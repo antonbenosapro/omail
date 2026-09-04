@@ -38,6 +38,17 @@ assert.strictEqual(provider.can("imap", "web"), false, "no web UI to open a mess
 assert.strictEqual(provider.can("gmail", "web"), true)
 assert.strictEqual(provider.can("gmail", "invented"), false, "an unknown capability is a no")
 
+// Undo is a question about identity, not about folders. Gmail's id survives a
+// trash, so untrash addresses the same message; an IMAP UID is issued by the
+// folder holding the message, so a move reissues it and the transport is never
+// told the new one. A button that fails after the user has committed to it is
+// worse than no button, so IMAP declares this off rather than offering one.
+assert.strictEqual(provider.can("gmail", "undo"), true)
+assert.strictEqual(provider.can("imap", "undo"), false,
+  "a move reissues the UID, so there is no id left that names the message")
+assert.strictEqual(provider.can("hey", "undo"), false,
+  "a provider with no client behind it can do nothing at all")
+
 // Whether opening a message marks it read as part of the same request. IMAP's
 // transport carries several commands on one connection, so the STORE rides on
 // the FETCH: two processes for an unread open rather than three, and no window
