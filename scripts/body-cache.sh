@@ -74,7 +74,7 @@ case "$command" in
   clear)
     # Only ever the directory this plugin built, and only if it looks like it.
     case "$dir" in
-      */omamail/bodies/*) rm -rf -- "$dir" ;;
+      */omail/bodies/*) rm -rf -- "$dir" ;;
       *) usage ;;
     esac
     ;;

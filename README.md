@@ -1,8 +1,8 @@
-# Omamail — a Gmail and IMAP email client for Omarchy
+# Omail — a Gmail and IMAP email client for Omarchy
 
 **Your mail as a native Omarchy window — not a browser tab.**
 
-Omamail is an Omarchy desktop email client: a Quickshell plugin that reads,
+Omail is an Omarchy desktop email client: a Quickshell plugin that reads,
 triages, and answers your mail over the official Gmail API, or over IMAP and
 SMTP for every other mailbox. It runs inside the `omarchy-shell` process you
 already have, follows your active theme, and puts an unread count in the bar.
@@ -67,12 +67,12 @@ server — including one you run yourself.
 - **Keyring-backed.** The Gmail refresh token and every IMAP password live in
   GNOME Keyring — never in a config file, never on a command line.
 
-![Omamail: every mailbox in one list, each row striped in its account's colour](assets/unified-inbox.png)
+![Omail: every mailbox in one list, each row striped in its account's colour](assets/unified-inbox.png)
 
 *Five mailboxes merged into one list. The bar down each row — and beside each
 address on the rail — is the account it arrived in.*
 
-<img width="800" alt="Omamail preview" src="https://github.com/user-attachments/assets/9da73cf7-9b08-421f-b818-bf4fe0e99c00" />
+<img width="800" alt="Omail preview" src="https://github.com/user-attachments/assets/9da73cf7-9b08-421f-b818-bf4fe0e99c00" />
 
 And with mini size mode:
 
@@ -99,7 +99,7 @@ Then click the envelope in the bar. To open it from the keyboard, add this to
 `~/.config/hypr/bindings.lua`:
 
 ```lua
-  o.bind("SUPER + SHIFT + G", "Omamail", "omarchy shell shell toggle omamail '{}'")
+  o.bind("SUPER + SHIFT + G", "Omail", "omarchy shell shell toggle omail '{}'")
 ```
 
 The target is `shell`, not the plugin id: the window is summoned by the shell,
@@ -134,22 +134,40 @@ move to. Sending goes out over SMTP, or the mailbox is read-only if no SMTP
 server is set.
 
 **HEY** is listed as a future integration. A HEY CLI is reportedly in
-development; once it is ready, Omamail can support it through the provider seam
+development; once it is ready, Omail can support it through the provider seam
 that is already in place.
+
+## Upgrading from Omamail
+
+The plugin was called `omamail`, and before that `omarchy-gmail`. Installing or
+running `./install.sh` moves `~/.config/omamail` and `~/.cache/omamail` to the
+new names, and the keyring lookup falls back to the old service names once and
+rewrites what it finds — so accounts, the OAuth client and both kinds of stored
+secret survive without being re-entered. A store already under the new name is
+never overwritten by an older one.
+
+The plugin id is the one thing this repository cannot move for you. It is
+recorded in `~/.config/omarchy/shell.json`, which belongs to your shell rather
+than to the plugin, so a bar widget placed under the old id has to be replaced:
+
+```bash
+omarchy plugin remove omamail
+omarchy plugin add https://github.com/jonathangeller/omail.git --enable
+```
 
 To remove it:
 
 ```bash
-omarchy plugin remove omamail
+omarchy plugin remove omail
 ```
 
 That takes the plugin itself. Nothing it wrote lives inside your Omarchy
 config, so removing those is separate and entirely up to you:
 
 ```bash
-secret-tool clear service omamail    # the refresh token and IMAP passwords
-rm -rf ~/.config/omamail             # the OAuth client and account list
-rm -rf ~/.cache/omamail              # cached mail
+secret-tool clear service omail    # the refresh token and IMAP passwords
+rm -rf ~/.config/omail             # the OAuth client and account list
+rm -rf ~/.cache/omail              # cached mail
 ```
 
 Signing out from inside the app clears the keyring entry on its own. The plugin
@@ -159,7 +177,7 @@ above is yours to add and yours to remove.
 ## Connecting your mailbox
 
 Gmail has no shared application to sign in through. Google issues API access
-per Cloud project, so Omamail signs in with an OAuth client **you own**.
+per Cloud project, so Omail signs in with an OAuth client **you own**.
 The window walks you through it in five steps, each with the console page one
 click away. It takes about two minutes, once.
 
@@ -252,7 +270,7 @@ thousand of them, evicted least-recently-used.
   written over stdin so it never appears in the process table. Two mailboxes
   share one client, so keying by client alone would have let the second sign-in
   overwrite the first.
-- The OAuth client goes to `~/.config/omamail/credentials.json`, mode
+- The OAuth client goes to `~/.config/omail/credentials.json`, mode
   `0600`. Not to plugin settings — `shell.json` is world-readable.
 - The access token exists only in memory.
 - Signing out clears the keyring entry.
@@ -273,12 +291,13 @@ Working agreements are in [AGENTS.md](AGENTS.md) and the specification is in
 
 ## Credit
 
-Omamail was created by **[Jason Lee](https://github.com/huacnlee)**
-(`huacnlee`) at [huacnlee/omamail](https://github.com/huacnlee/omamail), and
-this is a fork of it. The design, the three-entry-point plugin architecture,
-the Gmail API and IMAP providers, the Qt rich-text rendering with remote images
-blocked, the calendar invitations and one-click unsubscribe — all of that is
-his work, and it is what this is built on.
+Omail is a fork of **Omamail**, created by
+**[Jason Lee](https://github.com/huacnlee)** (`huacnlee`) at
+[huacnlee/omamail](https://github.com/huacnlee/omamail). The design, the
+three-entry-point plugin architecture, the Gmail API and IMAP providers, the Qt
+rich-text rendering with remote images blocked, the calendar invitations and
+one-click unsubscribe — all of that is his work, and it is what this is built
+on.
 
 The fork diverged at upstream's 0.3.0 and adds:
 
@@ -293,7 +312,7 @@ The fork diverged at upstream's 0.3.0 and adds:
 Both the original and this fork are under the MIT License, and the copyright
 notice in [LICENSE](LICENSE) remains Jason Lee's.
 
-Omamail is an independent project and is not affiliated with Google.
+Omail is an independent project and is not affiliated with Google.
 Gmail is a trademark of Google LLC.
 
 Licensed under the [MIT License](LICENSE).

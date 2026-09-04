@@ -239,34 +239,56 @@ Item {
     secretLookup.running = true
   }
 
+  // Stage 0 is this account's own entry under the current service name and
+  // stage 1 the pre-accounts one; after those come a keyed and a legacy stage
+  // per old service name, oldest layout last. Deriving the count from the list
+  // rather than writing it down is what keeps a third rename from silently
+  // stopping the walk one name short.
+  readonly property int lastSecretLookupStage: 1 + 2 * Credentials.renamedServiceCount()
+
+  // What stage `n` asks for, and whether it is one of the unkeyed entries only
+  // the first mailbox may claim. `service` is -1 for the current name.
+  function secretLookupStagePlan(stage) {
+    if (stage <= 1) return { service: -1, legacy: stage === 1 }
+    return { service: Math.floor((stage - 2) / 2), legacy: (stage - 2) % 2 === 1 }
+  }
+
+  function secretLookupAttributes(stage) {
+    var plan = secretLookupStagePlan(stage)
+    if (plan.legacy && !mayAdoptLegacyToken) return []
+    if (plan.service < 0) {
+      return plan.legacy
+        ? Credentials.legacyKeyringAttributes(clientId)
+        : Credentials.keyringAttributes(clientId, accountId)
+    }
+    return plan.legacy
+      ? Credentials.renamedLegacyKeyringAttributes(clientId, plan.service)
+      : Credentials.renamedKeyringAttributes(clientId, accountId, plan.service)
+  }
+
   function startNextSecretLookup() {
     lookupHandled = false
-    secretLookupStage++
-    var attributes = []
-    if (secretLookupStage === 1 && mayAdoptLegacyToken) {
-      triedLegacyLookup = true
-      attributes = Credentials.legacyKeyringAttributes(clientId)
-    } else if (secretLookupStage <= 2) {
-      secretLookupStage = 2
-      triedLegacyLookup = false
-      attributes = Credentials.renamedKeyringAttributes(clientId, accountId)
-    } else if (secretLookupStage === 3 && mayAdoptLegacyToken) {
-      triedLegacyLookup = true
-      attributes = Credentials.renamedLegacyKeyringAttributes(clientId)
+    // A stage with nothing to ask for is skipped rather than ending the walk:
+    // an unnamed account has no keyed entry at any service name, and stopping
+    // at the first of those would never reach the legacy entry it may adopt.
+    while (secretLookupStage < lastSecretLookupStage) {
+      secretLookupStage++
+      var attributes = secretLookupAttributes(secretLookupStage)
+      if (attributes.length) {
+        secretLookup.command = ["secret-tool", "lookup"].concat(attributes)
+        secretLookup.running = true
+        triedLegacyLookup = secretLookupStagePlan(secretLookupStage).legacy
+        return
+      }
     }
-    if (!attributes.length) {
-      handleSecretLookup("")
-      return
-    }
-    secretLookup.command = ["secret-tool", "lookup"].concat(attributes)
-    secretLookup.running = true
+    handleSecretLookup("")
   }
 
   function handleSecretLookup(raw) {
     if (lookupHandled) return
     lookupHandled = true
     var token = String(raw || "").trim()
-    if (!token && secretLookupStage < 3 && clientId !== "") {
+    if (!token && secretLookupStage < lastSecretLookupStage && clientId !== "") {
       startNextSecretLookup()
       return
     }
@@ -278,10 +300,11 @@ Item {
       if (purpose === "request") finishWaiters("", "Sign in to Gmail first")
       return
     }
+    // A token found under an old service name is rewritten under the current
+    // one and the old entry removed, so the fallback runs once per machine
+    // rather than on every start.
     renamedAttributesToClear = secretLookupStage >= 2
-      ? (secretLookupStage === 3
-        ? Credentials.renamedLegacyKeyringAttributes(clientId)
-        : Credentials.renamedKeyringAttributes(clientId, accountId))
+      ? secretLookupAttributes(secretLookupStage)
       : []
     refreshWithToken(token, purpose)
   }

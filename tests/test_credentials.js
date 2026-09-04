@@ -87,7 +87,7 @@ assert.strictEqual(credentials.isConfigured(null), false)
 assert.strictEqual(credentials.describe(parsed.credentials), "omarchy-gmail-42 · 1234")
 assert.strictEqual(credentials.describe(credentials.empty()), "")
 assert.strictEqual(
-  credentials.path("/home/jason"), "/home/jason/.config/omamail/credentials.json")
+  credentials.path("/home/jason"), "/home/jason/.config/omail/credentials.json")
 
 // -------------------------------------------------------- built-in client
 //
@@ -133,7 +133,7 @@ const first = credentials.keyringAttributes(sharedClient, "one@gmail.com")
 const second = credentials.keyringAttributes(sharedClient, "two@gmail.com")
 
 deepEqual(first, [
-  "service", "omamail",
+  "service", "omail",
   "kind", "refresh-token",
   "client-id", sharedClient,
   "account", "one@gmail.com"
@@ -188,23 +188,62 @@ deepEqual(credentials.legacyKeyringAttributes(""), [])
 // lookup cannot see them. They are read once with these and rewritten, rather
 // than leaving an already signed-in user at a sign-in button.
 deepEqual(credentials.legacyKeyringAttributes(sharedClient), [
-  "service", "omamail",
+  "service", "omail",
   "kind", "refresh-token",
   "client-id", sharedClient
 ])
 assert.strictEqual(credentials.legacyKeyringAttributes(sharedClient).indexOf("account"), -1)
 
-deepEqual(credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com"), [
+// The service name has been renamed twice, so the fallback is a list and the
+// index selects which old name to ask about — newest first, so a machine that
+// skipped a release is still found by the one after it.
+assert.strictEqual(credentials.renamedServiceCount(), 2,
+  "both previous service names are still searched")
+
+deepEqual(credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", 0), [
+  "service", "omamail",
+  "kind", "refresh-token",
+  "client-id", sharedClient,
+  "account", "one@gmail.com"
+])
+deepEqual(credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", 1), [
   "service", "omarchy-gmail",
   "kind", "refresh-token",
   "client-id", sharedClient,
   "account", "one@gmail.com"
 ])
-deepEqual(credentials.renamedLegacyKeyringAttributes(sharedClient), [
+deepEqual(credentials.renamedLegacyKeyringAttributes(sharedClient, 0), [
+  "service", "omamail",
+  "kind", "refresh-token",
+  "client-id", sharedClient
+])
+deepEqual(credentials.renamedLegacyKeyringAttributes(sharedClient, 1), [
   "service", "omarchy-gmail",
   "kind", "refresh-token",
   "client-id", sharedClient
 ])
+
+// Omitting the index asks about the most recent old name, so a caller that
+// does not know the list grew still gets a usable answer.
+deepEqual(credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com"),
+  credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", 0))
+
+// Past the end of the list there is no such name, and the walk has to stop
+// rather than fall back to a wildcard or to the current service name.
+for (const which of [credentials.renamedServiceCount(), 99, -1]) {
+  deepEqual(credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", which), [],
+    "there is no service name at index " + which)
+  deepEqual(credentials.renamedLegacyKeyringAttributes(sharedClient, which), [])
+  deepEqual(credentials.renamedImapKeyringAttributes("imap:jon@example.com", which), [])
+}
+
+// None of the old names may be the current one: a "fallback" that asked about
+// the service just written would loop, rewriting an entry over itself.
+for (let which = 0; which < credentials.renamedServiceCount(); which++) {
+  const renamed = credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", which)
+  assert.notStrictEqual(renamed[1], first[1],
+    "an old service name must differ from the current one")
+}
 
 // ------------------------------------------------------------ the store
 //
@@ -336,7 +375,7 @@ deepEqual(credentials.accountIds(damaged), ["three@work.com"])
   deepEqual(credentials.imapKeyringAttributes("  "), [])
   deepEqual(credentials.imapKeyringAttributes(null), [])
   deepEqual(credentials.imapKeyringAttributes("imap:jon@example.com"), [
-    "service", "omamail",
+    "service", "omail",
     "kind", "imap-password",
     "account", "imap:jon@example.com"
   ], "a named account keys on its own address")
@@ -350,6 +389,43 @@ deepEqual(credentials.accountIds(damaged), ["three@work.com"])
     JSON.stringify(credentials.imapKeyringAttributes("jon@example.com")),
     JSON.stringify(credentials.keyringAttributes("1234-abc.apps.googleusercontent.com",
       "jon@example.com")))
+
+  // An IMAP password gets the same fallback the refresh token has. It used to
+  // get none, which made an IMAP account the one a rename actually cost
+  // something: a refresh token can be fetched again from a browser, while the
+  // password is the user's own and only they can type it back in.
+  deepEqual(credentials.renamedImapKeyringAttributes("imap:jon@example.com", 0), [
+    "service", "omamail",
+    "kind", "imap-password",
+    "account", "imap:jon@example.com"
+  ])
+  deepEqual(credentials.renamedImapKeyringAttributes("imap:jon@example.com", 1), [
+    "service", "omarchy-gmail",
+    "kind", "imap-password",
+    "account", "imap:jon@example.com"
+  ])
+
+  // The kind and the account survive the fallback: only the service name
+  // changes, or the old lookup would ask for an entry nobody ever wrote.
+  for (let which = 0; which < credentials.renamedServiceCount(); which++) {
+    const current = credentials.imapKeyringAttributes("imap:jon@example.com")
+    const renamed = credentials.renamedImapKeyringAttributes("imap:jon@example.com", which)
+    assert.strictEqual(renamed.length, current.length)
+    for (let i = 0; i < current.length; i++) {
+      if (i === 1) assert.notStrictEqual(renamed[i], current[i])
+      else assert.strictEqual(renamed[i], current[i])
+    }
+  }
+
+  // And an unnamed account is no more addressable under an old name than
+  // under the current one — a blank value is a secret-tool wildcard over every
+  // password this plugin ever stored.
+  for (const id of ["", "  ", null]) {
+    for (let which = 0; which < credentials.renamedServiceCount(); which++) {
+      deepEqual(credentials.renamedImapKeyringAttributes(id, which), [],
+        "an unnamed account has no entry under any service name")
+    }
+  }
 }
 
 // The decision a successful sign-in makes about the secret it now holds. It is

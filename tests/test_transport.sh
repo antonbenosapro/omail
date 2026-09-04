@@ -9,7 +9,7 @@ set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 script="$root/scripts/mail-transport.sh"
-work=$(mktemp -d "${TMPDIR:-/tmp}/omamail-transport-test.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/omail-transport-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM HUP
 
 mkdir -p "$work/bin"
@@ -508,7 +508,7 @@ rm -rf "$work/cache"
 printf '%s\n' "$imap_req" \
   | CURL_STUB_CAPABILITY="$axigen_imap" XDG_CACHE_HOME="$work/cache" \
     PATH="$work/bin:$PATH" sh "$script" >/dev/null
-cached=$(find "$work/cache/omamail/capabilities" -type f 2>/dev/null | wc -l | tr -d ' ')
+cached=$(find "$work/cache/omail/capabilities" -type f 2>/dev/null | wc -l | tr -d ' ')
 if [ "$cached" = "1" ]; then
   printf '  ok   a probe answer is cached for the next connection\n'
 else
@@ -522,7 +522,7 @@ rm -rf "$work/cache"
 printf '%s\n' "$imap_req" \
   | CURL_STUB_CAPABILITY='' XDG_CACHE_HOME="$work/cache" \
     PATH="$work/bin:$PATH" sh "$script" >/dev/null
-empty=$(find "$work/cache/omamail/capabilities" -type f 2>/dev/null | wc -l | tr -d ' ')
+empty=$(find "$work/cache/omail/capabilities" -type f 2>/dev/null | wc -l | tr -d ' ')
 if [ "$empty" = "0" ]; then
   printf '  ok   an empty probe answer is not cached\n'
 else

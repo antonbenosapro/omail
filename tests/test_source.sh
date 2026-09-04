@@ -178,9 +178,9 @@ fi
 
 # New-mail notifications use the application's own mark, not the desktop's
 # generic unread-mail glyph.
-grep -q 'root\.pluginDir + "/assets/omamail\.svg"' account/MailAccount.qml \
-  || fail "new-mail notifications need the Omamail app icon"
-[ -f assets/omamail.svg ] || fail "the notification app icon is missing"
+grep -q 'root\.pluginDir + "/assets/omail\.svg"' account/MailAccount.qml \
+  || fail "new-mail notifications need the Omail app icon"
+[ -f assets/omail.svg ] || fail "the notification app icon is missing"
 
 # Account actions live on the account's edit page. The switcher only changes
 # accounts and leads to management; the management list only leads to editing.

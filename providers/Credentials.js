@@ -317,7 +317,7 @@ function usingBuiltin(fileText, accountId) {
 
 function path(home) {
   var base = trimmed(home)
-  return (base || "~") + "/.config/omamail/credentials.json"
+  return (base || "~") + "/.config/omail/credentials.json"
 }
 
 // ----------------------------------------------------------------- keyring
@@ -325,8 +325,12 @@ function path(home) {
 // The refresh token is keyed by account as well as by client, because two
 // accounts may share one client: keyed by client alone, the second sign-in
 // would overwrite the first account's token and silently sign it out.
-var KEYRING_SERVICE = "omamail"
-var RENAMED_KEYRING_SERVICE = "omarchy-gmail"
+// The service name has been renamed twice, so the fallback is a list rather
+// than one name: an entry written under any of them is still this plugin's.
+// Newest first, so the most likely old layout is asked about first, and a
+// machine that skipped a release is still found by the one after it.
+var KEYRING_SERVICE = "omail"
+var RENAMED_KEYRING_SERVICES = ["omamail", "omarchy-gmail"]
 var KEYRING_KIND = "refresh-token"
 
 // An account that has not learned its address yet has no name to key on, and
@@ -390,18 +394,39 @@ function secretDisposition(accountId) {
   return isUnnamedAccount(accountId) ? STORE_WHEN_NAMED : STORE_NOW
 }
 
-// Entries from before the Omamail rename are read once and rewritten under
-// the new service name, so an upgrade keeps the user's signed-in session.
-function renamedKeyringAttributes(clientId, accountId) {
-  var attributes = keyringAttributes(clientId, accountId)
-  if (attributes.length) attributes[1] = RENAMED_KEYRING_SERVICE
+// Entries from before a rename are read once and rewritten under the current
+// service name, so an upgrade keeps the user signed in instead of presenting a
+// sign-in button to somebody who never signed out.
+//
+// `which` selects the old name, newest first, and is out of range for anything
+// past the end of the list — so a caller can walk it by counting up and stop
+// when it gets nothing back, without knowing how many names there have been.
+function renamedServiceCount() {
+  return RENAMED_KEYRING_SERVICES.length
+}
+
+function underRenamedService(attributes, which) {
+  var index = which === undefined ? 0 : which
+  if (!attributes.length) return []
+  if (index < 0 || index >= RENAMED_KEYRING_SERVICES.length) return []
+  attributes[1] = RENAMED_KEYRING_SERVICES[index]
   return attributes
 }
 
-function renamedLegacyKeyringAttributes(clientId) {
-  var attributes = legacyKeyringAttributes(clientId)
-  if (attributes.length) attributes[1] = RENAMED_KEYRING_SERVICE
-  return attributes
+function renamedKeyringAttributes(clientId, accountId, which) {
+  return underRenamedService(keyringAttributes(clientId, accountId), which)
+}
+
+function renamedLegacyKeyringAttributes(clientId, which) {
+  return underRenamedService(legacyKeyringAttributes(clientId), which)
+}
+
+// The same fallback for an IMAP password. It was missing, and an IMAP account
+// is exactly the one with nothing to fall back on: a refresh token can be
+// obtained again from a browser, while the password is the user's own and
+// re-entering it is the cost of the rename.
+function renamedImapKeyringAttributes(accountId, which) {
+  return underRenamedService(imapKeyringAttributes(accountId), which)
 }
 
 // Shown under the client id in the panel so a user with several Cloud projects

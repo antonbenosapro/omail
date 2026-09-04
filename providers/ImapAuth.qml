@@ -114,22 +114,57 @@ Item {
     startSecretLookup()
   }
 
+  // The service name the keyring entry was written under has been renamed, so
+  // the lookup falls back through the old names exactly as the Gmail manager's
+  // does. Without this an IMAP account is the one that loses its credential to
+  // a rename: a refresh token can be obtained again from a browser, while this
+  // is the user's own password and only they can type it back in.
+  //
+  // Stage 0 is the current service name; each stage after it is one old name,
+  // newest first.
+  property int secretLookupStage: 0
+  readonly property int lastSecretLookupStage: Credentials.renamedServiceCount()
+  property var renamedAttributesToClear: []
+
+  function secretLookupAttributes(stage) {
+    return stage <= 0
+      ? Credentials.imapKeyringAttributes(accountId)
+      : Credentials.renamedImapKeyringAttributes(accountId, stage - 1)
+  }
+
   function startSecretLookup() {
-    var attributes = Credentials.imapKeyringAttributes(accountId)
-    if (attributes.length === 0) {
-      handleSecretLookup("")
-      return
-    }
+    secretLookupStage = -1
+    renamedAttributesToClear = []
+    startNextSecretLookup()
+  }
+
+  function startNextSecretLookup() {
     lookupHandled = false
-    secretLookup.command = ["secret-tool", "lookup"].concat(attributes)
-    secretLookup.running = true
+    while (secretLookupStage < lastSecretLookupStage) {
+      secretLookupStage++
+      var attributes = secretLookupAttributes(secretLookupStage)
+      // An account with no address is not addressable under any service name,
+      // so every stage hands back nothing and the walk ends without asking
+      // secret-tool anything — a lookup with no attributes would match every
+      // entry this plugin ever wrote.
+      if (attributes.length) {
+        secretLookup.command = ["secret-tool", "lookup"].concat(attributes)
+        secretLookup.running = true
+        return
+      }
+    }
+    handleSecretLookup("")
   }
 
   function handleSecretLookup(line) {
     if (lookupHandled) return
     lookupHandled = true
-    passwordChecked = true
     var value = String(line || "")
+    if (value === "" && secretLookupStage < lastSecretLookupStage) {
+      startNextSecretLookup()
+      return
+    }
+    passwordChecked = true
     if (value === "") {
       finishWaiters("", "No password saved for this mailbox. Sign in again")
       // Only a mailbox that is otherwise ready to go is worth complaining
@@ -138,6 +173,13 @@ Item {
       return
     }
     password = value
+    // Found under an old service name: rewrite it under the current one and
+    // drop the old entry, so the fallback runs once per machine rather than on
+    // every start.
+    if (secretLookupStage > 0) {
+      renamedAttributesToClear = secretLookupAttributes(secretLookupStage)
+      storePassword()
+    }
     finishWaiters(settings.username + ":" + password, "")
     loginSucceeded()
   }
@@ -302,6 +344,13 @@ Item {
       if (exitCode !== 0)
         root.lastError = "Signed in, but the password could not be saved. "
           + "You may need to enter it again after a restart"
+      // The old entry goes only after the new one is safely written. A clear
+      // that ran first would leave a failed write with no password anywhere.
+      if (exitCode === 0 && root.renamedAttributesToClear.length && !keyringClear.running) {
+        keyringClear.command = ["secret-tool", "clear"].concat(root.renamedAttributesToClear)
+        root.renamedAttributesToClear = []
+        keyringClear.running = true
+      }
     }
   }
 

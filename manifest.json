@@ -1,9 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "omamail",
-  "name": "Omamail",
+  "id": "omail",
+  "name": "Omail",
   "version": "0.3.0",
-  "author": "Jason Lee <huacnlee@gmail.com>",
+  "author": "Jonathan Geller <jgeller@example.com>",
+  "credits": "Originally Omamail by Jason Lee <huacnlee@gmail.com>, https://github.com/huacnlee/omamail",
   "license": "MIT",
   "description": "Email client for Omarchy: read, triage, and reply to Gmail and any IMAP mailbox in a native window. Fastmail, iCloud, Outlook, Zoho, or your own server.",
   "kinds": [
@@ -18,7 +19,7 @@
     "panel": "App.qml"
   },
   "barWidget": {
-    "displayName": "Omamail",
+    "displayName": "Omail",
     "description": "Unread mail count in the bar; the inbox itself opens as its own window. Works with Gmail and any IMAP mail server.",
     "category": "Communication",
     "aliases": [
