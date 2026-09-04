@@ -49,4 +49,18 @@ grep -q 'readingZoom: readingZoom' Service.qml \
 grep -q 'listZoom: listZoom' Service.qml \
   || fail "saveWindowPrefs must persist listZoom"
 
+# Which mailboxes the merged view draws from is per-account state on disk, in
+# accounts.json beside the colour. A merging loop that asks the host list
+# directly instead of asking `isMergedHost` is how an excluded mailbox's
+# messages come back into the merged list — and it would look right in every
+# single-account install, which is most of them.
+grep -q 'function isMergedHost' Service.qml \
+  || fail "Service.qml must ask Accounts which mailboxes the merged view draws from"
+grep -q 'function setAccountMerged' Service.qml \
+  || fail "Service.qml must expose setAccountMerged, or the setting cannot be changed"
+grep -q 'property var mergedIds' Service.qml \
+  || fail "the merged ids must be a property: a binding cannot depend on what a function reads"
+grep -q 'Accounts.mergedIds' Service.qml \
+  || fail "which mailboxes merge is Accounts.js's rule, not a local one"
+
 printf 'test_service_source.sh ok\n'

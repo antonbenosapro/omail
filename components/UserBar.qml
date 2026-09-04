@@ -16,12 +16,27 @@ Rectangle {
   property string email: ""
   property bool collapsed: false
 
+  // While the merged view is on, this row names that view rather than one of
+  // the mailboxes feeding it. Naming the account the rail happens to be
+  // pointing at reads as though the reader were in that mailbox, which is the
+  // one thing the merged view is not.
+  property bool unified: false
+
   // Two things live in this row: which mailbox you are in, and everything
   // else. The address switches accounts; the menu button opens app actions.
   signal switcherRequested(real sceneX, real sceneY)
   property int accountCount: 1
 
-  readonly property string initial: email === "" ? "?" : email.charAt(0).toUpperCase()
+  readonly property string label: root.unified
+    ? "All mailboxes"
+    : (email === "" ? "Not connected" : email)
+
+  // The merged view has no one address to take a letter from, so it takes a
+  // mark instead: an initial here would have to be some account's, and picking
+  // one would say the same wrong thing the address did.
+  readonly property string initial: root.unified
+    ? "\u2261"
+    : (email === "" ? "?" : email.charAt(0).toUpperCase())
 
   // Held while a popup this bar opened is on screen, so the popup reads as
   // belonging to it rather than as floating free.
@@ -65,7 +80,7 @@ Rectangle {
     anchors.rightMargin: Style.space(8)
     anchors.verticalCenter: parent.verticalCenter
     textFormat: Text.PlainText
-    text: root.email === "" ? "Not connected" : root.email
+    text: root.label
     color: root.dimColor
     font.family: root.panelFontFamily
     font.pixelSize: Style.font.caption
@@ -83,7 +98,7 @@ Rectangle {
 
   PanelToolTip {
     visible: root.collapsed && hover.hovered
-    text: root.email === "" ? "Not connected" : root.email
+    text: root.label
     fontFamily: root.panelFontFamily
   }
 }

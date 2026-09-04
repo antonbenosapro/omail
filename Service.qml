@@ -73,6 +73,33 @@ Item {
   // is one account's or all of them merged.
   readonly property bool unified: Accounts.isUnified(accountList)
 
+  // Whether a merged view is worth offering at all, and how many mailboxes it
+  // would draw from. Both come off the list rather than off the account count,
+  // because a mailbox the user took out of the merged view is still an account.
+  readonly property bool offersUnified: Accounts.offersUnified(accountList)
+  readonly property int mergedCount: Accounts.mergedCount(accountList)
+
+  // The ids the merged view draws from, as a property rather than as a
+  // question asked per host. A binding cannot depend on what a function reads,
+  // so every merging binding below names this one — and then re-evaluates when
+  // a mailbox is taken out of the merged view, which changes neither `unified`
+  // nor `current` and would otherwise leave the list on screen holding mail it
+  // no longer merges.
+  readonly property var mergedIds: Accounts.mergedIds(accountList)
+
+  // Whether this host's mailbox is one of the ones the merged view merges.
+  // Every loop that builds the merged list asks this, so the rule about what
+  // "in the merged view" means lives in `Accounts.js` and not in a condition
+  // copied into each of them.
+  //
+  // Only the merging loops. Anything that addresses one account — the compose
+  // host, the host that owns an open message, the unread total the bar shows —
+  // asks by id and must keep answering for an excluded mailbox too: exclusion
+  // takes a mailbox out of one list, not out of the program.
+  function isMergedHost(host) {
+    return !!host && Accounts.includesId(root.mergedIds, host.accountId)
+  }
+
   // The instance whose mailbox is on screen. Everything below forwards to it.
   property var current: null
 
@@ -107,12 +134,15 @@ Item {
 
     // The one line the unified view turns on. Every account is instantiated
     // and polling its unread count either way; `active` is what decides
-    // whether it also loads a list, so unified means all of them do.
+    // whether it also loads a list, so unified means every *included* one
+    // does — and the mailbox the window would come back to stays active
+    // whether or not it is one of them, because leaving the merged view must
+    // not land on an empty list waiting for its first fetch.
     var everyone = root.unified
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
       if (!host) continue
-      host.active = everyone || host === next
+      host.active = host === next || (everyone && root.isMergedHost(host))
     }
 
     // `current` stays the mailbox the window would come back to, and is what
@@ -141,8 +171,41 @@ Item {
     saveAccounts()
   }
 
+  // Whether a mailbox is one of the ones the merged view merges. By position,
+  // like the colour, because that is the only handle on a row whose account has
+  // not signed in yet.
+  //
+  // Taking the second-to-last mailbox out leaves nothing to merge, and
+  // `isUnified` says so on its own — the window falls back to the mailbox
+  // `activeId` still names. The stored flag is left alone, so putting a mailbox
+  // back restores the merged view rather than making the user ask for it again.
+  function setAccountMerged(index, on) {
+    var next = Accounts.setMergedAt(accountList, index, on)
+    if (next === accountList) return
+    var wasUnified = root.unified
+    accountList = next
+    saveAccounts()
+    // The list on screen changed shape: either a mailbox's messages left it or
+    // a mailbox's messages have to be fetched into it. Refreshing what is now
+    // current is what fills the gap, and clearing the selection is what stops
+    // the reader holding a message from a mailbox no longer in the list.
+    refreshCurrent()
+    // The merged unread total is not derived from the list — it is summed over
+    // the hosts when one of them reports a change — so changing which hosts it
+    // sums over has to ask for it again.
+    recount()
+    if (root.unified || wasUnified) {
+      clearSelection()
+      refresh()
+    }
+  }
+
   function showUnified() {
     if (root.unified) return
+    // Nothing to merge — one mailbox included, or none. `setUnified` refuses
+    // it anyway; bailing here is what stops the window clearing the reader and
+    // refetching every list to arrive back where it started.
+    if (root.mergedCount < 2) return
     activeIndex = -1
     accountList = Accounts.setUnified(accountList, true)
     saveAccounts()
@@ -452,16 +515,25 @@ Item {
   // to send the whole window back to the beginning.
   property bool anyAccountReady: false
 
+  // What the merged list itself is holding, which is not the same number once
+  // a mailbox has been taken out of it. The bar keeps answering for every
+  // mailbox — an excluded one is still mail waiting on this machine — and the
+  // header over the merged list answers for the list under it.
+  property int mergedUnread: 0
+
   function recount() {
     var total = 0
+    var merged = 0
     var signedIn = false
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
       if (!host) continue
       total += host.inboxUnread
+      if (root.isMergedHost(host)) merged += host.inboxUnread
       if (host.ready) signedIn = true
     }
     unreadTotal = total
+    mergedUnread = merged
     anyAccountReady = signedIn
   }
 
@@ -495,7 +567,11 @@ Item {
         error: host ? host.lastError : "",
         // The stripe this account's rows carry in a merged list, and the tint
         // on its avatar everywhere else. Empty when the user has not chosen.
-        color: Accounts.normalizeColor(accounts[i].color)
+        color: Accounts.normalizeColor(accounts[i].color),
+        // Whether the merged view draws from this mailbox. True for every
+        // account that has never been asked about, so the switch a user has
+        // not touched reads the way the view has always behaved.
+        merged: Accounts.isMerged(accounts[i])
       })
     }
     return out
@@ -551,7 +627,7 @@ Item {
     return index >= 0 && index < accounts.length ? String(accounts[index].email || "") : ""
   }
   readonly property int inboxUnread: root.unified
-    ? root.unreadTotal
+    ? root.mergedUnread
     : (current ? current.inboxUnread : 0)
   // One account's list, or every account's merged newest-first.
   //
@@ -562,10 +638,11 @@ Item {
   // the pointer for no reason anyone can see.
   readonly property var messages: {
     if (!root.unified) return current ? current.messages : []
+    var included = root.mergedIds
     var merged = []
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
-      if (!host || !host.ready) continue
+      if (!host || !host.ready || !Accounts.includesId(included, host.accountId)) continue
       var list = host.messages || []
       for (var j = 0; j < list.length; j++) merged.push(list[j])
     }
@@ -669,9 +746,11 @@ Item {
   // then grew under the pointer as the others arrived.
   readonly property bool listLoading: {
     if (!root.unified) return !!current && current.listLoading
+    var included = root.mergedIds
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
-      if (host && host.ready && host.listLoading) return true
+      if (!host || !Accounts.includesId(included, host.accountId)) continue
+      if (host.ready && host.listLoading) return true
     }
     return false
   }
@@ -679,9 +758,11 @@ Item {
   readonly property bool listLoaded: {
     if (!root.unified) return !!current && current.listLoaded
     var any = false
+    var included = root.mergedIds
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
       if (!host || !host.ready) continue
+      if (!Accounts.includesId(included, host.accountId)) continue
       if (!host.listLoaded) return false
       any = true
     }
@@ -689,9 +770,11 @@ Item {
   }
   readonly property bool hasMore: {
     if (!root.unified) return !!current && current.hasMore
+    var included = root.mergedIds
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
-      if (host && host.hasMore) return true
+      if (!host || !Accounts.includesId(included, host.accountId)) continue
+      if (host.hasMore) return true
     }
     return false
   }
@@ -743,7 +826,7 @@ Item {
     }
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
-      if (host) host.refresh()
+      if (root.isMergedHost(host)) host.refresh()
     }
   }
   // Each mailbox pages independently — Gmail has a real page token, IMAP an
@@ -756,7 +839,7 @@ Item {
     }
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
-      if (host && host.hasMore) host.loadMore()
+      if (root.isMergedHost(host) && host.hasMore) host.loadMore()
     }
   }
   // Selecting sets which mailbox the reader speaks to, and clears the
@@ -818,9 +901,13 @@ Item {
       return
     }
     clearSelection()
+    // The mailbox the window would come back to moves too, excluded or not:
+    // it is the list that is drawn the moment the merged view is left, and
+    // leaving it on a different mailbox than the rail says is a lie the user
+    // only finds out about after switching.
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
-      if (host) host.selectMailbox(key)
+      if (host && (host === current || root.isMergedHost(host))) host.selectMailbox(key)
     }
   }
   function search(text) { if (current) current.search(text) }
@@ -839,9 +926,12 @@ Item {
       if (current) current.markAllRead()
       return
     }
+    // What is on screen, which while unified is the included mailboxes. An
+    // excluded one is not in the list the button sits under, and marking it
+    // read would clear mail the user cannot see from here.
     for (var i = 0; i < accountHosts.count; i++) {
       var host = accountHosts.objectAt(i)
-      if (host) host.markAllRead()
+      if (root.isMergedHost(host)) host.markAllRead()
     }
   }
   function send(fields) { if (composeHost) composeHost.send(fields) }
@@ -942,7 +1032,9 @@ Item {
       // One binding rather than a value pushed in from wherever somebody
       // remembered to. It is false for a host that is not on screen, which is
       // what nothing used to say.
-      windowOpen: root.windowOpen && (root.unified || root.current === this)
+      windowOpen: root.windowOpen
+        && (root.current === this
+          || (root.unified && Accounts.includesId(root.mergedIds, accountId)))
       // Every mailbox obeys the one answer: it is about what the reader is
       // willing to tell a sender, not about which account the mail came to.
       alwaysShowImages: root.alwaysShowImages

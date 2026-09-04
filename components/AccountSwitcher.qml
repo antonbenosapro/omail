@@ -22,7 +22,7 @@ Item {
   required property color popupBorderColor
   required property string panelFontFamily
 
-  // [{ id, email, label, unread, active, signedIn, busy, error }]
+  // [{ id, email, label, unread, active, signedIn, busy, error, color, merged }]
   property var accounts: []
 
   readonly property bool opened: menu.opened
@@ -43,7 +43,33 @@ Item {
 
   // Offered only where there is more than one mailbox to merge. One account
   // "unified" is that account, and a row saying otherwise is a lie.
-  readonly property bool offersUnified: (root.accounts ? root.accounts.length : 0) > 1
+  //
+  // Pushed in rather than counted here, because "how many mailboxes would be
+  // merged" is a question about which of them the user has included, and that
+  // rule lives in `Accounts.js`. Counting the rows was the same answer only
+  // while every mailbox was in the merged view.
+  property bool offersUnified: (root.accounts ? root.accounts.length : 0) > 1
+
+  // How many mailboxes the merged row would draw from, and how much of their
+  // mail is unread. Both are over the included ones only: a row that counted
+  // every mailbox would promise mail the list it opens does not hold.
+  readonly property int mergedCount: {
+    var values = root.accounts || []
+    var n = 0
+    for (var i = 0; i < values.length; i++) {
+      if (values[i] && values[i].merged !== false && String(values[i].id || "") !== "") n++
+    }
+    return n
+  }
+
+  readonly property int mergedUnread: {
+    var values = root.accounts || []
+    var total = 0
+    for (var i = 0; i < values.length; i++) {
+      if (values[i] && values[i].merged !== false) total += Number(values[i].unread) || 0
+    }
+    return total
+  }
 
   // The unified row sits above the accounts and is addressed as -1, so every
   // account keeps the index it already had — `accountChosen` means the same
@@ -242,10 +268,13 @@ Item {
             // are the only mailboxes a merged list offers, so it says so here
             // rather than letting the rail be the first to mention it.
             text: {
-              var count = root.accounts ? root.accounts.length : 0
-              var unread = 0
-              for (var i = 0; i < count; i++) unread += Number(root.accounts[i].unread) || 0
-              var what = count + " mailboxes · Inbox and Unread"
+              var count = root.mergedCount
+              var unread = root.mergedUnread
+              // Names the number it actually merges, so a mailbox taken out in
+              // settings is visible here as one fewer rather than as a count
+              // that quietly disagrees with the list the row opens.
+              var what = (count === 1 ? "1 mailbox" : count + " mailboxes")
+                + " · Inbox and Unread"
               return unread > 0 ? what + " · " + unread + " unread" : what
             }
             color: root.dimColor
@@ -349,7 +378,16 @@ Item {
                 if (row.modelData.busy) return "Checking"
                 // Only when it says something the address does not.
                 var name = String(row.modelData.label || "")
-                return name !== "" && row.modelData.email.indexOf(name) !== 0 ? name : ""
+                var said = name !== "" && row.modelData.email.indexOf(name) !== 0 ? name : ""
+                // Said here as well as in settings, because this is the list
+                // the merged row sits in: a mailbox whose mail is missing from
+                // All mailboxes should say so beside that row rather than only
+                // on a page the user has to go and open. Appended rather than
+                // instead of the label, which is the other thing this line is
+                // for and is not made untrue by it.
+                if (root.offersUnified && row.modelData.merged === false)
+                  return said !== "" ? said + " · not in All mailboxes" : "Not in All mailboxes"
+                return said
               }
               color: row.modelData.error !== undefined && row.modelData.error !== ""
                 ? root.urgentColor : root.dimColor

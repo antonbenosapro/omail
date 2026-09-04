@@ -159,6 +159,7 @@ Item {
       dimColor: root.dimColor
       panelFontFamily: root.panelFontFamily
       email: root.service ? root.service.accountEmail : ""
+      unified: root.service ? root.service.unified : false
       accountCount: root.service ? root.service.accountCount : 1
       collapsed: root.collapsed
       switcherOpen: root.switcherOpen

@@ -230,7 +230,7 @@ of something listening on your own network.
 
 Several mailboxes can be added and switched between; each keeps its own cache,
 its own refresh token, and its own unread count, and the bar badge counts all of
-them. They share one OAuth client, since a client belongs to a Cloud project
+them. **All mailboxes** in the switcher merges them into one list, newest first, with a coloured stripe saying which mailbox each message arrived in; settings decides which mailboxes it draws from, so a noisy address can be left out of the merged list while still being one row of its own in the switcher. Every mailbox is included until you say otherwise, and one added later joins it. They share one OAuth client, since a client belongs to a Cloud project
 rather than to an address — so adding a second mailbox is a sign-in, not another
 trip through the console. Mailboxes are added and removed on the settings page,
 and switched from the menu, the user bar at the foot of the rail, or `Alt+A` —

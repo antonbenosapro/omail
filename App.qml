@@ -1081,9 +1081,14 @@ Item {
                 root.setupVisible = true
               }
               onEditRequested: function(index) { root.editAccount(index) }
-        onColorChosen: function(index, color) {
-          if (root.service) root.service.setAccountColor(index, color)
-        }
+              onColorChosen: function(index, color) {
+                if (root.service) root.service.setAccountColor(index, color)
+              }
+              // Which mailboxes All mailboxes draws from. Persisted per
+              // account, so a mailbox left out stays out across a restart.
+              onMergedToggled: function(index, merged) {
+                if (root.service) root.service.setAccountMerged(index, merged)
+              }
             }
           }
         }
@@ -1238,6 +1243,10 @@ Item {
         panelFontFamily: root.fontFamily
         accounts: root.service ? root.service.accountSummaries : []
         unified: !!root.service && root.service.unified
+        // Whether the merged row is worth drawing, which is a question about
+        // how many mailboxes the user has left in the merged view rather than
+        // about how many rows there are.
+        offersUnified: !!root.service && root.service.offersUnified
         onAccountChosen: function(index) {
           if (root.service) root.service.switchToIndex(index)
           root.backToList()

@@ -88,6 +88,163 @@ assert.strictEqual(accounts.isUnified(accounts.load(accounts.serialize(alone))),
 let reduced = accounts.remove(merged, "bob@example.com")
 assert.strictEqual(accounts.isUnified(reduced), false)
 
+// ------------------------------------------------- which mailboxes merge
+//
+// The merged view draws from the mailboxes the user has left in it. Absent
+// means in, so an accounts.json written before this field existed merges every
+// mailbox exactly as it did, and an account added afterwards joins the merged
+// list rather than quietly staying out of a view already on screen.
+
+assert.strictEqual(accounts.isMerged({ email: "a@example.com" }), true,
+  "an account that was never asked is in the merged view")
+assert.strictEqual(accounts.isMerged({ merged: true }), true)
+assert.strictEqual(accounts.isMerged({ merged: false }), false)
+assert.strictEqual(accounts.isMerged(null), true)
+// Only an explicit false takes a mailbox out. A hand-edited file with a string
+// or a number in the field must not be read as "excluded" by accident.
+assert.strictEqual(accounts.isMerged({ merged: 0 }), true)
+assert.strictEqual(accounts.isMerged({ merged: "no" }), true)
+
+assert.strictEqual(accounts.add(accounts.emptyList(), account("ada@example.com"))
+  .accounts[0].merged, true, "a new account is included")
+
+let mergeTrio = accounts.add(accounts.add(accounts.add(accounts.emptyList(),
+  account("ada@example.com")), account("bob@example.com")), account("cy@example.com"))
+assert.strictEqual(accounts.mergedCount(mergeTrio), 3)
+assert.strictEqual(accounts.offersUnified(mergeTrio), true)
+
+// Taking one out. By position, like the colour: a mailbox that has not signed
+// in yet has no id and is still a row with a switch on it.
+const beforeExclude = frozen(mergeTrio)
+let bobLeftOut = accounts.setMergedAt(mergeTrio, 1, false)
+assert.strictEqual(frozen(mergeTrio), beforeExclude, "setMergedAt leaves its input alone")
+assert.strictEqual(bobLeftOut.accounts[1].merged, false)
+assert.strictEqual(bobLeftOut.accounts[0].merged, true, "the others are untouched")
+assert.strictEqual(bobLeftOut.accounts[2].merged, true)
+assert.strictEqual(accounts.mergedCount(bobLeftOut), 2)
+assert.strictEqual(accounts.count(bobLeftOut), 3,
+  "an excluded mailbox is still an account")
+// The ids, which is what the merging bindings in `Service.qml` name so they
+// re-evaluate when a mailbox is taken out. Pending rows are not in it: they
+// have no id and nothing to merge.
+deepEqual(accounts.mergedIds(bobLeftOut), ["ada@example.com", "cy@example.com"])
+deepEqual(accounts.mergedIds(mergeTrio),
+  ["ada@example.com", "bob@example.com", "cy@example.com"])
+deepEqual(accounts.mergedIds(accounts.emptyList()), [])
+deepEqual(accounts.mergedIds(null), [])
+
+assert.strictEqual(accounts.includesId(accounts.mergedIds(bobLeftOut), "bob@example.com"), false)
+assert.strictEqual(accounts.includesId(accounts.mergedIds(bobLeftOut), "ada@example.com"), true)
+assert.strictEqual(accounts.includesId(accounts.mergedIds(bobLeftOut), "nobody@example.com"),
+  false, "an account that is not there is in no view")
+// A pending host has no id, and an empty one must not match the empty entries
+// a merged id list can never hold anyway.
+assert.strictEqual(accounts.includesId(accounts.mergedIds(bobLeftOut), ""), false)
+assert.strictEqual(accounts.includesId(null, "ada@example.com"), false)
+
+// And it survives the trip to disk, which is the whole point: a mailbox left
+// out has to still be out after a restart.
+let mergedReloaded = accounts.load(accounts.serialize(bobLeftOut))
+assert.strictEqual(mergedReloaded.accounts[1].merged, false)
+assert.strictEqual(accounts.mergedCount(mergedReloaded), 2)
+assert.strictEqual(accounts.count(mergedReloaded), 3)
+
+// Putting it back.
+assert.strictEqual(accounts.mergedCount(accounts.setMergedAt(bobLeftOut, 1, true)), 3)
+// Asking for the state it is already in changes nothing at all, so a binding
+// that writes on every evaluation does not rewrite the file.
+// The input list itself comes back, so the caller's `next === list` test is an
+// honest "nothing to save" and a re-evaluated binding does not rewrite the
+// file and restart every fetch.
+assert.strictEqual(accounts.setMergedAt(bobLeftOut, 1, false), bobLeftOut)
+assert.strictEqual(accounts.setMergedAt(mergeTrio, 0, true), mergeTrio)
+// An index nobody has is a no-op rather than a thrown error or a grown list.
+assert.strictEqual(accounts.setMergedAt(mergeTrio, 9, false), mergeTrio)
+assert.strictEqual(accounts.setMergedAt(mergeTrio, -1, false), mergeTrio)
+assert.strictEqual(accounts.count(accounts.setMergedAt(mergeTrio, 9, false)), 3)
+// Nothing at all is still a list, not a null the QML side would bind to.
+deepEqual(accounts.setMergedAt(null, 0, false), accounts.emptyList())
+
+// The rest of the entry survives. Rebuilding an account by naming the fields
+// to keep is how an IMAP mailbox came back as a Gmail one.
+let imapExcluded = accounts.setMergedAt(accounts.add(accounts.emptyList(),
+  { email: "jon@example.org", provider: "imap", color: "#57ab5a",
+    imap: { imapHost: "mail.example.org", username: "jon@example.org" } }), 0, false)
+assert.strictEqual(imapExcluded.accounts[0].provider, "imap")
+assert.strictEqual(imapExcluded.accounts[0].imap.imapHost, "mail.example.org")
+assert.strictEqual(imapExcluded.accounts[0].color, "#57ab5a")
+assert.strictEqual(imapExcluded.accounts[0].merged, false)
+
+// A row still being filled in has no id, so it has nothing to merge and is not
+// one of the mailboxes that make a merged view mean something.
+let oneAndADraft = accounts.add(accounts.add(accounts.emptyList(),
+  account("ada@example.com")), { email: "", provider: "gmail" })
+assert.strictEqual(accounts.count(oneAndADraft), 2)
+assert.strictEqual(accounts.mergedCount(oneAndADraft), 1)
+assert.strictEqual(accounts.offersUnified(oneAndADraft), false)
+
+// Two included mailboxes is what a merged view needs. Excluding down to one
+// turns it off on its own — the window falls back to the mailbox activeId
+// still names — and the stored flag is kept, so putting a mailbox back
+// restores the view rather than making the user ask for it again.
+let mergedTrio = accounts.setUnified(mergeTrio, true)
+assert.strictEqual(accounts.isUnified(mergedTrio), true)
+let downToTwo = accounts.setMergedAt(mergedTrio, 2, false)
+assert.strictEqual(accounts.isUnified(downToTwo), true, "two is still several")
+let downToOne = accounts.setMergedAt(downToTwo, 1, false)
+assert.strictEqual(accounts.isUnified(downToOne), false, "one mailbox is not a merged view")
+assert.strictEqual(downToOne.unified, true, "but the choice is remembered")
+assert.strictEqual(downToOne.activeId, mergeTrio.activeId,
+  "and so is the mailbox to fall back to")
+assert.strictEqual(accounts.isUnified(accounts.setMergedAt(downToOne, 1, true)), true,
+  "putting one back brings the merged view back with it")
+
+// Excluding every mailbox is allowed and is not an error: it leaves the window
+// showing the one activeId names, which is what it shows with one mailbox
+// included anyway. Nothing becomes unreachable — every mailbox is still a row.
+let noneMerged = accounts.setMergedAt(accounts.setMergedAt(downToOne, 0, false), 2, false)
+assert.strictEqual(accounts.mergedCount(noneMerged), 0)
+assert.strictEqual(accounts.isUnified(noneMerged), false)
+assert.strictEqual(accounts.count(noneMerged), 3, "and every mailbox is still there")
+assert.strictEqual(accounts.active(noneMerged).id, "ada@example.com")
+assert.strictEqual(accounts.isUnified(accounts.load(accounts.serialize(noneMerged))), false,
+  "which is how it reads back too")
+
+// Asking for the merged view with nothing to merge does not turn it on.
+assert.strictEqual(accounts.setUnified(noneMerged, true).unified, false)
+
+// A file that says unified with only one mailbox included reads back as not
+// unified, the same way the UI would have left it.
+assert.strictEqual(accounts.isUnified(accounts.load(JSON.stringify({
+  version: accounts.VERSION,
+  accounts: [
+    { email: "ada@example.com" },
+    { email: "bob@example.com", merged: false }
+  ],
+  activeId: "ada@example.com",
+  unified: true
+}))), false)
+
+// An accounts.json written before the field existed merges every mailbox.
+{
+  const older = accounts.load(JSON.stringify({
+    version: accounts.VERSION,
+    accounts: [{ email: "ada@example.com" }, { email: "bob@example.com" }],
+    activeId: "ada@example.com",
+    unified: true
+  }))
+  assert.strictEqual(accounts.mergedCount(older), 2)
+  assert.strictEqual(accounts.isUnified(older), true,
+    "an upgrade sees exactly the merged view it had")
+}
+
+// Removing an excluded mailbox removes it, and does not disturb the rest.
+{
+  const gone = accounts.remove(bobLeftOut, "bob@example.com")
+  assert.strictEqual(accounts.count(gone), 2)
+  assert.strictEqual(accounts.mergedCount(gone), 2)
+}
+
 // ---------------------------------------------------------------- colours
 //
 // The stripe down a row in a unified list, so the mailbox a message arrived in
