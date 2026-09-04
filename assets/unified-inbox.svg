@@ -118,7 +118,7 @@
     <text x="220" y="367" fill="#c8cfdb" font-size="11.5">GitHub</text>
     <path d="M519 360.5l1.5 3.1 3.4.5-2.45 2.4.58 3.4-3.03-1.6-3.03 1.6.58-3.4-2.45-2.4 3.4-.5z" fill="#e2a03f"/>
     <text x="508" y="367" fill="#6b7280" font-size="10.5" text-anchor="end">16:30</text>
-    <text x="220" y="384" fill="#c8cfdb" font-size="11.5">[omamail] Deploy succeeded</text>
+    <text x="220" y="384" fill="#c8cfdb" font-size="11.5">[omail] Deploy succeeded</text>
     <text x="220" y="401" fill="#5c6472" font-size="10.5">Workflow run completed in 42s</text>
 
     <!-- row 6 — green account, invitation -->
