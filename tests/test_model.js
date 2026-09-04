@@ -358,6 +358,27 @@ assert.strictEqual(model.clampZoom("nonsense"), 1)
 assert.strictEqual(model.clampZoom(0), 0.6, "but zero is a number, and clamps")
 assert.strictEqual(model.clampZoom("1.5"), 1.5, "including one written as text")
 
+// Every scaled piece of text asks for its size here rather than doing the
+// arithmetic itself, so the floor is applied once instead of in eleven places.
+assert.strictEqual(model.zoomedFontSize(12, 1), 12)
+assert.strictEqual(model.zoomedFontSize(12, 2.5), 30)
+assert.strictEqual(model.zoomedFontSize(13, 1.15), 15, "and it rounds")
+
+// The floor is the reason this exists. At the bottom of the range a caption
+// would round to 6px and stop being text, so nothing drawn goes below 7 —
+// including the smallest token at the smallest zoom.
+assert.strictEqual(model.zoomedFontSize(9, 0.6), 7)
+assert.strictEqual(model.zoomedFontSize(1, 0.6), 7)
+
+// A zoom that came off a hand-edited file is clamped on the way through, the
+// same as anywhere else, and a size that is not a number draws at the floor
+// rather than vanishing or throwing.
+assert.strictEqual(model.zoomedFontSize(12, 99), 30, "the ceiling still holds")
+assert.strictEqual(model.zoomedFontSize(12, "nonsense"), 12, "and 1.0 is the answer to nonsense")
+assert.strictEqual(model.zoomedFontSize(undefined, 1), 7)
+assert.strictEqual(model.zoomedFontSize(0, 1), 7)
+assert.strictEqual(model.zoomedFontSize(-4, 1), 7)
+
 // ------------------------------------------------- identity across accounts
 //
 // An IMAP UID is unique only within a folder and a Gmail id only within an

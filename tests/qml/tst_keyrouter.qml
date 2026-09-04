@@ -202,14 +202,31 @@ Item {
       compare(host.lastId, "", "switching is a mailbox action, not a draft one")
     }
 
-    function test_a_reader_only_key_is_dead_in_the_list() {
+    // Zoom reaches both mail contexts, because a subject line and a sender are
+    // read too — the list and the reader each keep their own size and the
+    // focused one is what the key changes. It is still not global: on a form
+    // or a settings page there is no reading surface to size, and Ctrl+0 has
+    // to stay dead there rather than firing at whatever is behind them.
+    function test_zoom_reaches_the_list_as_well_as_the_reader() {
       keyClick(Qt.Key_0, Qt.ControlModifier)
-      compare(host.lastId, "", "nothing to zoom from the list")
+      compare(host.lastId, "zoomReset", "the list is read, so it zooms")
       host.context = "reader"
       host.lastId = ""
       wait(20)
       keyClick(Qt.Key_0, Qt.ControlModifier)
       compare(host.lastId, "zoomReset")
+    }
+
+    function test_but_zoom_is_dead_where_there_is_no_mail() {
+      host.context = "compose"
+      wait(20)
+      keyClick(Qt.Key_0, Qt.ControlModifier)
+      compare(host.lastId, "", "a draft is not a reading surface")
+      host.context = "page"
+      host.lastId = ""
+      wait(20)
+      keyClick(Qt.Key_0, Qt.ControlModifier)
+      compare(host.lastId, "", "and neither is a settings form")
     }
 
     // The mechanism, not a key: leaving a text-entry context has to take the

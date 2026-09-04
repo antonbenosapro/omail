@@ -90,7 +90,7 @@ Repeated rows reserve stable lanes for icons, labels, counts, time, badges, and 
 
 Text of different sizes aligns by baseline when it shares a row. Icons sit in a fixed slot so different path bounds do not move labels. Comparable numbers and times share a trailing edge. Hairlines belong to one boundary owner; adjacent panes do not each draw the same separator.
 
-Equal edges and gaps are layout invariants. Verify their resolved bounds at representative window widths, body zoom levels, and display scales; do not approve alignment only by looking at a screenshot. Fix drift at the shared component, inset, or layout rule rather than adding unrelated one-pixel offsets to individual callers.
+Equal edges and gaps are layout invariants. Verify their resolved bounds at representative window widths, reader and list zoom levels, and display scales; do not approve alignment only by looking at a screenshot. Fix drift at the shared component, inset, or layout rule rather than adding unrelated one-pixel offsets to individual callers.
 
 A scrollbar belongs to the viewport that scrolls and sits on that region's outer edge. Text and row padding live inside the viewport; they must not inset the scrollbar into the content column. When content needs clearance from the scrollbar, reserve it deliberately inside the content rather than moving the scroll owner.
 
@@ -145,7 +145,9 @@ The reader is the content pane and receives the most flexible width. Its hierarc
 - attachments;
 - persistent message actions at the bottom edge.
 
-Long-form body text follows the user's body font size and reader zoom. Chrome uses the smaller theme token. Reader zoom changes the message body, not the surrounding application.
+Long-form body text follows the user's body font size and reader zoom. Chrome uses the smaller theme token.
+
+Zoom is per reading surface, and applies to everything read on it: reader zoom sizes the open message's header as well as its body, and list zoom sizes the rows. Neither reaches the surrounding application. Nothing drawn goes below `Model.zoomedFontSize`'s floor, so the bottom of the range stays legible rather than becoming texture.
 
 Notices form a stack with one shared component contract. A notice explains a condition and may expose one immediate action. Structured content such as an invitation is a card because it adds actions and relationships not represented by ordinary prose; routine message metadata is not boxed merely to create visual variety.
 

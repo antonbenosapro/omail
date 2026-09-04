@@ -102,13 +102,17 @@ var BINDINGS = [
   { id: "switchAccount", keys: ["Alt+A"], contexts: MAIL,
     group: "Going", label: "Switch account" },
 
-  // Only where there is a message body to size. These carried no context at
-  // all, which left them live on a settings form.
-  { id: "zoomIn", keys: ["Ctrl++", "Ctrl+="], contexts: ["reader"],
-    group: "Reading", label: "Zoom the message body in" },
-  { id: "zoomOut", keys: ["Ctrl+-"], contexts: ["reader"],
-    group: "Reading", label: "Zoom the message body out" },
-  { id: "zoomReset", keys: ["Ctrl+0"], contexts: ["reader"],
+  // Wherever there is mail being read, which is the list as well as the
+  // reader — a subject line and a sender are read, not just scanned past. Each
+  // pane keeps its own size and the focused one is what the keys reach, so the
+  // label says "what you are reading" rather than naming one of them. Still not
+  // ANY: these carried no context at all once, which left them live on a
+  // settings form.
+  { id: "zoomIn", keys: ["Ctrl++", "Ctrl+="], contexts: MAIL,
+    group: "Reading", label: "Zoom what you are reading in" },
+  { id: "zoomOut", keys: ["Ctrl+-"], contexts: MAIL,
+    group: "Reading", label: "Zoom what you are reading out" },
+  { id: "zoomReset", keys: ["Ctrl+0"], contexts: MAIL,
     group: "Reading", label: "Reset the zoom" },
 
   { id: "refresh", keys: ["F5"], contexts: ANY,

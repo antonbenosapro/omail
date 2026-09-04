@@ -48,7 +48,7 @@ Use these lifetimes to choose that owner:
 | Lifetime                | Owner                                   | Examples                                                    |
 | ----------------------- | --------------------------------------- | ----------------------------------------------------------- |
 | Installation or account | service/domain storage                  | accounts, credentials, cached messages                      |
-| Across window openings  | `Service.qml` plus its store            | collapsed sidebar, reader zoom, future persisted pane sizes |
+| Across window openings  | `Service.qml` plus its store            | collapsed sidebar, reader zoom, list zoom, future persisted pane sizes |
 | Current window          | `App.qml`                               | visible page, list cursor, open reader, compose mode        |
 | Open interaction        | the relevant popup or overlay component | popup selection, drag origin, submenu path                  |
 | One rendering           | the view                                | hover, pressed appearance, measured bounds                  |
@@ -208,7 +208,7 @@ This does not justify a general dock tree. Omamail has one known navigation/coll
 
 ## Measurement and scrolling
 
-Measurement is valid only for the conditions under which it was taken. Width-dependent content is measured at the actual viewport width, not at an unconstrained sample width. A change to viewport width, font metrics, body zoom, row content, or any other input to size invalidates the cached measurement that depended on it.
+Measurement is valid only for the conditions under which it was taken. Width-dependent content is measured at the actual viewport width, not at an unconstrained sample width. A change to viewport width, font metrics, either zoom, row content, or any other input to size invalidates the cached measurement that depended on it.
 
 Every scrollable region has one owner. That owner fills the panel viewport and places its scrollbar on the panel edge. Content padding belongs inside the scroll owner; wrapping the viewport in padding moves the scrollbar away from the boundary and makes the layout hierarchy false. Avoid nested scrolling where one wheel event could plausibly belong to two regions.
 
