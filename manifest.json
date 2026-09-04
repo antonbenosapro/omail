@@ -3,7 +3,7 @@
   "id": "omail",
   "name": "Omail",
   "version": "0.3.0",
-  "author": "Jonathan Geller <jgeller@example.com>",
+  "author": "Jonathan Geller <jonathangeller@users.noreply.github.com>",
   "credits": "Originally Omamail by Jason Lee <huacnlee@gmail.com>, https://github.com/huacnlee/omamail",
   "license": "MIT",
   "description": "Email client for Omarchy: read, triage, and reply to Gmail and any IMAP mailbox in a native window. Fastmail, iCloud, Outlook, Zoho, or your own server.",
