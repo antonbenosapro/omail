@@ -160,6 +160,8 @@ Item {
     accountList = Accounts.setUnified(Accounts.setActive(accountList, id), false)
     saveAccounts()
     clearSelection()
+    // The set belongs to one mailbox, so it goes when the mailbox does.
+    clearMarks()
     refreshCurrent()
   }
 
@@ -196,6 +198,7 @@ Item {
     recount()
     if (root.unified || wasUnified) {
       clearSelection()
+      clearMarks()
       refresh()
     }
   }
@@ -210,6 +213,7 @@ Item {
     accountList = Accounts.setUnified(accountList, true)
     saveAccounts()
     clearSelection()
+    clearMarks()
     // Inbox and Unread are the only mailboxes a merged list offers: they are
     // the two every provider maps the same way. A mailbox that resolves to a
     // different folder per server, or is missing on one, would quietly draw
@@ -816,6 +820,15 @@ Item {
   readonly property bool sending: !!current && current.sending
   readonly property string lastError: current ? current.lastError : ""
   readonly property string actionStatus: current ? current.actionStatus : ""
+  // What the status-bar notice offers alongside its sentence, empty when it
+  // offers nothing. Read off the same account the sentence came from, so the
+  // two cannot describe different mailboxes.
+  readonly property string undoLabel: current ? current.undoLabel : ""
+  readonly property bool undoBusy: !!current && current.undoBusy
+  // The row an undo would bring back, as a row key. The window reads it before
+  // undoing, because taking the offer spends it: afterwards there is nothing
+  // left to ask where the cursor should go.
+  readonly property string undoKey: current ? current.undoKey : ""
   readonly property string signInProgress: current ? current.signInProgress : ""
   readonly property string syncedLabel: current ? current.syncedLabel : ""
 
@@ -870,6 +883,125 @@ Item {
     }
     if (current) current.clearSelection()
   }
+
+  // ------------------------------------------------------- the selection
+  //
+  // What the next action will act on, which is a different question from
+  // `selectedKey` — what the reader has open — and from the list's cursor.
+  // Three things that look alike, kept apart because each answers something
+  // the other two cannot: walking with `j` must not act on anything, and
+  // opening a message must not quietly enlist it in a bulk trash.
+  //
+  // Row keys, like the cursor. And held here rather than on a `MailAccount`,
+  // because the set is drawn over the list that is on screen — which while
+  // unified is several mailboxes merged — while an account only knows its own.
+  //
+  // Scoped to one account all the same. `markOwner` is the account the first
+  // mark went to, and a mark for any other is refused: a set spanning three
+  // mailboxes is three separate batch requests with three ways to half-fail,
+  // and no useful way to report the result of the three together. So the set
+  // stays one `batchModify`, and switching account drops it — the rule
+  // `clearSelection` already applies to what the reader has open.
+  property var markedKeys: []
+  property string markOwner: ""
+
+  readonly property int markedCount: markedKeys.length
+  readonly property bool hasMarks: markedKeys.length > 0
+  // What the count reads as. Never a bare number beside a list of messages.
+  readonly property string selectionLabel: Model.selectionLabel(markedCount)
+
+  function clearMarks() {
+    if (markedKeys.length === 0 && markOwner === "") return
+    markedKeys = []
+    markOwner = ""
+  }
+
+  // The list was replaced under the set — a refresh that dropped things, a
+  // page that arrived. A key naming a row the list no longer holds cannot be
+  // acted on, and counting it is a lie about how many messages are about to
+  // move. The same job `cursorAfterReload` does for the cursor.
+  function reconcileMarks() {
+    if (markedKeys.length === 0) return
+    var next = Model.marksAfterReload(rowsForMarks(markOwner), markedKeys)
+    if (next.length === markedKeys.length) return
+    markedKeys = next
+    if (next.length === 0) markOwner = ""
+  }
+
+  // The account a key belongs to, as the set understands ownership. A key with
+  // no account half comes from a single-account list, where every row has the
+  // same owner and the question does not arise — so it answers with the
+  // mailbox on screen rather than with nothing.
+  function ownerOfKey(key) {
+    var owner = Model.keyAccountId(key)
+    if (owner !== "") return owner
+    return current ? current.accountId : ""
+  }
+
+  function toggleMark(key) {
+    var wanted = String(key || "")
+    if (wanted === "") return
+    var owner = ownerOfKey(wanted)
+    var next = Model.marksAfterToggle(markedKeys, wanted, owner, markOwner)
+    markedKeys = next
+    markOwner = next.length === 0 ? "" : owner
+  }
+
+  // Both ends of the step, so the row the extension started from is in its own
+  // selection and the row it lands on is too.
+  function extendMarks(cursorKey, delta) {
+    var owner = ownerOfKey(cursorKey)
+    if (markOwner !== "" && owner !== markOwner) clearMarks()
+    var next = Model.marksAfterExtend(rowsForMarks(owner), markedKeys, cursorKey, delta)
+    markedKeys = next
+    markOwner = next.length === 0 ? "" : owner
+  }
+
+  // Every row on screen that belongs to one mailbox, which is what selecting
+  // all can honestly mean here: the mail somebody can see. Unified or not, the
+  // set stays inside one account, so this is where that filter is applied.
+  function rowsForMarks(accountId) {
+    if (!root.unified) return root.messages
+    var owner = String(accountId || "")
+    if (owner === "") return root.messages
+    var all = root.messages
+    var out = []
+    for (var i = 0; i < all.length; i++) {
+      if (String(all[i].accountId || "") === owner) out.push(all[i])
+    }
+    return out
+  }
+
+  // Select all means the mailbox the cursor is standing in, and only what is
+  // loaded. A mailbox-wide select all would promise an action over messages
+  // that have never been fetched, and could not draw a marker beside them.
+  function markAll(cursorKey) {
+    var owner = markOwner !== "" ? markOwner : ownerOfKey(cursorKey)
+    var next = Model.marksForAll(rowsForMarks(owner))
+    markedKeys = next
+    markOwner = next.length === 0 ? "" : owner
+  }
+
+  // The set as one mailbox's ids, which is what a client's batch path takes.
+  // The account half of the key is dropped here, at the provider boundary.
+  function markedIds() {
+    return Model.markedIdsFor(rowsForMarks(markOwner), markedKeys, markOwner)
+  }
+
+  readonly property var markedRows: Model.selectedRows(
+    rowsForMarks(markOwner), markedKeys)
+
+  // One request for the whole set, through the mailbox that owns it. The set
+  // is dropped first: the rows are about to move or change under it, and a
+  // selection describing the list as it was is worse than none.
+  function actOnMarks(action) {
+    var ids = markedIds()
+    if (ids.length === 0) return
+    var host = markOwner !== "" ? findAccount(markOwner) : current
+    if (!host) host = current
+    clearMarks()
+    if (host) host.actOnMany(ids, action)
+  }
   // The notice's own button, which is the switch: what it turns on is every
   // message, and it says so.
   function showRemoteImages() { setAlwaysShowImages(true) }
@@ -896,6 +1028,9 @@ Item {
   // While unified every mailbox moves together, or the merged list would be
   // one account's Inbox beside another's Unread.
   function selectMailbox(key) {
+    // Whichever branch follows, the list is about to be replaced by another
+    // mailbox's. A set naming rows from the one being left describes nothing.
+    clearMarks()
     if (!root.unified) {
       if (current) current.selectMailbox(key)
       return
@@ -910,12 +1045,28 @@ Item {
       if (host && (host === current || root.isMergedHost(host))) host.selectMailbox(key)
     }
   }
-  function search(text) { if (current) current.search(text) }
-  function selectLabel(name) { if (current) current.selectLabel(name) }
+  // Both replace the list wholesale, which is the same reason a mailbox switch
+  // drops the set: what it named is not what is on screen any more.
+  function search(text) {
+    clearMarks()
+    if (current) current.search(text)
+  }
+  function selectLabel(name) {
+    clearMarks()
+    if (current) current.selectLabel(name)
+  }
   // Every action names a message, so every action can find its own mailbox.
   function act(key, action, quiet) {
     var host = hostForMessage(key)
     if (host) host.act(Model.keyId(key), action, quiet)
+  }
+
+  // The account whose notice is on screen, which is `current` for the same
+  // reason `actionStatus` is: the offer and the sentence beside it are one
+  // thing, and taking one from a different mailbox than the other is how an
+  // undo lands somewhere nobody was looking.
+  function undo() {
+    if (current) current.undo()
   }
   function toggleStar(key) {
     var host = hostForMessage(key)

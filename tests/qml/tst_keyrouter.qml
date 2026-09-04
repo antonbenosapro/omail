@@ -176,6 +176,59 @@ Item {
       compare(host.lastSequence, "Alt+0")
     }
 
+    // Selecting lives wherever the list does, which is both contexts. Scoped to
+    // "list" alone these were dead in the one arrangement most windows are in:
+    // `currentView` turns "reader" the moment a message opens, but only a
+    // narrow window replaces the list with the reader — at any normal width the
+    // list is still right there, and `x` on it did nothing at all.
+    function test_selecting_is_a_list_key() {
+      keyClick(Qt.Key_X)
+      compare(host.lastId, "toggleMark")
+    }
+
+    function test_selecting_lives_wherever_the_list_does() {
+      host.context = "reader"
+      wait(20)
+      keyClick(Qt.Key_X)
+      compare(host.lastId, "toggleMark",
+        "a wide window keeps the list on screen with a message open beside it")
+      keyClick(Qt.Key_J, Qt.ShiftModifier)
+      compare(host.lastId, "extendDown", "and the cursor it extends is live there too")
+    }
+
+    // The capitalised form of the movement keys, which is what it is. Bare j
+    // and k stay movement; the shifted pair marks both ends of the step.
+    function test_shifted_movement_extends_the_selection() {
+      keyClick(Qt.Key_J, Qt.ShiftModifier)
+      compare(host.lastId, "extendDown")
+      keyClick(Qt.Key_K, Qt.ShiftModifier)
+      compare(host.lastId, "extendUp")
+    }
+
+    function test_but_bare_movement_is_still_movement() {
+      keyClick(Qt.Key_J)
+      compare(host.lastId, "cursorDown", "Shift is the whole difference")
+    }
+
+    function test_select_all_is_a_modified_key() {
+      keyClick(Qt.Key_A, Qt.ControlModifier)
+      compare(host.lastId, "markAll")
+    }
+
+    // A bare `a` is reply-all and has been all along. Ctrl+A taking the list
+    // must not have taken the letter with it.
+    function test_and_the_bare_letter_is_still_reply_all() {
+      keyClick(Qt.Key_A)
+      compare(host.lastId, "replyAll")
+    }
+
+    function test_selecting_stands_down_behind_the_sheet() {
+      host.overlay = true
+      wait(20)
+      keyClick(Qt.Key_X)
+      compare(host.lastId, "", "nothing selects mail behind the shortcut sheet")
+    }
+
     function test_a_digit_is_dead_in_a_draft() {
       host.context = "compose"
       wait(20)

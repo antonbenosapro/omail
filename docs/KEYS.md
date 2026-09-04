@@ -87,11 +87,16 @@ used to exist, and they had.
 | `cursorUp` | `k`, `Up` | mail | Move up |
 | `open` | `Return`, `o` | mail | Open the selected message |
 | `backToList` | `u` | reader | Back to the list |
+| `toggleMark` | `x` | mail | Select or deselect this message |
+| `extendDown` | `Shift+J` | mail | Select and move down |
+| `extendUp` | `Shift+K` | mail | Select and move up |
+| `markAll` | `Ctrl+A` | mail | Select everything loaded |
 | `archive` | `e` | mail | Archive |
 | `trash` | `d` | mail | Move to trash |
 | `star` | `s` | mail | Star or unstar |
 | `markRead` | `Shift+I` | mail | Mark read |
 | `markUnread` | `Shift+U` | mail | Mark unread |
+| `undo` | `z` | mail | Undo the last trash |
 | `reply` | `r` | mail | Reply |
 | `replyAll` | `a` | mail | Reply to all |
 | `forward` | `f` | mail | Forward |
@@ -114,6 +119,20 @@ Two rows are split on purpose. `search` keeps the bare `/` in the mailbox while
 cannot live in a text-entry context, and the modified one should. `help` is a
 mailbox action rather than a global one: the sheet lists what the mailbox
 answers to, and a draft is not a mailbox.
+
+## Why `z` undoes, and why nothing deletes
+
+`d` moves a message to trash and asks nothing first. That is the right trade only because `z` takes it back: a confirmation interrupts every correct action to guard against the rare wrong one, and people asked the same question on every delete learn to dismiss it without reading it. Undo costs nothing until something goes wrong.
+
+`z` is bare, which the scarce bare letters have to be earned for. It earns one on the grounds the others are spent on. It is the key a mail user already reaches for — Gmail has bound it to exactly this for twenty years — so there is nothing to learn. It sits in the far corner of the keyboard, next to nothing destructive, so no slip reaches it. And a mistake is the moment with the least patience for a modifier: an undo behind `Ctrl` is one the hand does not find while it is still surprised.
+
+Not `Ctrl+Z`. Nothing in the mailbox is text being edited, so there is nothing to confuse it with, and the one context where `Ctrl+Z` means something else — a draft — is a text-entry context, which binds no bare key and does not bind this row at all.
+
+The offer lives exactly as long as the notice that makes it, which is a few seconds. Once the sentence is gone the action is gone: an undo that still worked minutes later would be a message reappearing for a reason nobody could still connect to a keystroke.
+
+And it is offered only where the provider can honour it — `undo` is a capability in `providers/Registry.js` like `archive` and `spam`, and a capability the provider does not declare is a button the panel does not draw. Gmail declares it, because a message id survives a trash. IMAP does not: a UID belongs to the folder holding the message, so moving one to Trash issues a new id, and the server reports it in the tagged OK response that curl removes before the transport ever sees it. `z` there finds nothing to take back and says nothing, which is the honest answer until the client can search Trash for the message again.
+
+**There is no `Del`, and adding one would make this worse rather than better.** `d` is deliberate — it belongs to the bare-letter home-row set with `e`, `s`, `r`, `a`, `f`, `c`. `Del` is the key muscle memory fires *without* deliberation, and it sits beside the arrow keys that `j` and `k` are aliased to: cursoring down a list and clipping Delete would silently trash whatever was under the cursor. Every other binding here that is destructive or leaves the screen is bare-letter or modified, never a reach key. `tests/test_keymap.js` asserts nothing in the table binds `Del`, `Delete` or `Backspace`, so the reasoning cannot be lost and the key added back by someone who only read the row.
 
 ## Why the rail is numbered and not chorded
 
@@ -203,6 +222,20 @@ scroller goes, leaving it alone while the row is already visible so stepping one
 row does not drag the list under someone reading it. It is called from
 `moveCursor`, not from `cursorKey` changing, because hovering a row moves the
 cursor too and scrolling under the pointer fights the mouse.
+
+## The selection
+
+`cursorKey` is where the keyboard is, `selectedKey` is what the reader has open, and the selection is what the next action will act on. Three things that look alike and answer different questions: walking the list with `j` must not act on anything, and opening a message must not quietly enlist it in a bulk trash. Collapsing any pair of them would be the tempting simplification and each one is wrong.
+
+`x` toggles the row under the cursor, `Shift+J` and `Shift+K` mark both ends of a step, `Ctrl+A` takes everything loaded, and `Escape` clears — first, before it leaves anything else, because a set on screen is the nearest thing to put down. The acting keys need no rows of their own: `e`, `d`, `s`, `Shift+I` and `Shift+U` act on the set when there is one and on the cursor's row when there is not, which is one key meaning one thing at two sizes.
+
+The selection keys are live in the reader context as well as the list, which is not a nicety: `currentView` becomes `reader` the moment a message opens, but only a window narrow enough for a single pane actually replaces the list with it. At any normal width both are on screen, so a binding scoped to `list` alone was dead exactly when the user was looking at the list with a message open beside it — `x` did nothing, no marker appeared, and `e` and `d` fell through to the cursor's single row. They carry the same scope as `j`, `k`, `e` and `d` for the same reason.
+
+The set holds row keys, like the cursor, and it holds them for **one mailbox**. A selection spanning three merged accounts would be three separate batch requests with three ways to half-fail and no useful way to report the three together; marking a row from another mailbox replaces the set rather than joining it, and switching account drops it. That keeps a bulk action to one `batchModify`.
+
+Extending only ever adds. `Shift+K` after three `Shift+J`s would otherwise have to un-mark, which needs an anchor and a direction — a range selection rather than an extension — and the two disagree the moment the cursor is moved by anything else in between. `x` is what un-marks one row.
+
+The rules are `Model.isMarked`, `toggleMark`, `addMark`, `marksForAll`, `marksAfterExtend`, `marksAfterReload`, `selectedRows` and `markedIdsFor`, all in `account/Model.js` so the node tests reach them. `markedIdsFor` is the one place the account half of a key is dropped, because that is the provider boundary and a client's batch path takes ids.
 
 ## The mouse
 

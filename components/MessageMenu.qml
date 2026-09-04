@@ -49,6 +49,15 @@ Item {
     return root.service.capabilityFor(root.messageKey, name)
   }
 
+  // How many messages a row in this menu would act on: the whole set when the
+  // menu was opened on a marked row, one otherwise. The labels read from it so
+  // a menu over twelve selected messages cannot say "Archive" and mean twelve.
+  readonly property int actsOn: {
+    if (!root.service || root.messageKey === "") return 1
+    if (!Model.menuActsOnSet(root.service.markedKeys, root.messageKey)) return 1
+    return Math.max(1, root.service.markedCount)
+  }
+
   anchors.fill: parent
   z: 50
 
@@ -145,10 +154,15 @@ Item {
       MenuRow {
         id: archiveRow
         visible: root.can("archive")
-        text: "Archive"
+        text: Model.menuActionLabel("Archive", root.actsOn)
         onActivated: root.run("archive")
       }
-      MenuRow { id: trashRow; text: "Move to trash"; tone: root.urgentColor; onActivated: root.run("trash") }
+      MenuRow {
+        id: trashRow
+        text: Model.menuActionLabel("Move to trash", root.actsOn)
+        tone: root.urgentColor
+        onActivated: root.run("trash")
+      }
       MenuRow {
         id: spamRow
         visible: root.can("spam")

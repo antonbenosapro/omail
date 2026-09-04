@@ -370,6 +370,24 @@ function searchCommand(criteria) {
   return "UID SEARCH " + (text === "" ? "ALL" : text)
 }
 
+// Find a message by the identity that survives being moved.
+//
+// A UID belongs to the folder that issued it, so moving a message to Trash
+// gives it a new one — and the server reports that new UID in the tagged
+// `OK [COPYUID ...]`, which curl removes before the transport ever sees it
+// (see `splitResponse`). After a trash there is therefore no UID naming the
+// message, and an undo that reused the old one would select a folder, match
+// nothing, and report success having moved nothing.
+//
+// Message-ID is the one identifier that travels with the message: the sender
+// set it, and a move rewrites nothing. `quote` is what keeps a header value
+// from ending the argument and appending a command of its own.
+function findByMessageIdCommand(messageId) {
+  var value = trimmed(messageId)
+  if (value === "") return ""
+  return "UID SEARCH HEADER MESSAGE-ID " + quote(value)
+}
+
 function summaryFetchCommand(uids) {
   var set = sequenceSet(uids)
   if (set === "") return ""

@@ -82,12 +82,19 @@ Item {
   // 0 means "proportional"; anything else is a width somebody dragged to.
   property real listWidth: 0
 
-  // The pane the keyboard is in is the pane that resizes. One key pair, two
-  // sizes: pressed in the reader it means "this message bigger", pressed in the
-  // list it means "these rows bigger" — which is what "bigger" means to
-  // somebody who is looking at one of them.
+  // Which pane resizes. One key pair, two sizes: with a message open it means
+  // "this message bigger", with the list alone it means "these rows bigger" —
+  // which is what "bigger" means to somebody looking at one of them.
+  //
+  // Not `keyContext === "list"`, which was the same question only in a window
+  // narrow enough for one pane. Wider than that, opening a message turns the
+  // context "reader" while the list is still on screen, so the list could be
+  // zoomed until the first message was opened and never again — Ctrl+- silently
+  // resized the message instead. The rule is in Model.js where a test can hold
+  // it.
   function zoomTargetIsList() {
-    return focusScope.keyContext === "list"
+    return Model.zoomTargetsList(focusScope.keyContext, root.compact,
+      !!service && service.selectedKey !== "")
   }
 
   function zoomBy(step) {
@@ -229,6 +236,15 @@ Item {
     // it read without having looked at any of it. Enter and "o" open.
   }
 
+  // Marking both ends of a step. The set is extended first and the cursor
+  // moves after, so the row being left is in its own selection — extending to
+  // the destination alone leaves the row the extension started from out of it.
+  function extendSelection(delta) {
+    if (!service || cursorKey === "") return
+    service.extendMarks(cursorKey, delta)
+    moveCursor(delta)
+  }
+
   // An answer needs the message it is answering, and opening one only starts
   // the fetch — select() clears the summary and the body first. Beginning the
   // draft in the same breath addressed nobody and quoted nothing, which is what
@@ -284,6 +300,41 @@ Item {
     if (from === "list" && currentView === "reader") backToList()
   }
 
+  // One action, two sizes. Every acting key comes through here: the set when
+  // there is one, the cursor's row when there is not. Generalised rather than
+  // duplicated, because a second path would be a second place to get the
+  // reader, the cursor and the notice wrong.
+  function actOnSelection(action) {
+    if (!service) return
+    if (service.hasMarks) return actOnMarks(action)
+    actOnCursor(action)
+  }
+
+  // The set is about to move or change. The rows go with it, so anything the
+  // reader is showing from inside the set goes too — the account closes it,
+  // and the window follows it back to the list.
+  function actOnMarks(action) {
+    if (!service) return
+    var wasOpen = currentView === "reader"
+      && Model.isMarked(service.markedKeys, service.selectedKey)
+    var leaves = !Model.survivesAction(service.mailboxKey, action)
+    // Worked out while the rows still have neighbours, the same way the single
+    // path does: a cursor inside a set that is leaving would be unfindable
+    // afterwards, and an unfindable cursor sends the next j to the top.
+    var next = leaves
+      ? Model.cursorAfterMarkedRemoval(service.messages, cursorKey, service.markedKeys)
+      : cursorKey
+    service.actOnMarks(action)
+    if (!leaves) return
+    if (wasOpen) {
+      if (next !== "") openMessage(next)
+      else backToList()
+      return
+    }
+    cursorKey = next
+    revealCursorRow()
+  }
+
   // Acting on the open message closes it: it is about to leave this list.
   function actOnCursor(action) {
     if (!service || cursorKey === "") return
@@ -303,6 +354,31 @@ Item {
       return
     }
     cursorKey = next
+    revealCursorRow()
+  }
+
+  // Takes back whatever the status line is offering to take back, and does
+  // nothing at all when it is offering nothing — the offer is the only input,
+  // so there is no "last action" for this to reconstruct and get wrong. Bound
+  // to `z` as well as to the button, because a keyboard-first window that made
+  // its one safety net reachable only by pointer would be offering it to the
+  // wrong hand.
+  function undoLastAction() {
+    if (!service) return
+    // Read before the offer is spent: taking it clears the record, and after
+    // that nothing can say which row came back.
+    var restored = service.undoKey
+    service.undo()
+    if (restored === "") return
+    // The row took the cursor with it when it left, and the reader moved on to
+    // whatever was next. Both come back, or the undo has restored the message
+    // without restoring where the user was standing — which is the half of it
+    // they would actually notice.
+    if (currentView === "reader") {
+      openMessage(restored)
+      return
+    }
+    cursorKey = restored
     revealCursorRow()
   }
 
@@ -343,16 +419,33 @@ Item {
     if (id === "cursorUp") return moveCursor(-1)
     if (id === "open") return openMessage(cursorKey)
     if (id === "backToList") return backToList()
-    if (id === "archive") return actOnCursor("archive")
-    if (id === "trash") return actOnCursor("trash")
-    // Through the same guard actOnCursor applies rather than around it:
-    // starring with nothing selected used to call through with an empty id.
-    if (id === "star") {
-      if (service && cursorKey !== "") service.toggleStar(cursorKey)
+    if (id === "toggleMark") {
+      if (service && cursorKey !== "") service.toggleMark(cursorKey)
       return
     }
-    if (id === "markRead") return actOnCursor("markRead")
-    if (id === "markUnread") return actOnCursor("markUnread")
+    if (id === "extendDown") return extendSelection(1)
+    if (id === "extendUp") return extendSelection(-1)
+    if (id === "markAll") {
+      if (service) service.markAll(cursorKey)
+      return
+    }
+    if (id === "archive") return actOnSelection("archive")
+    if (id === "trash") return actOnSelection("trash")
+    // Through the same guard the acting path applies rather than around it:
+    // starring with nothing selected used to call through with an empty id.
+    // Over a set it is one action for the whole set rather than a toggle per
+    // row — toggling a mixed selection row by row leaves it exactly as mixed
+    // as it started, which is the one outcome nobody pressed `s` for.
+    if (id === "star") {
+      if (!service) return
+      if (service.hasMarks)
+        return actOnMarks(Model.bulkStarAction(service.markedRows))
+      if (cursorKey !== "") service.toggleStar(cursorKey)
+      return
+    }
+    if (id === "markRead") return actOnSelection("markRead")
+    if (id === "markUnread") return actOnSelection("markUnread")
+    if (id === "undo") return undoLastAction()
     if (id === "reply") return composeFromCursor("reply")
     if (id === "replyAll") return composeFromCursor("replyAll")
     if (id === "forward") return composeFromCursor("forward")
@@ -384,6 +477,11 @@ Item {
   // never run.
   function goBack() {
     if (shortcutHelpVisible) shortcutHelpVisible = false
+    // A selection is the nearest thing there is to put down, and putting it
+    // down is not leaving anywhere — so it comes before every branch below.
+    // Escape out of a reader with twelve rows still marked behind it would
+    // leave the set live over a list nobody is looking at.
+    else if (service && service.hasMarks) service.clearMarks()
     // A query being typed is the nearest thing to leave: clear it if there is
     // one, then hand the keyboard back to the mailbox. This used to live in
     // SearchBar as its own Keys handler, which a window Shortcut silently beats.
@@ -429,6 +527,10 @@ Item {
     function onMessagesChanged() {
       root.cursorKey = Model.cursorAfterReload(
         root.service ? root.service.messages : [], root.cursorKey)
+      // The set gets the same treatment for the same reason: a key naming a
+      // row the list no longer holds cannot be acted on, and counting it is a
+      // lie about how many messages are about to move.
+      if (root.service) root.service.reconcileMarks()
     }
     // A new account has no mailbox yet, so the only useful place to be is the
     // page that gives it one.
@@ -881,6 +983,7 @@ Item {
               width: listFlick.width
               service: root.service
               textColor: root.foreground
+              backgroundColor: root.background
               accentColor: root.accent
               dimColor: root.dim
               panelFontFamily: root.fontFamily
@@ -1132,10 +1235,85 @@ Item {
           onClicked: root.toggleSidebar()
         }
 
-        Text {
-          id: accountLine
+        // How many messages the next action will act on. A selection changes
+        // what `e` and `d` mean, so it may never be something only the rows
+        // themselves say: a set scrolled off the top of the list would be
+        // invisible and still live. It sits ahead of the sync label because it
+        // is the more urgent of the two whenever it is there at all, and it
+        // survives a notice, because the notice is usually about the very
+        // action this is the subject of.
+        Rectangle {
+          id: selectionBadge
           anchors.left: railToggle.visible ? railToggle.right : parent.left
           anchors.leftMargin: railToggle.visible ? Style.space(8) : Style.space(14)
+          anchors.verticalCenter: parent.verticalCenter
+          visible: !!root.service && root.service.hasMarks
+          width: selectionCount.implicitWidth + Style.space(10)
+          height: selectionCount.implicitHeight + Style.space(4)
+          radius: Style.cornerRadius
+          color: Style.selectedFillFor(root.foreground, root.accent)
+
+          Text {
+            id: selectionCount
+            anchors.centerIn: parent
+            text: root.service ? root.service.selectionLabel : ""
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        // The set's own actions, beside the count that says how big it is.
+        // The keys do this and the shortcut sheet lists them, but a selection
+        // made with the mouse had nothing to press — the badge said "3
+        // selected" and offered no way to act on three.
+        Row {
+          id: selectionActions
+          anchors.left: selectionBadge.right
+          anchors.leftMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(6)
+          visible: selectionBadge.visible && !root.compact
+
+          IconTextButton {
+            iconName: "archive"
+            text: "Archive"
+            foreground: root.foreground
+            accent: root.accent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: root.actOnSelection("archive")
+          }
+          IconTextButton {
+            iconName: "trash"
+            text: "Trash"
+            foreground: root.urgent
+            accent: root.urgent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: root.actOnSelection("trash")
+          }
+          IconTextButton {
+            iconName: "close"
+            text: "Clear"
+            foreground: root.foreground
+            accent: root.accent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            onClicked: if (root.service) root.service.clearMarks()
+          }
+        }
+
+        Text {
+          id: accountLine
+          anchors.left: selectionActions.visible
+            ? selectionActions.right
+            : (selectionBadge.visible
+              ? selectionBadge.right
+              : (railToggle.visible ? railToggle.right : parent.left))
+          anchors.leftMargin: selectionBadge.visible
+            ? Style.space(8)
+            : (railToggle.visible ? Style.space(8) : Style.space(14))
           // An invisible sibling still holds its place, so the hints must only
           // take room from this line while they are actually on screen.
           anchors.right: statusBar.hasNotice
@@ -1167,27 +1345,45 @@ Item {
           || (!!root.service
             && (root.service.actionStatus !== "" || root.service.lastError !== ""))
 
-        Text {
+        // The sentence and, when the action it describes can be taken back, the
+        // key that takes it back. `d` asks nothing before it trashes a message,
+        // which is the right trade only because this is here: a confirmation
+        // interrupts every correct action to guard against the rare wrong one,
+        // and undo costs nothing until something goes wrong.
+        //
+        // The offer lives exactly as long as the sentence. The account clears
+        // both on one timer, so there is never an Undo standing beside a
+        // different sentence, and nothing left to press minutes later that
+        // would resurrect a message for no reason anybody could still connect
+        // to a keystroke.
+        StatusNotice {
           id: notice
           anchors.right: parent.right
           anchors.rightMargin: Style.space(14)
           anchors.verticalCenter: parent.verticalCenter
           visible: statusBar.hasNotice
-          width: Math.min(implicitWidth, parent.width / 2)
-          horizontalAlignment: Text.AlignRight
-          textFormat: Text.PlainText
+          maximumWidth: parent.width / 2
+          textColor: root.foreground
+          dimColor: root.dim
+          urgentColor: root.urgent
+          accentColor: root.accent
+          panelFontFamily: root.fontFamily
           text: {
             if (root.notice !== "") return root.notice
             if (!root.service) return ""
             if (root.service.actionStatus !== "") return root.service.actionStatus
             return root.service.lastError
           }
-          color: root.service && root.service.lastError !== "" && root.service.actionStatus === ""
-            ? root.urgent
-            : root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          urgent: !!root.service && root.service.lastError !== ""
+            && root.service.actionStatus === ""
+          // Only ever beside the account's own sentence. The window's `notice`
+          // is its own thing — a refused duplicate mailbox — and has nothing
+          // to take back.
+          actionLabel: root.notice === "" && !!root.service
+            && root.service.actionStatus !== "" ? root.service.undoLabel : ""
+          busy: !!root.service && root.service.undoBusy
+          busyLabel: "Undoing…"
+          onActivated: root.undoLastAction()
         }
 
         KeyHints {
@@ -1292,7 +1488,13 @@ Item {
           root.openMessage(key)
           root.startCompose(mode)
         }
+        // A menu opened on a marked row acts on the whole set; one opened on
+        // an unmarked row acts on that row alone, the way a right-click names
+        // its own target everywhere else. Without this the menu was the one
+        // path that could not see a selection the user was looking at.
         onActionRequested: function(action, key) {
+          if (root.service && Model.menuActsOnSet(root.service.markedKeys, key))
+            return root.actOnMarks(action)
           root.cursorKey = key
           root.actOnCursor(action)
         }

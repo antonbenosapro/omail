@@ -496,12 +496,19 @@ Item {
     var handle = existingHandle || newHandle()
     var groups = Imap.groupByFolder(ids)
     if (groups.length === 0) {
-      if (typeof callback === "function") callback(null, "")
+      if (typeof callback === "function") callback({ done: 0 }, "")
       return handle
     }
 
     var remaining = groups.length
     var firstError = ""
+    // How many of the ids actually landed, so a caller acting on a set can say
+    // "9 of 12" rather than claiming the whole set moved. Counted per folder
+    // group, because that is the unit the server answers in: `--fail-early`
+    // stops a folded sequence at its first failure, so a group that errored
+    // counts as none of it. That under-reports rather than over-reports, which
+    // is the direction a claim about somebody's mail should err in.
+    var done = 0
 
     for (var g = 0; g < groups.length; g++) {
       (function(group) {
@@ -535,22 +542,29 @@ Item {
             if (!firstError)
               firstError = "This server supports neither MOVE nor UIDPLUS, so a message cannot be moved without leaving a deleted copy behind"
             remaining--
-            if (remaining === 0 && typeof callback === "function") callback(null, firstError)
+            if (remaining === 0 && typeof callback === "function")
+              callback({ done: done }, firstError)
             return
           }
         }
 
         if (commands.length === 0) {
+          // Nothing for this group to do, which is not a failure: its ids are
+          // as changed as they were ever going to be.
+          done += group.uids.length
           remaining--
-          if (remaining === 0 && typeof callback === "function") callback(null, firstError)
+          if (remaining === 0 && typeof callback === "function")
+            callback({ done: done }, firstError)
           return
         }
 
         var child = root.run(group.folder, commands, function(text, error) {
           if (handle.aborted) return
           if (error && !firstError) firstError = error
+          if (!error) done += group.uids.length
           remaining--
-          if (remaining === 0 && typeof callback === "function") callback(null, firstError)
+          if (remaining === 0 && typeof callback === "function")
+            callback({ done: done }, firstError)
         })
         handle.children.push(child)
       })(groups[g])
@@ -559,6 +573,14 @@ Item {
   }
 
   function trashMessage(id, callback) {
+    return batchTrash([id], callback)
+  }
+
+  // A whole set in one connection, which is what `applyPlan` was already for:
+  // it groups by folder and `sequenceSet` collapses each group's UIDs into one
+  // legal IMAP set, so twelve messages in one folder are one MOVE rather than
+  // twelve. `trashMessage` is the single-message case of it.
+  function batchTrash(ids, callback) {
     var handle = newHandle()
     ensureFolders(function(folderError) {
       if (handle.aborted) return
@@ -572,20 +594,84 @@ Item {
           callback(null, "This server has no Trash folder to move the message to")
         return
       }
-      root.applyPlan([id], { add: [], remove: [], move: trash }, callback, handle)
+      root.applyPlan(Array.isArray(ids) ? ids : [ids],
+        { add: [], remove: [], move: trash }, callback, handle)
     })
     return handle
   }
 
-  function untrashMessage(id, callback) {
+  // Back to the folder it came from, when the caller can say which that was. A
+  // move destroys the fact — the message's address now names Trash and nothing
+  // else — so this moved everything to INBOX, which filed a message restored
+  // from Archive somewhere it had never been.
+  //
+  // INBOX remains the fallback for a caller with nothing to say, and that is
+  // the Trash mailbox's own restore: a message reached by browsing Trash has no
+  // earlier folder on record anywhere, and the inbox is the one place a user
+  // will look for it.
+  //
+  // `messageId` is what makes the restore possible at all. The id this is
+  // handed was issued by the folder the message left, so after the move it
+  // names a UID that is gone; the server's new one arrives in the tagged
+  // `OK [COPYUID ...]` that curl strips. So the message is found again the way
+  // any client would find it — a SEARCH of Trash for the Message-ID the sender
+  // wrote, which a move does not rewrite.
+  //
+  // The search runs in this account's own Trash, and the move names this
+  // account's own folder, so a restore cannot reach another mailbox: both ends
+  // are resolved from the connection the request is already on.
+  function untrashMessage(id, callback, folder, messageId) {
     var handle = newHandle()
+    var wanted = Imap.trimmed(folder)
+    var identity = Imap.trimmed(messageId)
     ensureFolders(function(folderError) {
       if (handle.aborted) return
       if (folderError) {
         if (typeof callback === "function") callback(null, folderError)
         return
       }
-      root.applyPlan([id], { add: [], remove: ["\\Deleted"], move: "INBOX" }, callback, handle)
+      var destination = wanted === "" ? "INBOX" : Imap.resolveFolder(wanted, root.special)
+      var trash = Imap.resolveFolder("Trash", root.special)
+
+      // Nothing to search with — a message reached by browsing Trash, whose id
+      // already names where it is. The plan applies to it directly.
+      if (identity === "" || trash === "") {
+        root.applyPlan([id], { add: [], remove: ["\\Deleted"], move: destination },
+          callback, handle)
+        return
+      }
+
+      var find = Imap.findByMessageIdCommand(identity)
+      if (find === "") {
+        root.applyPlan([id], { add: [], remove: ["\\Deleted"], move: destination },
+          callback, handle)
+        return
+      }
+
+      // Two processes rather than one folded sequence: the move depends on
+      // what the search parsed out of the first answer, and commands folded
+      // with `--next` must not depend on each other's output.
+      root.run(trash, [find], function(text, error) {
+        if (handle.aborted) return
+        if (error) {
+          if (typeof callback === "function") callback(null, error)
+          return
+        }
+        var uids = Imap.parseSearch(text)
+        if (uids.length === 0) {
+          // Said plainly rather than reported as a success that moved nothing.
+          // The message is still in Trash and the list must not claim it came
+          // back.
+          if (typeof callback === "function")
+            callback(null, "That message is no longer in Trash")
+          return
+        }
+        // Newest first, so a Message-ID that appears more than once in Trash —
+        // the same message trashed twice — restores the copy just put there.
+        uids.sort(function(a, b) { return b - a })
+        root.applyPlan([Imap.messageId(uids[0], trash)],
+          { add: [], remove: ["\\Deleted"], move: destination }, callback, handle)
+      }, handle)
     })
     return handle
   }

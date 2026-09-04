@@ -224,13 +224,19 @@ Item {
     })
   }
 
+  // One request for the whole set, and one answer for the whole set: Gmail's
+  // batchModify either applies to every id or to none. So the count handed
+  // back is all of them or none of them — the same `done` the trash path
+  // reports, so a caller acting on a set reads one shape whichever it called.
   function batchModify(ids, addLabelIds, removeLabelIds, callback) {
+    var list = Array.isArray(ids) ? ids : []
     return request("POST", Api.batchModifyPath(), null, {
-      ids: Array.isArray(ids) ? ids : [],
+      ids: list,
       addLabelIds: Array.isArray(addLabelIds) ? addLabelIds : [],
       removeLabelIds: Array.isArray(removeLabelIds) ? removeLabelIds : []
     }, function(status, payload, error) {
-      if (typeof callback === "function") callback(payload, error)
+      if (typeof callback === "function")
+        callback({ done: error ? 0 : list.length }, error)
     })
   }
 
@@ -241,7 +247,51 @@ Item {
       })
   }
 
-  function untrashMessage(id, callback) {
+  // Gmail has no batch trash. `batchModify` is the endpoint for labels and
+  // trashing is not a label change — adding TRASH through it is not what the
+  // API documents and does not move the message out of the mailbox the way the
+  // trash endpoint does. So this is a request per message, issued together
+  // rather than in sequence, and it counts what came back.
+  //
+  // Which is why the count is reported at all: over a set, some of these can
+  // succeed and some fail, and a notice saying "Moved to trash" over twelve
+  // messages of which nine moved is a claim the program cannot support. The
+  // payload carries `done`, and `total` is what the caller asked for.
+  function batchTrash(ids, callback) {
+    var handle = newHandle()
+    var list = Array.isArray(ids) ? ids : [ids]
+    if (list.length === 0) {
+      if (typeof callback === "function") callback({ done: 0 }, "")
+      return handle
+    }
+    var remaining = list.length
+    var done = 0
+    var firstError = ""
+    for (var i = 0; i < list.length; i++) {
+      handle.children.push(trashMessage(list[i], function(payload, error) {
+        if (handle.aborted) return
+        if (error) {
+          if (firstError === "") firstError = error
+        } else {
+          done++
+        }
+        remaining--
+        if (remaining > 0) return
+        // The error is handed over whether or not anything succeeded, and the
+        // count beside it is what says how much of the set it cost. A caller
+        // that treated any error as total failure would put nine trashed rows
+        // back.
+        if (typeof callback === "function") callback({ done: done }, firstError)
+      }))
+    }
+    return handle
+  }
+
+  // Takes the folder argument the IMAP client needs and ignores it: Gmail has no
+  // folders, and untrash restores the labels the message carried before it was
+  // trashed. Both clients keep one interface, which is what lets MailAccount
+  // drive either without asking which it holds.
+  function untrashMessage(id, callback, folder, messageId) {
     return request("POST", Api.untrashPath(id), null, null,
       function(status, payload, error) {
         if (typeof callback === "function") callback(payload, error)

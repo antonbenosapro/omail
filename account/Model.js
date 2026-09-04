@@ -143,6 +143,183 @@ function applyLabelChange(summary, action) {
   return next
 }
 
+// ------------------------------------------------------------------- undo
+//
+// `d` moves a message to trash with no question asked, and that is the right
+// trade: a confirmation interrupts every correct action to guard against the
+// rare wrong one, and people who are asked every time learn to dismiss the
+// question without reading it. Undo costs nothing until something goes wrong.
+//
+// What makes it possible is that the row is put back from a record taken
+// *before* the action, while the list still holds the message and its
+// neighbours. Reconstructing it afterwards would be guessing.
+
+// Which actions can be taken back, and by what. Only trash for now: archive
+// and star are already reversible by pressing the same key again from the
+// mailbox the message landed in, and marking read has no moment of regret in
+// it. A verb that is not here is one this offers no undo for, rather than one
+// it silently fails to undo.
+function reverseAction(action) {
+  if (String(action || "") === "trash") return "untrash"
+  return ""
+}
+
+// The folder an IMAP message was in, read off the id it was addressed by:
+// `5:INBOX` came from INBOX. Empty for a Gmail id, which names no folder
+// because Gmail has none — its labels come back with the untrash and nothing
+// here has to remember them.
+//
+// This is the state the issue is about. Untrashing used to move to INBOX
+// whatever folder the message came from, so undoing a trash from Archive put
+// the message somewhere it had never been. Where it came from is a fact the
+// trash destroyed, so it is recorded before the trash rather than guessed
+// after it.
+function undoSourceFolder(id) {
+  var text = String(id === undefined || id === null ? "" : id)
+  var match = text.match(/^\d+:([\s\S]*)$/)
+  return match ? match[1] : ""
+}
+
+// One entry per message: what to address, where it sat, what it was, and the
+// folder to put it back in. A list rather than a single message because a set
+// arriving later — a multi-select trash — is the same record with more rows in
+// it, and an undo that could only hold one would have to be rebuilt to take
+// two.
+function undoEntry(summary, index) {
+  if (!summary) return null
+  var id = String(summary.id || "")
+  if (id === "") return null
+  return {
+    id: id,
+    index: Math.max(0, Math.floor(Number(index) || 0)),
+    row: summary,
+    folder: undoSourceFolder(id),
+    // The identity that survives the move. A UID is issued by the folder
+    // holding the message, so the id above names nothing once the message is
+    // in Trash; the Message-ID the sender wrote is what finds it again.
+    messageId: String(summary.messageId || "")
+  }
+}
+
+// The record the notice offers, or null when there is nothing to offer. Null
+// rather than an empty record, so a caller cannot end up drawing an Undo
+// button for an action that has no reverse.
+function undoRecordFor(action, entries, mailboxKey) {
+  var reverse = reverseAction(action)
+  if (reverse === "") return null
+  var source = Array.isArray(entries) ? entries : []
+  var rows = []
+  for (var i = 0; i < source.length; i++) {
+    if (source[i]) rows.push(source[i])
+  }
+  if (rows.length === 0) return null
+  return {
+    action: String(action || ""),
+    reverse: reverse,
+    entries: rows,
+    mailboxKey: String(mailboxKey || "inbox")
+  }
+}
+
+// Which pane a zoom key resizes.
+//
+// "The pane the keyboard is in" was `keyContext === "list"`, and that is only
+// the same question in a window narrow enough to show one pane at a time. At
+// any wider size opening a message turns the context "reader" while the list
+// is still on screen — so the list could be zoomed until the first message was
+// opened and never again, and Ctrl+- silently resized the message instead.
+//
+// The cursor is the tie-breaker rather than the context: in a two-pane window
+// the list is only being *read* when nothing is open in the reader beside it.
+// Once a message is open, the message is what the eye is on, so that is what
+// grows. A one-pane window has no ambiguity to resolve — whatever is on screen
+// is the target.
+function zoomTargetsList(context, compact, readerOpen) {
+  if (compact === true) return String(context) === "list"
+  return readerOpen !== true
+}
+
+// What a menu opened on a row should act on. Inside the selection means the
+// whole set — the row was one of the marked ones and acting on it alone would
+// ignore the marks the user can see. Outside it means that row by itself,
+// which is also what right-clicking an unmarked row means in every file
+// manager and mail client: the click names its own target.
+//
+// The set is not cleared by the outside case here, because that is a question
+// about what happens next rather than about what this action applies to.
+function menuActsOnSet(keys, key) {
+  return isMarked(keys, key)
+}
+
+// What a menu row should say it will do, so the label cannot claim a size the
+// action does not have. "Archive" over a set of twelve is a promise about one
+// message that twelve messages are about to break.
+function menuActionLabel(base, count) {
+  var text = String(base || "")
+  var many = Math.floor(Number(count) || 0)
+  if (many < 2) return text
+  return text + " " + many
+}
+
+// Whether a finished bulk action still has an honest offer behind it. Only a
+// set that moved in full does: after a partial the record names messages that
+// never left, and restoring those would move mail the user never trashed. The
+// count alone is the honest notice there, with no button beside it.
+function offersUndoAfterBulk(moved, touched) {
+  var did = Math.floor(Number(moved) || 0)
+  var asked = Math.floor(Number(touched) || 0)
+  return asked > 0 && did === asked
+}
+
+function isUndoable(record) {
+  return !!record && !!record.reverse
+    && Array.isArray(record.entries) && record.entries.length > 0
+}
+
+// What the status line says while the offer stands. The count is in the text
+// because "Moved to trash" beside an Undo button that would restore forty
+// messages says the wrong thing about what pressing it does.
+function undoNoticeText(record) {
+  if (!isUndoable(record)) return ""
+  var count = record.entries.length
+  if (count === 1) return "Moved to trash"
+  return pluralize(count, "message") + " moved to trash"
+}
+
+// One word, because the notice has room for one and the sentence beside it has
+// already said what would be undone.
+function undoActionLabel(record) {
+  return isUndoable(record) ? "Undo" : ""
+}
+
+// Where the cursor goes when the offer is taken: onto the row that came back,
+// which is where it was standing before the action moved it off. The first
+// entry, because a set restores as a block and the top of it is where the eye
+// was. Empty when there is nothing to restore, which leaves the cursor alone.
+function undoCursorKey(record) {
+  if (!isUndoable(record)) return ""
+  var first = record.entries[0]
+  return first && first.row ? rowKey(first.row) : ""
+}
+
+// Entries back into the list, each at the index it left from, lowest first so
+// an earlier insertion does not push a later one past its own place. Rows that
+// came back on their own — a refresh landed between the trash and the undo —
+// are left alone rather than duplicated.
+function restoreEntries(list, entries) {
+  var out = Array.isArray(list) ? list.slice() : []
+  var rows = Array.isArray(entries) ? entries.slice() : []
+  rows.sort(function(a, b) { return (a ? a.index : 0) - (b ? b.index : 0) })
+  for (var i = 0; i < rows.length; i++) {
+    var entry = rows[i]
+    if (!entry || !entry.row) continue
+    if (indexById(out, entry.id, entry.row.accountId) >= 0) continue
+    var at = Math.min(Math.max(0, entry.index), out.length)
+    out = out.slice(0, at).concat([entry.row], out.slice(at))
+  }
+  return out
+}
+
 // Skeleton rows replace only an empty list's first fetch. Loading another page
 // leaves useful messages in place and reports its progress at the list foot.
 // ------------------------------------------------------------- reading zoom
@@ -589,6 +766,214 @@ function indexByKey(list, key) {
   return indexById(list, keyId(text), keyAccountId(text))
 }
 
+// ----------------------------------------------------------- the selection
+//
+// A second set beside the cursor, and a third thing beside `selectedKey`.
+// Three questions that look alike and are not: `cursorKey` is where the
+// keyboard is, `selectedKey` is what the reader has open, and this is what the
+// next action will act on. Collapsing any pair of them was the tempting
+// simplification and each one is wrong — walking with `j` must not act, and
+// reading a message must not silently enlist it in a bulk trash.
+//
+// Row keys, like every other address in this file. A bare id names no row in a
+// merged list, and a set of bare ids would be the same bug at twelve times the
+// blast radius.
+//
+// The set is a plain array rather than an object used as a set, because it is
+// small, it is handed to a view as one property, and QML sees an assignment
+// rather than a mutation as a change. It is kept in the order things were
+// marked, which is nobody's order — `selectedRows` reads it back off the list,
+// which has the only order that means anything.
+
+function isMarked(keys, key) {
+  var set = Array.isArray(keys) ? keys : []
+  var wanted = String(key || "")
+  if (wanted === "") return false
+  return set.indexOf(wanted) >= 0
+}
+
+// Returns a new array every time, so a QML property assignment is seen as a
+// change. Mutating in place leaves the count and the row markers reading the
+// old value until something else happens to touch the property.
+function toggleMark(keys, key) {
+  var set = Array.isArray(keys) ? keys : []
+  var wanted = String(key || "")
+  if (wanted === "") return set.slice()
+  var at = set.indexOf(wanted)
+  if (at < 0) return set.concat([wanted])
+  return set.slice(0, at).concat(set.slice(at + 1))
+}
+
+function addMark(keys, key) {
+  var set = Array.isArray(keys) ? keys : []
+  var wanted = String(key || "")
+  if (wanted === "" || set.indexOf(wanted) >= 0) return set.slice()
+  return set.concat([wanted])
+}
+
+// Toggling one row into a set that belongs to one mailbox. A key from another
+// mailbox replaces the set rather than joining it: a selection spanning three
+// merged accounts is three separate batch requests with three ways to
+// half-fail and no useful way to report the three together.
+//
+// Replacing rather than refusing, because a refused key looks like a broken
+// keyboard — `x` on a row that then draws no marker and says nothing about
+// why. Starting a new set where the user is standing is what they meant.
+//
+// Un-marking is exempt. A key already in the set is in the set's own mailbox
+// by construction, so taking it out is never a mailbox change.
+function marksAfterToggle(keys, key, keyOwner, setOwner) {
+  var set = Array.isArray(keys) ? keys : []
+  var wanted = String(key || "")
+  if (wanted === "") return set.slice()
+  if (isMarked(set, wanted)) return toggleMark(set, wanted)
+  var owner = String(keyOwner || "")
+  var held = String(setOwner || "")
+  if (held !== "" && owner !== held) return [wanted]
+  return addMark(set, wanted)
+}
+
+// Every row of the list that is on screen, which is what Ctrl+A means here:
+// the mail somebody can see, not the mailbox behind it. A mailbox-wide select
+// all would promise an action over messages that have never been fetched.
+function marksForAll(list) {
+  var source = Array.isArray(list) ? list : []
+  var out = []
+  for (var i = 0; i < source.length; i++) {
+    var key = rowKey(source[i])
+    if (key !== "") out.push(key)
+  }
+  return out
+}
+
+// A set naming rows the list no longer holds cannot be acted on, and a count
+// that includes them is a lie about how many messages are about to move. So
+// the set is filtered against the list whenever the list is replaced — the
+// same job `cursorAfterReload` does for the cursor, for the same reason.
+function marksAfterReload(list, keys) {
+  var source = Array.isArray(list) ? list : []
+  var set = Array.isArray(keys) ? keys : []
+  var out = []
+  for (var i = 0; i < set.length; i++) {
+    var index = indexByKey(source, set[i])
+    // Re-derived from the row rather than kept as it came in, so a key that
+    // named no account stops being ambiguous the moment the row is found.
+    if (index >= 0) out.push(rowKey(source[index]))
+  }
+  return out
+}
+
+// The marked rows in the order the list draws them, which is the order an
+// action applies them in and the order a count is read from.
+function selectedRows(list, keys) {
+  var source = Array.isArray(list) ? list : []
+  var set = Array.isArray(keys) ? keys : []
+  var out = []
+  for (var i = 0; i < source.length; i++) {
+    if (isMarked(set, rowKey(source[i]))) out.push(source[i])
+  }
+  return out
+}
+
+// The ids inside one account, for a client that takes an array. The account
+// half of the key is dropped here and nowhere earlier: this is the provider
+// boundary, and the one place a bare id is the right thing to hold.
+//
+// Filtered by owner rather than trusted, because a set that had somehow
+// spanned two accounts would otherwise send one account's UIDs to the other's
+// server — which is the failure the whole key discipline exists to prevent.
+function markedIdsFor(list, keys, accountId) {
+  var rows = selectedRows(list, keys)
+  var owner = String(accountId || "")
+  var out = []
+  for (var i = 0; i < rows.length; i++) {
+    var rowOwner = String(rows[i].accountId || "")
+    if (owner !== "" && rowOwner !== "" && rowOwner !== owner) continue
+    out.push(rows[i].id)
+  }
+  return out
+}
+
+// Extending with Shift+J / Shift+K. The row being left is marked, the row
+// being arrived at is marked, and the step itself is `cursorAfterOffset`. Both
+// ends, because marking only the destination leaves the row the extension
+// started from out of its own selection, and marking only the origin means the
+// first Shift+J marks a row the cursor is no longer on.
+//
+// It only ever adds. Shift+K after three Shift+J's would otherwise have to
+// un-mark, which needs an anchor and a direction — a range selection rather
+// than an extension — and the two disagree the moment the cursor has been
+// moved by anything else in between. `x` is what un-marks one row.
+function marksAfterExtend(list, keys, cursorKey, delta) {
+  var next = addMark(keys, cursorKey)
+  var landed = cursorAfterOffset(list, cursorKey, delta)
+  return addMark(next, landed)
+}
+
+// What the count says. Never a bare number: "3" beside a list of messages
+// could be a count of anything, and the word is what makes the state readable
+// rather than merely visible.
+function selectionLabel(count) {
+  var value = Math.max(0, Math.floor(Number(count) || 0))
+  if (value === 0) return ""
+  return value + " selected"
+}
+
+// Past tense, and plural-neutral, so one word finishes both "9 of 12 …" and
+// "12 messages …".
+function bulkVerb(action) {
+  var verb = String(action || "")
+  if (verb === "archive") return "archived"
+  if (verb === "trash") return "moved to trash"
+  if (verb === "untrash") return "restored"
+  if (verb === "star") return "starred"
+  if (verb === "unstar") return "unstarred"
+  if (verb === "markRead") return "marked read"
+  if (verb === "markUnread") return "marked unread"
+  if (verb === "spam") return "reported as spam"
+  return "done"
+}
+
+// What a bulk action reports when it is over. Honest about a partial result,
+// because `--fail-early` in the IMAP transport stops a folded sequence at the
+// first failure and a batch can genuinely land on some of a set and not the
+// rest — so "Archived" over twelve messages of which nine moved is a claim the
+// program cannot support.
+//
+// Zero moved is not a success with a count of none: nothing happened, and the
+// caller has an error to show beside this.
+function bulkResultLabel(action, done, total) {
+  var moved = Math.max(0, Math.floor(Number(done) || 0))
+  var asked = Math.max(moved, Math.floor(Number(total) || 0))
+  if (asked === 0) return ""
+  var verb = bulkVerb(action)
+  if (moved === 0) return "Nothing was " + verb
+  if (moved < asked) return moved + " of " + asked + " " + verb
+  return pluralize(moved, "message") + " " + verb
+}
+
+// Star over a set is one action for the whole set rather than a toggle per
+// row: a mixed selection toggled row by row comes out exactly as mixed as it
+// went in, which is the one outcome nobody pressed `s` for. Anything unstarred
+// in the set means the set gets starred; all starred means unstar.
+function bulkStarAction(rows) {
+  var source = Array.isArray(rows) ? rows : []
+  for (var i = 0; i < source.length; i++) {
+    if (!source[i].starred) return "star"
+  }
+  return "unstar"
+}
+
+// Read over a set, by the same rule and for the same reason: anything unread
+// means the set gets marked read.
+function bulkReadAction(rows) {
+  var source = Array.isArray(rows) ? rows : []
+  for (var i = 0; i < source.length; i++) {
+    if (source[i].unread) return "markRead"
+  }
+  return "markUnread"
+}
+
 // The rail as one numbered list, in the order it is drawn: the provider's
 // mailboxes first, then the labels or folders the server reported. Both the
 // sidebar's badges and the keys that jump read this, so the number beside a row
@@ -672,6 +1057,30 @@ function cursorAfterRemoval(list, cursorKey) {
   if (index < 0) return ""
   if (index + 1 < source.length) return rowKey(source[index + 1])
   if (index > 0) return rowKey(source[index - 1])
+  return ""
+}
+
+// The same question when a whole set is about to leave rather than one row.
+// `cursorAfterRemoval` would hand back the row below, which in a set of twelve
+// consecutive rows is another one that is also going — so this walks down past
+// every marked row, then up, and only then gives up.
+//
+// Called before the action, while the rows still have neighbours, for the same
+// reason its single-row sibling is.
+function cursorAfterMarkedRemoval(list, cursorKey, keys) {
+  var source = Array.isArray(list) ? list : []
+  var at = indexByKey(source, cursorKey)
+  // A cursor that is not in this list starts the walk at the top rather than
+  // answering with nothing: the whole set going does not empty the list.
+  if (at < 0) at = 0
+  for (var down = at; down < source.length; down++) {
+    var below = rowKey(source[down])
+    if (!isMarked(keys, below)) return below
+  }
+  for (var up = at - 1; up >= 0; up--) {
+    var above = rowKey(source[up])
+    if (!isMarked(keys, above)) return above
+  }
   return ""
 }
 

@@ -34,7 +34,22 @@ var CAPABILITIES = {
   web: false,
   // The transport carries several commands on one connection, so the STORE
   // that marks a message read rides along with the FETCH that opens it.
-  fetchMarksRead: true
+  fetchMarksRead: true,
+  // On, but not for free, and the cost is worth writing down.
+  //
+  // A message id here is `<uid>:<folder>`, and a UID is issued by the folder
+  // that holds the message. Moving one to Trash therefore gives it a new id,
+  // and the server reports that new UID in the tagged OK response — which the
+  // transport never sees, because curl removes the tagged completion around a
+  // custom IMAP request. So after a trash there is no id that names the
+  // message, and an undo reusing the old one would select a folder, match
+  // nothing, and report success having moved nothing.
+  //
+  // So the client finds it again the way any client would: a SEARCH of Trash
+  // for the Message-ID the sender wrote, which a move does not rewrite. That
+  // is one extra round trip on the undo path only — nothing pays for it until
+  // somebody presses the key.
+  undo: true
 }
 
 // Folders, not queries. The `folder:` DSL is read by `ImapProtocol.parseQuery`

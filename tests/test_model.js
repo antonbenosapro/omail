@@ -336,7 +336,6 @@ assert.strictEqual(model.wrappedIndex(0, 1, 1), 0, "one mailbox has nowhere to g
 assert.strictEqual(model.wrappedIndex(0, 1, 0), 0, "and no mailboxes must not divide by zero")
 assert.strictEqual(model.wrappedIndex(-1, 1, 3), 0)
 
-console.log("test_model.js ok")
 
 // ------------------------------------------------------------- reading zoom
 
@@ -748,6 +747,219 @@ assert.strictEqual(model.keyMatches("", hostA[0]), false)
   assert.strictEqual(model.cursorAfterReload([], model.rowKey(both[0])), "")
 }
 
+// ----------------------------------------------------------- the selection
+//
+// A third thing beside the cursor and the open message, and the reason it is a
+// third thing rather than a widening of either: walking with `j` must not act
+// on anything, and opening a message must not enlist it in a bulk trash.
+//
+// It holds row keys for the same reason everything else here does. `both` is
+// the merged list of two mailboxes with overlapping UIDs, so a set of bare ids
+// would mark A#5 and B#5 together and send one server's UIDs to the other.
+
+{
+  const a5 = model.rowKey(both[0])   // A#5
+  const b5 = model.rowKey(both[1])   // B#5
+
+  assert.strictEqual(model.isMarked([], a5), false)
+  assert.strictEqual(model.isMarked([a5], a5), true)
+  assert.strictEqual(model.isMarked([a5], b5), false,
+    "two rows sharing a UID are two different rows in the set as well")
+  assert.strictEqual(model.isMarked([a5], ""), false)
+  assert.strictEqual(model.isMarked(null, a5), false)
+
+  // A new array every time, so a QML property assignment is seen as a change.
+  // Mutating in place left the count and the row markers on the old value.
+  const one = model.toggleMark([], a5)
+  deepEqual(one, [a5])
+  const two = model.toggleMark(one, b5)
+  deepEqual(two, [a5, b5])
+  deepEqual(one, [a5], "toggling did not touch the array it was given")
+  deepEqual(model.toggleMark(two, a5), [b5], "toggling again takes it out")
+  deepEqual(model.toggleMark([], ""), [], "an empty key marks nothing")
+
+  deepEqual(model.addMark([a5], b5), [a5, b5])
+  deepEqual(model.addMark([a5], a5), [a5], "adding twice is once")
+  deepEqual(model.addMark([a5], ""), [a5])
+}
+
+// The set belongs to one mailbox. A key from another replaces it rather than
+// joining it: a selection spanning three merged accounts is three separate
+// batch requests with three ways to half-fail. Replacing rather than refusing,
+// because a refused key looks like a broken keyboard — `x` on a row that then
+// draws no marker and says nothing about why.
+{
+  const a5 = model.rowKey(both[0])   // A#5
+  const a4 = model.rowKey(both[2])   // A#4
+  const b5 = model.rowKey(both[1])   // B#5
+
+  deepEqual(model.marksAfterToggle([], a5, A, ""), [a5],
+    "the first mark sets the owner")
+  deepEqual(model.marksAfterToggle([a5], a4, A, A), [a5, a4],
+    "another row of the same mailbox joins it")
+  deepEqual(model.marksAfterToggle([a5, a4], b5, B, A), [b5],
+    "a row of another mailbox starts a new set where the user is standing")
+  // Un-marking is exempt: a key already in the set is in the set's own mailbox
+  // by construction, so taking it out is never a mailbox change.
+  deepEqual(model.marksAfterToggle([a5, a4], a5, A, A), [a4])
+  deepEqual(model.marksAfterToggle([a5], a5, A, A), [],
+    "and the last one out empties it")
+  deepEqual(model.marksAfterToggle([a5], "", A, A), [a5])
+  // A single-account list names no owner anywhere, and the question of
+  // crossing mailboxes never arises there.
+  deepEqual(model.marksAfterToggle([a5], a4, "", ""), [a5, a4])
+}
+
+// Select all is what is loaded, not what the mailbox holds. A mailbox-wide
+// select all would promise an action over messages never fetched, and could
+// draw no marker beside them.
+{
+  const all = model.marksForAll(both)
+  assert.strictEqual(all.length, both.length)
+  assert.strictEqual(all[0], model.rowKey(both[0]))
+  assert.strictEqual(new Set(all).size, both.length,
+    "ten rows, ten distinct keys, even where two share a UID")
+  deepEqual(model.marksForAll([]), [])
+  deepEqual(model.marksForAll(null), [])
+  deepEqual(model.marksForAll([{ id: "", accountId: A }]), [],
+    "a row with no id is no row")
+}
+
+// The set is filtered against the list whenever the list is replaced, the same
+// job cursorAfterReload does for the cursor: a key naming a row the list no
+// longer holds cannot be acted on, and counting it is a lie about how many
+// messages are about to move.
+{
+  const set = [model.rowKey(both[0]), model.rowKey(both[4]),
+    model.messageKey("9:INBOX", A)]
+  deepEqual(model.marksAfterReload(both, set),
+    [model.rowKey(both[0]), model.rowKey(both[4])],
+    "the row that left the list leaves the set with it")
+  deepEqual(model.marksAfterReload([], set), [])
+  deepEqual(model.marksAfterReload(both, []), [])
+  // Re-derived from the row rather than kept as it came in, so a key that
+  // named no account stops being ambiguous the moment the row is found.
+  deepEqual(model.marksAfterReload(both, ["5:INBOX"]), [model.rowKey(both[0])],
+    "a bare id comes back addressed to the first row holding it")
+}
+
+// The marked rows in the order the list draws them, which is the order an
+// action applies them in. The set itself is in the order things were marked,
+// which is nobody's order.
+{
+  const set = [model.rowKey(both[4]), model.rowKey(both[1]), model.rowKey(both[0])]
+  deepEqual(model.selectedRows(both, set).map(m => m.subject),
+    ["A#5", "B#5", "A#3"],
+    "read back off the list, not out of the set")
+  deepEqual(model.selectedRows(both, []), [])
+  deepEqual(model.selectedRows([], set), [])
+}
+
+// The account half of a key is dropped here and nowhere earlier: this is the
+// provider boundary, and a client's batch path takes ids. Filtered by owner
+// rather than trusted, because a set that had somehow spanned two accounts
+// would otherwise send one mailbox's UIDs to the other's server — the exact
+// failure the key discipline exists to prevent.
+{
+  const spanning = [model.rowKey(both[0]), model.rowKey(both[1]),
+    model.rowKey(both[2])]                       // A#5, B#5, A#4
+  deepEqual(model.markedIdsFor(both, spanning, A), ["5:INBOX", "4:INBOX"],
+    "B's row is refused, and A's two come out as bare ids")
+  deepEqual(model.markedIdsFor(both, spanning, B), ["5:INBOX"])
+  deepEqual(model.markedIdsFor(both, spanning, ""), ["5:INBOX", "5:INBOX", "4:INBOX"],
+    "no owner named is the single-account list, where every row is the owner's")
+  deepEqual(model.markedIdsFor(both, [], A), [])
+}
+
+// Extending marks both ends of the step. Marking only the destination leaves
+// the row the extension started from out of its own selection; marking only
+// the origin means the first Shift+J marks a row the cursor has left.
+{
+  const from = model.rowKey(both[0])
+  const to = model.rowKey(both[1])
+  deepEqual(model.marksAfterExtend(both, [], from, 1), [from, to])
+  // It only ever adds. Coming back the other way does not un-mark, because
+  // un-marking needs an anchor and a direction — a range rather than an
+  // extension — and the two disagree the moment the cursor moves by anything
+  // else in between. `x` is what un-marks one row.
+  deepEqual(model.marksAfterExtend(both, [from, to], to, -1), [from, to],
+    "Shift+K back over a marked row leaves it marked")
+  // Clamped at the ends by cursorAfterOffset, so extending past the bottom
+  // marks the bottom row rather than nothing.
+  const last = model.rowKey(both[both.length - 1])
+  deepEqual(model.marksAfterExtend(both, [], last, 1), [last])
+  deepEqual(model.marksAfterExtend([], [], from, 1), [from])
+}
+
+// Where the cursor goes when a whole set leaves. cursorAfterRemoval hands back
+// the row below, which in a set of consecutive rows is another one that is also
+// going — so this walks past every marked row before it settles anywhere.
+{
+  const keyAt = i => model.rowKey(both[i])
+  // Rows 2, 3 and 4 marked, cursor on row 2: the first unmarked row below.
+  deepEqual(model.cursorAfterMarkedRemoval(both, keyAt(2),
+    [keyAt(2), keyAt(3), keyAt(4)]), keyAt(5))
+  // The set runs to the bottom, so the walk turns round and goes up.
+  const tail = [keyAt(7), keyAt(8), keyAt(9)]
+  deepEqual(model.cursorAfterMarkedRemoval(both, keyAt(8), tail), keyAt(6))
+  // Everything selected leaves nowhere for the cursor to be, and it says so
+  // rather than naming a row that is going.
+  deepEqual(model.cursorAfterMarkedRemoval(both, keyAt(0), model.marksForAll(both)), "")
+  // A cursor that is not in this list starts the walk at the top; the whole
+  // set going does not empty the list.
+  deepEqual(model.cursorAfterMarkedRemoval(both, "nowhere", [keyAt(0)]), keyAt(1))
+  deepEqual(model.cursorAfterMarkedRemoval([], keyAt(0), [keyAt(0)]), "")
+  // Nothing marked at all: the cursor stays where it stands.
+  deepEqual(model.cursorAfterMarkedRemoval(both, keyAt(4), []), keyAt(4))
+}
+
+// The count is never a bare number: "3" beside a list of messages could be a
+// count of anything, and the word is what makes the state readable rather than
+// merely visible.
+assert.strictEqual(model.selectionLabel(0), "", "nothing selected says nothing")
+assert.strictEqual(model.selectionLabel(1), "1 selected")
+assert.strictEqual(model.selectionLabel(12), "12 selected")
+assert.strictEqual(model.selectionLabel(-3), "")
+assert.strictEqual(model.selectionLabel(null), "")
+
+// What a bulk action reports. Honest about a partial result, because
+// `--fail-early` stops a folded IMAP sequence at its first failure and Gmail
+// has no batch trash — so a set can genuinely land on some of its messages and
+// not the rest, and "Moved to trash" over twelve of which nine moved is a
+// claim the program cannot support.
+assert.strictEqual(model.bulkResultLabel("trash", 9, 12), "9 of 12 moved to trash")
+assert.strictEqual(model.bulkResultLabel("trash", 12, 12), "12 messages moved to trash")
+assert.strictEqual(model.bulkResultLabel("archive", 1, 1), "1 message archived",
+  "one message, singular, even coming out of the bulk path")
+assert.strictEqual(model.bulkResultLabel("archive", 0, 12), "Nothing was archived",
+  "zero moved is not a success with a count of none")
+assert.strictEqual(model.bulkResultLabel("markRead", 3, 3), "3 messages marked read")
+assert.strictEqual(model.bulkResultLabel("markUnread", 2, 5), "2 of 5 marked unread")
+assert.strictEqual(model.bulkResultLabel("star", 4, 4), "4 messages starred")
+assert.strictEqual(model.bulkResultLabel("untrash", 2, 2), "2 messages restored")
+assert.strictEqual(model.bulkResultLabel("archive", 0, 0), "",
+  "an empty set has nothing to report")
+// More reported done than were asked for is a client that miscounted, not a
+// reason to print "13 of 12".
+assert.strictEqual(model.bulkResultLabel("archive", 13, 12), "13 messages archived")
+
+// One action for the whole set rather than a toggle per row: a mixed selection
+// toggled row by row comes out exactly as mixed as it went in, which is the
+// one outcome nobody pressed `s` for.
+{
+  const starred = { id: "1", starred: true }
+  const plain = { id: "2", starred: false }
+  assert.strictEqual(model.bulkStarAction([starred, plain]), "star",
+    "anything unstarred means the set gets starred")
+  assert.strictEqual(model.bulkStarAction([starred, starred]), "unstar")
+  assert.strictEqual(model.bulkStarAction([]), "unstar")
+
+  const unread = { id: "1", unread: true }
+  const read = { id: "2", unread: false }
+  assert.strictEqual(model.bulkReadAction([unread, read]), "markRead")
+  assert.strictEqual(model.bulkReadAction([read, read]), "markUnread")
+}
+
 // --------------------------------------------------- merged list ordering
 //
 // Newest first, by when the message was received. A merged list is several
@@ -911,4 +1123,203 @@ assert.strictEqual(model.isUnifiedMailbox("sent"), false)
 assert.strictEqual(model.isUnifiedMailbox("archive"), false)
 assert.strictEqual(model.isUnifiedMailbox("trash"), false)
 assert.strictEqual(model.isUnifiedMailbox("all"), false)
-assert.strictEqual(model.isUnifiedMailbox(""), false)
+// ------------------------------------------------------------------- undo
+
+// Only trash is offered back. A verb with no reverse gets no record at all,
+// rather than a record whose Undo button would do nothing.
+assert.strictEqual(model.reverseAction("trash"), "untrash")
+assert.strictEqual(model.reverseAction("archive"), "")
+assert.strictEqual(model.reverseAction("markRead"), "")
+assert.strictEqual(model.reverseAction("star"), "")
+assert.strictEqual(model.reverseAction(""), "")
+assert.strictEqual(model.reverseAction(null), "")
+
+// The folder is read off the id, because that is the only place it is written
+// down. Gmail's ids name no folder and must not be made to look as if they do.
+assert.strictEqual(model.undoSourceFolder("5:INBOX"), "INBOX")
+assert.strictEqual(model.undoSourceFolder("12:Archive"), "Archive")
+assert.strictEqual(model.undoSourceFolder("7:[Gmail]/All Mail"), "[Gmail]/All Mail",
+  "a folder name with a bracket and a slash in it is still one folder name")
+assert.strictEqual(model.undoSourceFolder("3:"), "",
+  "a message in no folder names none")
+assert.strictEqual(model.undoSourceFolder("18f2c9a1b"), "",
+  "a Gmail id is not a uid:folder pair")
+assert.strictEqual(model.undoSourceFolder(""), "")
+assert.strictEqual(model.undoSourceFolder(null), "")
+
+const imapRow = { id: "5:Archive", accountId: "imap:me@host", subject: "Hello" }
+const gmailRow = { id: "18f2c9a1b", accountId: "me@gmail.com", subject: "Hi" }
+
+{
+  const entry = model.undoEntry(imapRow, 3)
+  assert.strictEqual(entry.id, "5:Archive")
+  assert.strictEqual(entry.index, 3)
+  assert.strictEqual(entry.folder, "Archive",
+    "where it came from, recorded before the trash destroyed the fact")
+  assert.strictEqual(entry.row, imapRow, "the row itself, to put back")
+}
+assert.strictEqual(model.undoEntry(gmailRow, 0).folder, "",
+  "Gmail restores its own labels and is handed no folder")
+assert.strictEqual(model.undoEntry(null, 0), null)
+assert.strictEqual(model.undoEntry({ id: "" }, 0), null,
+  "a row that cannot be addressed cannot be put back")
+assert.strictEqual(model.undoEntry(imapRow, -4).index, 0)
+
+// The record, or nothing. Null rather than an empty record, so no caller can
+// end up drawing an Undo button for an action that has no reverse.
+{
+  const record = model.undoRecordFor("trash", [model.undoEntry(imapRow, 2)], "inbox")
+  assert.strictEqual(record.reverse, "untrash")
+  assert.strictEqual(record.mailboxKey, "inbox")
+  assert.strictEqual(record.entries.length, 1)
+  assert.strictEqual(model.isUndoable(record), true)
+  assert.strictEqual(model.undoNoticeText(record), "Moved to trash")
+  assert.strictEqual(model.undoActionLabel(record), "Undo")
+  assert.strictEqual(model.undoCursorKey(record), model.rowKey(imapRow),
+    "the cursor goes back onto the row that came back")
+}
+assert.strictEqual(model.undoRecordFor("archive", [model.undoEntry(imapRow, 0)], "inbox"), null,
+  "archive has no reverse here, so it offers nothing")
+assert.strictEqual(model.undoRecordFor("trash", [], "inbox"), null,
+  "nothing was trashed, so there is nothing to take back")
+assert.strictEqual(model.undoRecordFor("trash", [null], "inbox"), null)
+assert.strictEqual(model.undoRecordFor("trash", null, "inbox"), null)
+
+// Which pane a zoom key resizes. `keyContext === "list"` was the same question
+// only in a one-pane window: wider than that, opening a message turns the
+// context "reader" while the list is still on screen, so the list could be
+// zoomed until the first message was opened and never again.
+{
+  // Two panes: what is open decides, because that is what the eye is on.
+  assert.strictEqual(model.zoomTargetsList("list", false, false), true,
+    "nothing open beside the list, so the list is what grows")
+  assert.strictEqual(model.zoomTargetsList("reader", false, true), false,
+    "a message is open, so the message is what grows")
+  assert.strictEqual(model.zoomTargetsList("reader", false, false), true,
+    "the context says reader but nothing is open — the list is all there is")
+
+  // One pane: the context is the whole answer, because only one is on screen.
+  assert.strictEqual(model.zoomTargetsList("list", true, false), true)
+  assert.strictEqual(model.zoomTargetsList("reader", true, true), false)
+  assert.strictEqual(model.zoomTargetsList("list", true, true), true,
+    "narrow and showing the list, whatever is open behind it")
+}
+
+// A menu opened on a marked row acts on the set; one opened on an unmarked row
+// acts on that row alone, the way a right-click names its own target in every
+// file manager. Without this the menu was the one path that could not see a
+// selection the user was looking at.
+{
+  const acct = "imap:me@host"
+  const rows = [1, 2, 3].map(function (n) {
+    return { id: n + ":INBOX", accountId: acct }
+  })
+  const marks = [model.rowKey(rows[0]), model.rowKey(rows[1])]
+  assert.strictEqual(model.menuActsOnSet(marks, model.rowKey(rows[0])), true,
+    "the row is in the set, so the set is what the menu acts on")
+  assert.strictEqual(model.menuActsOnSet(marks, model.rowKey(rows[2])), false,
+    "an unmarked row names itself")
+  assert.strictEqual(model.menuActsOnSet([], model.rowKey(rows[0])), false,
+    "no selection means no set to act on")
+}
+
+// The label cannot claim a size the action does not have: "Archive" over twelve
+// selected messages is a promise about one that twelve are about to break.
+assert.strictEqual(model.menuActionLabel("Archive", 1), "Archive")
+assert.strictEqual(model.menuActionLabel("Archive", 12), "Archive 12")
+assert.strictEqual(model.menuActionLabel("Move to trash", 3), "Move to trash 3")
+assert.strictEqual(model.menuActionLabel("Archive", 0), "Archive",
+  "nothing selected still reads as the single-message action")
+
+// The entry carries the identity that survives the move. The id names a UID
+// the folder issued, and Trash reissues it; the Message-ID is what finds the
+// message again.
+{
+  const row = { id: "5:Archive", accountId: "imap:me@host",
+    messageId: "<kept@example.com>" }
+  const entry = model.undoEntry(row, 3)
+  assert.strictEqual(entry.messageId, "<kept@example.com>")
+  assert.strictEqual(entry.folder, "Archive",
+    "and where it goes back to, which the move also destroys")
+  assert.strictEqual(model.undoEntry({ id: "5:Archive" }, 0).messageId, "",
+    "a row with no Message-ID says so rather than carrying undefined")
+}
+
+// A bulk action offers its undo only when the whole set moved. After a partial
+// the record still names every row the action started with, and restoring those
+// would move mail that was never trashed — so the offer is withheld and the
+// count stands alone.
+assert.strictEqual(model.offersUndoAfterBulk(12, 12), true)
+assert.strictEqual(model.offersUndoAfterBulk(9, 12), false,
+  "three never left, so Undo would move mail nobody trashed")
+assert.strictEqual(model.offersUndoAfterBulk(0, 12), false)
+assert.strictEqual(model.offersUndoAfterBulk(0, 0), false,
+  "an empty set has nothing to take back")
+assert.strictEqual(model.offersUndoAfterBulk(1, 1), true)
+
+// Nothing to offer reads as nothing everywhere, rather than as a button with
+// no words on it.
+assert.strictEqual(model.isUndoable(null), false)
+assert.strictEqual(model.undoNoticeText(null), "")
+assert.strictEqual(model.undoActionLabel(null), "")
+assert.strictEqual(model.undoCursorKey(null), "")
+assert.strictEqual(model.isUndoable({ reverse: "untrash", entries: [] }), false)
+
+// A set is the same record with more rows in it: a bulk trash records every row
+// it moved, so one Undo takes the whole block back.
+{
+  const second = { id: "9:Archive", accountId: "imap:me@host", subject: "Also" }
+  const record = model.undoRecordFor("trash",
+    [model.undoEntry(imapRow, 1), model.undoEntry(second, 4)], "inbox")
+  assert.strictEqual(record.entries.length, 2)
+  assert.strictEqual(model.undoNoticeText(record), "2 messages moved to trash",
+    "the count is in the sentence, because Undo would restore all of them")
+  assert.strictEqual(model.undoCursorKey(record), model.rowKey(imapRow),
+    "the top of the block is where the eye was")
+}
+
+// ------------------------------------------------------ putting rows back
+
+{
+  const a = { id: "1:INBOX", accountId: "imap:me@host" }
+  const b = { id: "2:INBOX", accountId: "imap:me@host" }
+  const c = { id: "3:INBOX", accountId: "imap:me@host" }
+  const list = [a, c]
+  const back = model.restoreEntries(list, [model.undoEntry(b, 1)])
+  deepEqual(back.map(function (row) { return row.id }), ["1:INBOX", "2:INBOX", "3:INBOX"],
+    "the row goes back where it left from, not onto the end")
+  deepEqual(list.map(function (row) { return row.id }), ["1:INBOX", "3:INBOX"],
+    "and the list it came from is not modified in place")
+}
+
+// Lowest index first, so an earlier insertion does not push a later one past
+// its own place.
+{
+  const rows = ["a", "b", "c", "d"].map(function (name, i) {
+    return { id: (i + 1) + ":INBOX", accountId: "x", subject: name }
+  })
+  const remaining = [rows[1], rows[3]]
+  const back = model.restoreEntries(remaining,
+    [model.undoEntry(rows[2], 2), model.undoEntry(rows[0], 0)])
+  deepEqual(back.map(function (row) { return row.subject }), ["a", "b", "c", "d"])
+}
+
+// A refresh between the trash and the undo can bring the row back on its own.
+// Putting it back again would list it twice.
+{
+  const row = { id: "5:INBOX", accountId: "imap:me@host" }
+  const back = model.restoreEntries([row], [model.undoEntry(row, 0)])
+  assert.strictEqual(back.length, 1, "a row already listed is left alone")
+}
+
+// An index past the end of a list that has since shrunk lands at the end
+// rather than leaving a hole.
+{
+  const row = { id: "9:INBOX", accountId: "x" }
+  const back = model.restoreEntries([], [model.undoEntry(row, 40)])
+  deepEqual(back.map(function (r) { return r.id }), ["9:INBOX"])
+}
+deepEqual(model.restoreEntries(null, null), [])
+deepEqual(model.restoreEntries([], [null]), [])
+
+console.log("test_model.js ok")

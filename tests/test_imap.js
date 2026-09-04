@@ -179,6 +179,30 @@ assert.strictEqual(imap.searchCommand("UNSEEN"), "UID SEARCH UNSEEN")
 assert.strictEqual(imap.searchCommand(""), "UID SEARCH ALL",
   "empty criteria is a syntax error; ALL is what it means")
 
+// Finding a message that has been moved. A UID belongs to the folder that
+// issued it, so after a trash the old id names nothing — the Message-ID is the
+// identifier that survives, because a move does not rewrite what the sender
+// wrote.
+assert.strictEqual(
+  imap.findByMessageIdCommand("<abc@example.com>"),
+  'UID SEARCH HEADER MESSAGE-ID "<abc@example.com>"')
+assert.strictEqual(imap.findByMessageIdCommand("  <spaced@example.com>  "),
+  'UID SEARCH HEADER MESSAGE-ID "<spaced@example.com>"',
+  "trimmed, because a header value arrives with whatever spacing it had")
+assert.strictEqual(imap.findByMessageIdCommand(""), "",
+  "nothing to search for is not a search for everything")
+assert.strictEqual(imap.findByMessageIdCommand(null), "")
+
+// A Message-ID is written by whoever sent the mail, so it is quoted like every
+// other string that reaches a server: a quote in it must not end the argument
+// and start a command of somebody else's choosing.
+assert.strictEqual(
+  imap.findByMessageIdCommand('<a"b@example.com>'),
+  'UID SEARCH HEADER MESSAGE-ID "<a\\"b@example.com>"')
+assert.ok(
+  imap.findByMessageIdCommand('<x@y>\r\nA001 DELETE "INBOX"').indexOf("\r\n") < 0,
+  "a CRLF would end the command; there is no escape for one inside a quoted string")
+
 // BODY.PEEK, never BODY: reading the list must not mark the mailbox seen.
 const summaryFetch = imap.summaryFetchCommand([7, 9])
 assert.ok(summaryFetch.indexOf("BODY.PEEK[") >= 0, "the list fetch peeks")

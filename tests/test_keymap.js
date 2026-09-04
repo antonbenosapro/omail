@@ -143,6 +143,50 @@ assert.strictEqual(keymap.isEnabled(byId("archive"), "list", true), false,
 assert.strictEqual(keymap.isEnabled(byId("open"), "list", true), false)
 assert.strictEqual(keymap.isEnabled(byId("compose"), "list", true), false)
 
+// ----------------------------------------------------------- the selection
+
+// Wherever the list is, which is both mail contexts. Scoped to "list" alone
+// these were dead in the arrangement most windows are actually in: the context
+// turns "reader" the moment a message opens, but only a narrow window replaces
+// the list with the reader — at any normal width the list is still on screen,
+// and `x` on a row the user was looking at did nothing at all.
+;["toggleMark", "extendDown", "extendUp", "markAll"].forEach(function (id) {
+  const row = byId(id)
+  assert.ok(row, id + " is a row in the table")
+  assert.strictEqual(keymap.isEnabled(row, "list", false), true)
+  assert.strictEqual(keymap.isEnabled(row, "reader", false), true,
+    id + " stays live while the list is beside an open message")
+  assert.strictEqual(keymap.isEnabled(row, "compose", false), false)
+  assert.strictEqual(keymap.isEnabled(row, "list", true), false,
+    "nothing selects mail behind the sheet")
+})
+
+// The acting keys get no second row for the set. `e` archives the selection
+// when there is one and the cursor's row when there is not, which is one key
+// meaning one thing at two sizes — a Shift+E would have been a second key for
+// the same idea and a second thing to remember.
+assert.strictEqual(byId("archive").keys.length, 1,
+  "the set is not a second archive binding")
+;["archiveSelected", "trashSelected", "bulkArchive"].forEach(function (id) {
+  assert.strictEqual(byId(id), undefined,
+    id + " must not exist: the set rides the existing acting keys")
+})
+
+// Escape clears the set, and it is the only key that does. It is already bound
+// everywhere, so what it means with a selection up is a branch in goBack()
+// rather than a row of its own.
+assert.strictEqual(byId("clearSelection"), undefined,
+  "clearing the selection is Escape's job, not a new binding")
+
+assert.strictEqual(keymap.displayFor(byId("extendDown")), "Shift+J")
+assert.strictEqual(keymap.hintKeyFor(byId("extendDown")), "Shift+J / K",
+  "the status bar shows one line for the pair, as it does for j / k")
+{
+  const selecting = groups.filter(function (g) { return g.name === "Selecting" })[0]
+  assert.ok(selecting, "the sheet gets a group of its own for the selection")
+  assert.strictEqual(selecting.rows.length, 4)
+}
+
 const switchAccount = byId("switchAccount")
 assert.strictEqual(keymap.isEnabled(switchAccount, "list", false), true)
 assert.strictEqual(keymap.isEnabled(switchAccount, "reader", false), true)
@@ -160,8 +204,11 @@ assert.strictEqual(keymap.hintKeyFor(byId("archive")), "e",
 
 const listHints = keymap.hintsFor("list")
 deepEqual(listHints.map(function (h) { return h.key + " " + h.label }),
-  ["j / k move", "o open", "e archive", "c compose"],
+  ["j / k move", "o open", "x select", "e archive", "c compose"],
   "the status bar offers what the list can do, in its short form")
+deepEqual(keymap.hintsFor("reader").map(function (h) { return h.key }),
+  ["o", "e", "d", "r", "Esc"],
+  "and not selecting, which the reader cannot do")
 const composeHints = keymap.hintsFor("compose")
 deepEqual(composeHints.map(function (h) { return h.label }),
   ["send", "close"],
@@ -169,6 +216,42 @@ deepEqual(composeHints.map(function (h) { return h.label }),
 deepEqual(keymap.hintsFor("page").map(function (h) { return h.label }),
   ["back"],
   "a form's whole keyboard contract is leaving it")
+
+// ------------------------------------------------------------------- undo
+
+// The one safety net a destructive key has, so it lives where the destructive
+// key lives and nowhere else. Bare, because a mistake is the moment with the
+// least patience for a modifier.
+const undo = byId("undo")
+assert.strictEqual(keymap.displayFor(undo), "z")
+assert.strictEqual(keymap.isEnabled(undo, "list", false), true)
+assert.strictEqual(keymap.isEnabled(undo, "reader", false), true,
+  "trashing from the reader has to be as undoable as trashing from the list")
+assert.strictEqual(keymap.isEnabled(undo, "compose", false), false,
+  "z is a letter in a draft")
+assert.strictEqual(keymap.isEnabled(undo, "search", false), false)
+assert.strictEqual(keymap.isEnabled(undo, "page", false), false)
+assert.strictEqual(keymap.isEnabled(undo, "list", true), false,
+  "nothing acts on mail behind the sheet, including taking an action back")
+
+// The pair. Undo is the answer to trash, so they answer in the same places.
+const trash = byId("trash")
+deepEqual(undo.contexts, trash.contexts,
+  "undo is offered wherever trash is, or it is not an undo")
+assert.strictEqual(undo.group, trash.group,
+  "the sheet lists them together, under Acting")
+
+// Deliberately not Del. An accelerator for a destructive action is a liability
+// beside the arrow keys j and k are aliased to: cursoring down a list and
+// clipping Delete would trash the message under the cursor without a thought
+// having been involved. See the reasoning in docs/KEYS.md.
+keymap.BINDINGS.forEach(function (binding) {
+  binding.keys.forEach(function (key) {
+    assert.ok(key !== "Del" && key !== "Delete" && key !== "Backspace",
+      "no destructive action is bound to a key muscle memory fires without "
+        + "deliberation, and " + binding.id + " binds " + key)
+  })
+})
 
 // ------------------------------------------------- one entry per sequence
 

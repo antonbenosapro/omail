@@ -43,6 +43,36 @@ var BINDINGS = [
   { id: "backToList", keys: ["u"], contexts: ["reader"],
     group: "Moving", label: "Back to the list" },
 
+  // The selection: what the next action acts on, which is neither where the
+  // keyboard is nor what the reader has open. `x` is the convention every
+  // webmail uses for it, and the acting keys below need no row of their own —
+  // `e` archives the set when there is one and the cursor's row when there is
+  // not, which is the same key meaning the same thing at two sizes.
+  //
+  // Wherever the list is, which is both contexts — the same scope `j`, `k`,
+  // `e` and `d` carry, and for the same reason. `currentView` becomes "reader"
+  // the moment a message opens, but the window only *replaces* the list with
+  // the reader when it is narrow enough to have one pane; at any normal width
+  // both are on screen at once. Scoped to "list" these were dead exactly when
+  // the list was in front of the user with a message open beside it — `x` did
+  // nothing, no marker appeared, and the acting keys fell through to the
+  // cursor's single row.
+  //
+  // The cursor is what they act on and the cursor is live in both, so there is
+  // nothing here that needs the list to be the only thing on screen.
+  { id: "toggleMark", keys: ["x"], contexts: MAIL,
+    group: "Selecting", label: "Select or deselect this message",
+    hint: { list: "select" } },
+  // Shift+J and Shift+K rather than Shift+Down: the pair reads as the
+  // capitalised form of the movement keys, which is what it is.
+  { id: "extendDown", keys: ["Shift+J"], contexts: MAIL,
+    group: "Selecting", label: "Select and move down",
+    hintKey: "Shift+J / K" },
+  { id: "extendUp", keys: ["Shift+K"], contexts: MAIL,
+    group: "Selecting", label: "Select and move up" },
+  { id: "markAll", keys: ["Ctrl+A"], contexts: MAIL,
+    group: "Selecting", label: "Select everything loaded" },
+
   { id: "archive", keys: ["e"], contexts: MAIL,
     group: "Acting", label: "Archive",
     hint: { list: "archive", reader: "archive" } },
@@ -55,6 +85,25 @@ var BINDINGS = [
     group: "Acting", label: "Mark read" },
   { id: "markUnread", keys: ["Shift+U"], contexts: MAIL,
     group: "Acting", label: "Mark unread" },
+
+  // Takes back the last trash, for as long as the notice offering it is up.
+  // `z` because it is the one bare letter a mail user already reaches for to
+  // undo — Gmail has bound it to exactly this for twenty years — and because
+  // it is the far corner of the keyboard rather than a neighbour of anything
+  // destructive: nothing here is one slip away from it. It earns a bare letter
+  // on the grounds the scarce ones are spent on: it answers a mistake, and a
+  // mistake is the moment with the least patience for a modifier.
+  //
+  // Deliberately not `Ctrl+Z`. There is no text being edited in the mailbox to
+  // confuse it with, and the one context where Ctrl+Z means something else —
+  // a draft — is a text-entry context, which binds no bare key and does not
+  // bind this one at all.
+  //
+  // Bound everywhere trash is, and answered only where there is something to
+  // take back: whether an offer stands is the account's question, not the
+  // table's, and it depends on the provider as well as on what just happened.
+  { id: "undo", keys: ["z"], contexts: MAIL,
+    group: "Acting", label: "Undo the last trash" },
 
   // Answering works from the list too, the way the row's own menu does: the
   // message is opened first and the draft waits for it. Binding these to the
