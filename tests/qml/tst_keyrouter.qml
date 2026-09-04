@@ -176,19 +176,24 @@ Item {
       compare(host.lastSequence, "Alt+0")
     }
 
-    // Selecting several messages is something done to a list. The reader is
-    // showing exactly one, so `x` there would mark a row nobody can see the
-    // marker on — and Shift+J would move a cursor that is not on screen.
+    // Selecting lives wherever the list does, which is both contexts. Scoped to
+    // "list" alone these were dead in the one arrangement most windows are in:
+    // `currentView` turns "reader" the moment a message opens, but only a
+    // narrow window replaces the list with the reader — at any normal width the
+    // list is still right there, and `x` on it did nothing at all.
     function test_selecting_is_a_list_key() {
       keyClick(Qt.Key_X)
       compare(host.lastId, "toggleMark")
     }
 
-    function test_selecting_is_dead_in_the_reader() {
+    function test_selecting_lives_wherever_the_list_does() {
       host.context = "reader"
       wait(20)
       keyClick(Qt.Key_X)
-      compare(host.lastId, "", "there is nothing to select beside one open message")
+      compare(host.lastId, "toggleMark",
+        "a wide window keeps the list on screen with a message open beside it")
+      keyClick(Qt.Key_J, Qt.ShiftModifier)
+      compare(host.lastId, "extendDown", "and the cursor it extends is live there too")
     }
 
     // The capitalised form of the movement keys, which is what it is. Bare j

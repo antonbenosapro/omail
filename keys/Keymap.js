@@ -49,20 +49,28 @@ var BINDINGS = [
   // `e` archives the set when there is one and the cursor's row when there is
   // not, which is the same key meaning the same thing at two sizes.
   //
-  // The list only. Selecting several messages is something done to a list, and
-  // the reader is showing exactly one — `x` there would mark a row nobody can
-  // see the marker on.
-  { id: "toggleMark", keys: ["x"], contexts: ["list"],
+  // Wherever the list is, which is both contexts — the same scope `j`, `k`,
+  // `e` and `d` carry, and for the same reason. `currentView` becomes "reader"
+  // the moment a message opens, but the window only *replaces* the list with
+  // the reader when it is narrow enough to have one pane; at any normal width
+  // both are on screen at once. Scoped to "list" these were dead exactly when
+  // the list was in front of the user with a message open beside it — `x` did
+  // nothing, no marker appeared, and the acting keys fell through to the
+  // cursor's single row.
+  //
+  // The cursor is what they act on and the cursor is live in both, so there is
+  // nothing here that needs the list to be the only thing on screen.
+  { id: "toggleMark", keys: ["x"], contexts: MAIL,
     group: "Selecting", label: "Select or deselect this message",
     hint: { list: "select" } },
   // Shift+J and Shift+K rather than Shift+Down: the pair reads as the
   // capitalised form of the movement keys, which is what it is.
-  { id: "extendDown", keys: ["Shift+J"], contexts: ["list"],
+  { id: "extendDown", keys: ["Shift+J"], contexts: MAIL,
     group: "Selecting", label: "Select and move down",
     hintKey: "Shift+J / K" },
-  { id: "extendUp", keys: ["Shift+K"], contexts: ["list"],
+  { id: "extendUp", keys: ["Shift+K"], contexts: MAIL,
     group: "Selecting", label: "Select and move up" },
-  { id: "markAll", keys: ["Ctrl+A"], contexts: ["list"],
+  { id: "markAll", keys: ["Ctrl+A"], contexts: MAIL,
     group: "Selecting", label: "Select everything loaded" },
 
   { id: "archive", keys: ["e"], contexts: MAIL,

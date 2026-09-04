@@ -87,10 +87,10 @@ used to exist, and they had.
 | `cursorUp` | `k`, `Up` | mail | Move up |
 | `open` | `Return`, `o` | mail | Open the selected message |
 | `backToList` | `u` | reader | Back to the list |
-| `toggleMark` | `x` | list | Select or deselect this message |
-| `extendDown` | `Shift+J` | list | Select and move down |
-| `extendUp` | `Shift+K` | list | Select and move up |
-| `markAll` | `Ctrl+A` | list | Select everything loaded |
+| `toggleMark` | `x` | mail | Select or deselect this message |
+| `extendDown` | `Shift+J` | mail | Select and move down |
+| `extendUp` | `Shift+K` | mail | Select and move up |
+| `markAll` | `Ctrl+A` | mail | Select everything loaded |
 | `archive` | `e` | mail | Archive |
 | `trash` | `d` | mail | Move to trash |
 | `star` | `s` | mail | Star or unstar |
@@ -228,6 +228,8 @@ cursor too and scrolling under the pointer fights the mouse.
 `cursorKey` is where the keyboard is, `selectedKey` is what the reader has open, and the selection is what the next action will act on. Three things that look alike and answer different questions: walking the list with `j` must not act on anything, and opening a message must not quietly enlist it in a bulk trash. Collapsing any pair of them would be the tempting simplification and each one is wrong.
 
 `x` toggles the row under the cursor, `Shift+J` and `Shift+K` mark both ends of a step, `Ctrl+A` takes everything loaded, and `Escape` clears — first, before it leaves anything else, because a set on screen is the nearest thing to put down. The acting keys need no rows of their own: `e`, `d`, `s`, `Shift+I` and `Shift+U` act on the set when there is one and on the cursor's row when there is not, which is one key meaning one thing at two sizes.
+
+The selection keys are live in the reader context as well as the list, which is not a nicety: `currentView` becomes `reader` the moment a message opens, but only a window narrow enough for a single pane actually replaces the list with it. At any normal width both are on screen, so a binding scoped to `list` alone was dead exactly when the user was looking at the list with a message open beside it — `x` did nothing, no marker appeared, and `e` and `d` fell through to the cursor's single row. They carry the same scope as `j`, `k`, `e` and `d` for the same reason.
 
 The set holds row keys, like the cursor, and it holds them for **one mailbox**. A selection spanning three merged accounts would be three separate batch requests with three ways to half-fail and no useful way to report the three together; marking a row from another mailbox replaces the set rather than joining it, and switching account drops it. That keeps a bulk action to one `batchModify`.
 

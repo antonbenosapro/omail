@@ -145,15 +145,17 @@ assert.strictEqual(keymap.isEnabled(byId("compose"), "list", true), false)
 
 // ----------------------------------------------------------- the selection
 
-// The list only. Selecting several messages is something done to a list, and
-// the reader is showing exactly one — `x` there would mark a row nobody can
-// see the marker on.
+// Wherever the list is, which is both mail contexts. Scoped to "list" alone
+// these were dead in the arrangement most windows are actually in: the context
+// turns "reader" the moment a message opens, but only a narrow window replaces
+// the list with the reader — at any normal width the list is still on screen,
+// and `x` on a row the user was looking at did nothing at all.
 ;["toggleMark", "extendDown", "extendUp", "markAll"].forEach(function (id) {
   const row = byId(id)
   assert.ok(row, id + " is a row in the table")
   assert.strictEqual(keymap.isEnabled(row, "list", false), true)
-  assert.strictEqual(keymap.isEnabled(row, "reader", false), false,
-    id + " has no meaning with one message open")
+  assert.strictEqual(keymap.isEnabled(row, "reader", false), true,
+    id + " stays live while the list is beside an open message")
   assert.strictEqual(keymap.isEnabled(row, "compose", false), false)
   assert.strictEqual(keymap.isEnabled(row, "list", true), false,
     "nothing selects mail behind the sheet")
