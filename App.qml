@@ -82,12 +82,19 @@ Item {
   // 0 means "proportional"; anything else is a width somebody dragged to.
   property real listWidth: 0
 
-  // The pane the keyboard is in is the pane that resizes. One key pair, two
-  // sizes: pressed in the reader it means "this message bigger", pressed in the
-  // list it means "these rows bigger" — which is what "bigger" means to
-  // somebody who is looking at one of them.
+  // Which pane resizes. One key pair, two sizes: with a message open it means
+  // "this message bigger", with the list alone it means "these rows bigger" —
+  // which is what "bigger" means to somebody looking at one of them.
+  //
+  // Not `keyContext === "list"`, which was the same question only in a window
+  // narrow enough for one pane. Wider than that, opening a message turns the
+  // context "reader" while the list is still on screen, so the list could be
+  // zoomed until the first message was opened and never again — Ctrl+- silently
+  // resized the message instead. The rule is in Model.js where a test can hold
+  // it.
   function zoomTargetIsList() {
-    return focusScope.keyContext === "list"
+    return Model.zoomTargetsList(focusScope.keyContext, root.compact,
+      !!service && service.selectedKey !== "")
   }
 
   function zoomBy(step) {

@@ -1185,6 +1185,26 @@ assert.strictEqual(model.undoRecordFor("trash", [], "inbox"), null,
 assert.strictEqual(model.undoRecordFor("trash", [null], "inbox"), null)
 assert.strictEqual(model.undoRecordFor("trash", null, "inbox"), null)
 
+// Which pane a zoom key resizes. `keyContext === "list"` was the same question
+// only in a one-pane window: wider than that, opening a message turns the
+// context "reader" while the list is still on screen, so the list could be
+// zoomed until the first message was opened and never again.
+{
+  // Two panes: what is open decides, because that is what the eye is on.
+  assert.strictEqual(model.zoomTargetsList("list", false, false), true,
+    "nothing open beside the list, so the list is what grows")
+  assert.strictEqual(model.zoomTargetsList("reader", false, true), false,
+    "a message is open, so the message is what grows")
+  assert.strictEqual(model.zoomTargetsList("reader", false, false), true,
+    "the context says reader but nothing is open — the list is all there is")
+
+  // One pane: the context is the whole answer, because only one is on screen.
+  assert.strictEqual(model.zoomTargetsList("list", true, false), true)
+  assert.strictEqual(model.zoomTargetsList("reader", true, true), false)
+  assert.strictEqual(model.zoomTargetsList("list", true, true), true,
+    "narrow and showing the list, whatever is open behind it")
+}
+
 // A menu opened on a marked row acts on the set; one opened on an unmarked row
 // acts on that row alone, the way a right-click names its own target in every
 // file manager. Without this the menu was the one path that could not see a

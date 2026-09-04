@@ -221,6 +221,24 @@ function undoRecordFor(action, entries, mailboxKey) {
   }
 }
 
+// Which pane a zoom key resizes.
+//
+// "The pane the keyboard is in" was `keyContext === "list"`, and that is only
+// the same question in a window narrow enough to show one pane at a time. At
+// any wider size opening a message turns the context "reader" while the list
+// is still on screen — so the list could be zoomed until the first message was
+// opened and never again, and Ctrl+- silently resized the message instead.
+//
+// The cursor is the tie-breaker rather than the context: in a two-pane window
+// the list is only being *read* when nothing is open in the reader beside it.
+// Once a message is open, the message is what the eye is on, so that is what
+// grows. A one-pane window has no ambiguity to resolve — whatever is on screen
+// is the target.
+function zoomTargetsList(context, compact, readerOpen) {
+  if (compact === true) return String(context) === "list"
+  return readerOpen !== true
+}
+
 // What a menu opened on a row should act on. Inside the selection means the
 // whole set — the row was one of the marked ones and acting on it alone would
 // ignore the marks the user can see. Outside it means that row by itself,
