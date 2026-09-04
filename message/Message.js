@@ -910,7 +910,7 @@ function mimeBoundary(given) {
   var stated = String(given || "").replace(/[^A-Za-z0-9'()+_,\-.\/:=?]/g, "")
   if (stated !== "") return stated.substring(0, 60)
   var random = Math.floor(Math.random() * 0x100000000).toString(36)
-  return "=_Omamail_" + (new Date()).getTime().toString(36) + "_" + random
+  return "=_Omail_" + (new Date()).getTime().toString(36) + "_" + random
 }
 
 // One method name, and nothing that could end the header early: this string
