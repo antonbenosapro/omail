@@ -104,6 +104,11 @@ Item {
   // IMAP the STORE rides on the FETCH's connection; Gmail has no way to fetch
   // and modify at once, so there it stays the separate call it always was.
   readonly property bool fetchMarksRead: Provider.can(providerId, "fetchMarksRead")
+  // Whether a trash here can be taken back. Off for IMAP, where a move reissues
+  // the message's UID and the transport is never told the new one — so the
+  // notice offers no Undo rather than one that would fail after the user had
+  // committed to it.
+  readonly property bool canUndo: Provider.can(providerId, "undo")
 
   // What the cache is keyed on. The page size is part of it: the same query at
   // a different size is a different result set, not a stale one.
@@ -265,6 +270,23 @@ Item {
   property string pendingAction: ""
   property bool sending: false
 
+  // What the notice beside `actionStatus` offers to take back, and null when it
+  // offers nothing. Its lifetime is the notice's: `noticeTimer` clears both
+  // together, so an Undo button cannot outlast the sentence explaining it and
+  // there is no stale offer left to resurrect a message minutes later.
+  //
+  // Built by `act` from the row as it still stood, because after the action the
+  // row is gone from the list and — on IMAP — the id that addressed it names a
+  // message in another folder.
+  property var undoRecord: null
+  // The reverse is in flight. The button says so rather than disappearing: a
+  // control that vanishes under the pointer reads as a misclick.
+  property bool undoBusy: false
+  readonly property string undoLabel: Model.undoActionLabel(undoRecord)
+  // Where the cursor belongs once the offer is taken: the first row it would
+  // put back, as a row key, because a bare id addresses no row in a merged list.
+  readonly property string undoKey: Model.undoCursorKey(undoRecord)
+
   // Notifications only start once the first successful load has established
   // what was already there.
   property var seenIds: ({})
@@ -348,10 +370,17 @@ Item {
   function clearNotice() {
     lastError = ""
     actionStatus = ""
+    undoRecord = null
   }
 
-  function note(text) {
+  // One call sets the sentence and whatever it offers, so the two cannot be set
+  // separately and then expire separately. A note with no record clears any
+  // record still standing: the newer thing the window has to say has replaced
+  // the older offer on the same line, and an Undo button beside a different
+  // sentence would be lying about what it undoes.
+  function note(text, record) {
     actionStatus = String(text || "")
+    undoRecord = record || null
     if (actionStatus !== "") noticeTimer.restart()
   }
 
@@ -1013,7 +1042,10 @@ Item {
   // Every action moves the list immediately and reconciles afterwards. Waiting
   // for Google before the row moves makes the panel feel broken on a slow
   // connection, and the failure path puts the row back.
-  function act(id, action, quiet) {
+  // `restoreFolder` is only ever set by `undo`, which is the one caller that
+  // knows where a message was before it was moved. Everything else acts on a
+  // row that is still where it belongs, so the id already says.
+  function act(id, action, quiet, restoreFolder) {
     var messageId = String(id || "")
     if (!ready || messageId === "") return
     var index = Model.indexById(messages, messageId, root.accountId)
@@ -1048,6 +1080,13 @@ Item {
       root.fail(error)
     }
 
+    // Taken from the row while it still had an index and a folder, which is the
+    // whole reason undo can be honest: after the call the row is out of the
+    // list, and on IMAP the message has moved to another folder under a UID
+    // this client is never told. A record rebuilt afterwards would be a guess.
+    var undo = quiet === true || !canUndo ? null
+      : Model.undoRecordFor(action, [Model.undoEntry(before, index)], mailboxKey)
+
     pendingAction = action
     var done = function(payload, error) {
       root.pendingAction = ""
@@ -1055,12 +1094,15 @@ Item {
         restore(error)
         return
       }
-      if (!quiet) root.note(root.actionLabel(action))
+      if (!quiet) root.note(root.actionLabel(action), undo)
       root.refreshCounts()
     }
 
     if (action === "trash") api.trashMessage(messageId, done)
-    else if (action === "untrash") api.untrashMessage(messageId, done)
+    // The folder it came from, not a guess. Untrashing moved every message to
+    // INBOX once, so undoing a trash from Archive put the message somewhere it
+    // had never been. Gmail names no folder and is handed none.
+    else if (action === "untrash") api.untrashMessage(messageId, done, restoreFolder)
     else {
       var change = Model.labelChangesFor(action)
       if (!change) {
@@ -1096,6 +1138,7 @@ Item {
     var survives = Model.survivesAction(mailboxKey, verb)
     var next = []
     var touched = 0
+    var undoEntries = []
     for (var i = 0; i < messages.length; i++) {
       var row = messages[i]
       if (wanted.indexOf(row.id) < 0) {
@@ -1103,6 +1146,11 @@ Item {
         continue
       }
       touched++
+      // The entry is built here, in the same pass and before the request, for
+      // the reason the single-message path builds its own early: afterwards the
+      // row is out of the list, and on IMAP it carries a UID this client is
+      // never told. Rebuilt later it would be a guess.
+      if (canUndo) undoEntries.push(Model.undoEntry(row, i))
       if (verb === "markRead" && row.unread) inboxUnread = Math.max(0, inboxUnread - 1)
       if (verb === "markUnread" && !row.unread) inboxUnread = inboxUnread + 1
       // The reader is showing one of these and it is about to leave the list.
@@ -1136,7 +1184,13 @@ Item {
         return
       }
       if (error) root.lastError = error
-      root.note(Model.bulkResultLabel(verb, moved, touched))
+      // The offer stands only when the whole set moved. After a partial the
+      // record names messages that never left, and restoring those would move
+      // mail the user never trashed — so the honest notice is the count alone,
+      // with no button beside it.
+      root.note(Model.bulkResultLabel(verb, moved, touched),
+        Model.offersUndoAfterBulk(moved, touched)
+          ? Model.undoRecordFor(verb, undoEntries, mailboxKey) : null)
       root.refreshCounts()
       // A partial failure leaves the list disagreeing with the server about
       // the messages that did not move, and only the server knows which.
@@ -1171,6 +1225,62 @@ Item {
       return
     }
     api.batchModify(wanted, change.add, change.remove, done)
+  }
+
+  // Takes back what the notice is offering to take back, and nothing else: the
+  // record is the only input, so there is no "last action" to reconstruct and
+  // no way for this to act on a message the offer was never about.
+  //
+  // Not routed through `act`, which acts on a row it can find in the list — and
+  // the whole point of an undo is that the row has already left. The shape is
+  // the same otherwise: put the list back first so the panel answers at once,
+  // then reconcile, and take the rows out again if the server refuses.
+  function undo() {
+    if (!ready || undoBusy) return
+    var record = undoRecord
+    if (!Model.isUndoable(record)) return
+    var entries = record.entries
+    var reverse = record.reverse
+
+    // The offer is spent the moment it is taken. Leaving it up would let a
+    // second press ask the server to restore what it is already restoring.
+    undoRecord = null
+    undoBusy = true
+    messages = Model.restoreEntries(messages, entries)
+
+    var remaining = entries.length
+    var firstError = ""
+    var settle = function() {
+      remaining--
+      if (remaining > 0) return
+      root.undoBusy = false
+      if (firstError !== "") {
+        // The server kept the message where it was put, so the list must not
+        // claim otherwise. The rows go back out and the reason is shown.
+        for (var i = 0; i < entries.length; i++) {
+          root.messages = Model.removeById(root.messages, entries[i].id,
+            root.accountId)
+        }
+        root.fail(firstError)
+        return
+      }
+      root.note(root.actionLabel(reverse))
+      root.refreshCounts()
+    }
+
+    for (var i = 0; i < entries.length; i++) {
+      (function(entry) {
+        var done = function(payload, error) {
+          if (error && firstError === "") firstError = String(error)
+          settle()
+        }
+        // The folder it came from travels with the entry, because the trash is
+        // what destroyed that fact: on IMAP the message is in Trash now, and
+        // nothing in its new address says where it had been.
+        if (reverse === "untrash") api.untrashMessage(entry.id, done, entry.folder)
+        else settle()
+      })(entries[i])
+    }
   }
 
   function actionLabel(action) {
@@ -1741,10 +1851,16 @@ Item {
     onTriggered: root.syncTick++
   }
 
+  // The offer expires with the sentence that made it. Once this has fired there
+  // is no undo left to press: an action taken back minutes after the fact is a
+  // message reappearing for no reason anybody can still connect to a keystroke.
   Timer {
     id: noticeTimer
     interval: 4000
-    onTriggered: root.actionStatus = ""
+    onTriggered: {
+      root.actionStatus = ""
+      root.undoRecord = null
+    }
   }
 
   // The unread count is one label read — cheap enough to keep running while

@@ -55,7 +55,14 @@ function capabilities(values) {
     // request afterwards. True where the protocol carries several commands on
     // one connection: opening an unread message is then two processes instead
     // of three, and the flag cannot be left unset by a failure between them.
-    fetchMarksRead: raw.fetchMarksRead === true
+    fetchMarksRead: raw.fetchMarksRead === true,
+    // A trashed message can be found again and put back. This is a question
+    // about identity, not about folders: undo has to address the same message
+    // after the move that it addressed before, and a provider that reissues
+    // the id on a move cannot be asked to. Off is the honest answer there —
+    // an Undo button that failed after the user had committed to it would be
+    // worse than no button at all, because they would have stopped looking.
+    undo: raw.undo === true
   }
 }
 

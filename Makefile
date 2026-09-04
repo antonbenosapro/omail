@@ -22,6 +22,7 @@ QML_FILES := Service.qml BarWidget.qml App.qml \
   components/KeyHints.qml \
 	components/MessageReader.qml \
 	components/ReaderNotice.qml \
+	components/StatusNotice.qml \
 	components/InviteCard.qml \
 	components/ReaderBlankSlate.qml \
 	components/ReaderSkeleton.qml \

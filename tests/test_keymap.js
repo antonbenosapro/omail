@@ -215,6 +215,42 @@ deepEqual(keymap.hintsFor("page").map(function (h) { return h.label }),
   ["back"],
   "a form's whole keyboard contract is leaving it")
 
+// ------------------------------------------------------------------- undo
+
+// The one safety net a destructive key has, so it lives where the destructive
+// key lives and nowhere else. Bare, because a mistake is the moment with the
+// least patience for a modifier.
+const undo = byId("undo")
+assert.strictEqual(keymap.displayFor(undo), "z")
+assert.strictEqual(keymap.isEnabled(undo, "list", false), true)
+assert.strictEqual(keymap.isEnabled(undo, "reader", false), true,
+  "trashing from the reader has to be as undoable as trashing from the list")
+assert.strictEqual(keymap.isEnabled(undo, "compose", false), false,
+  "z is a letter in a draft")
+assert.strictEqual(keymap.isEnabled(undo, "search", false), false)
+assert.strictEqual(keymap.isEnabled(undo, "page", false), false)
+assert.strictEqual(keymap.isEnabled(undo, "list", true), false,
+  "nothing acts on mail behind the sheet, including taking an action back")
+
+// The pair. Undo is the answer to trash, so they answer in the same places.
+const trash = byId("trash")
+deepEqual(undo.contexts, trash.contexts,
+  "undo is offered wherever trash is, or it is not an undo")
+assert.strictEqual(undo.group, trash.group,
+  "the sheet lists them together, under Acting")
+
+// Deliberately not Del. An accelerator for a destructive action is a liability
+// beside the arrow keys j and k are aliased to: cursoring down a list and
+// clipping Delete would trash the message under the cursor without a thought
+// having been involved. See the reasoning in docs/KEYS.md.
+keymap.BINDINGS.forEach(function (binding) {
+  binding.keys.forEach(function (key) {
+    assert.ok(key !== "Del" && key !== "Delete" && key !== "Backspace",
+      "no destructive action is bound to a key muscle memory fires without "
+        + "deliberation, and " + binding.id + " binds " + key)
+  })
+})
+
 // ------------------------------------------------- one entry per sequence
 
 // A Shortcut binds one sequence, so the router needs the table flattened.

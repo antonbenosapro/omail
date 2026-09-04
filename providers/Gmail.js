@@ -26,7 +26,10 @@ var CAPABILITIES = {
   batch: true,
   web: true,
   search: true,
-  send: true
+  send: true,
+  // A message id is stable across a trash, so untrash addresses the same
+  // message the trash did and restores the labels it carried.
+  undo: true
 }
 
 // Search queries rather than label ids: `is:unread` and `in:anywhere` have no

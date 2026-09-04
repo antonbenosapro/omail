@@ -143,6 +143,139 @@ function applyLabelChange(summary, action) {
   return next
 }
 
+// ------------------------------------------------------------------- undo
+//
+// `d` moves a message to trash with no question asked, and that is the right
+// trade: a confirmation interrupts every correct action to guard against the
+// rare wrong one, and people who are asked every time learn to dismiss the
+// question without reading it. Undo costs nothing until something goes wrong.
+//
+// What makes it possible is that the row is put back from a record taken
+// *before* the action, while the list still holds the message and its
+// neighbours. Reconstructing it afterwards would be guessing.
+
+// Which actions can be taken back, and by what. Only trash for now: archive
+// and star are already reversible by pressing the same key again from the
+// mailbox the message landed in, and marking read has no moment of regret in
+// it. A verb that is not here is one this offers no undo for, rather than one
+// it silently fails to undo.
+function reverseAction(action) {
+  if (String(action || "") === "trash") return "untrash"
+  return ""
+}
+
+// The folder an IMAP message was in, read off the id it was addressed by:
+// `5:INBOX` came from INBOX. Empty for a Gmail id, which names no folder
+// because Gmail has none — its labels come back with the untrash and nothing
+// here has to remember them.
+//
+// This is the state the issue is about. Untrashing used to move to INBOX
+// whatever folder the message came from, so undoing a trash from Archive put
+// the message somewhere it had never been. Where it came from is a fact the
+// trash destroyed, so it is recorded before the trash rather than guessed
+// after it.
+function undoSourceFolder(id) {
+  var text = String(id === undefined || id === null ? "" : id)
+  var match = text.match(/^\d+:([\s\S]*)$/)
+  return match ? match[1] : ""
+}
+
+// One entry per message: what to address, where it sat, what it was, and the
+// folder to put it back in. A list rather than a single message because a set
+// arriving later — a multi-select trash — is the same record with more rows in
+// it, and an undo that could only hold one would have to be rebuilt to take
+// two.
+function undoEntry(summary, index) {
+  if (!summary) return null
+  var id = String(summary.id || "")
+  if (id === "") return null
+  return {
+    id: id,
+    index: Math.max(0, Math.floor(Number(index) || 0)),
+    row: summary,
+    folder: undoSourceFolder(id)
+  }
+}
+
+// The record the notice offers, or null when there is nothing to offer. Null
+// rather than an empty record, so a caller cannot end up drawing an Undo
+// button for an action that has no reverse.
+function undoRecordFor(action, entries, mailboxKey) {
+  var reverse = reverseAction(action)
+  if (reverse === "") return null
+  var source = Array.isArray(entries) ? entries : []
+  var rows = []
+  for (var i = 0; i < source.length; i++) {
+    if (source[i]) rows.push(source[i])
+  }
+  if (rows.length === 0) return null
+  return {
+    action: String(action || ""),
+    reverse: reverse,
+    entries: rows,
+    mailboxKey: String(mailboxKey || "inbox")
+  }
+}
+
+// Whether a finished bulk action still has an honest offer behind it. Only a
+// set that moved in full does: after a partial the record names messages that
+// never left, and restoring those would move mail the user never trashed. The
+// count alone is the honest notice there, with no button beside it.
+function offersUndoAfterBulk(moved, touched) {
+  var did = Math.floor(Number(moved) || 0)
+  var asked = Math.floor(Number(touched) || 0)
+  return asked > 0 && did === asked
+}
+
+function isUndoable(record) {
+  return !!record && !!record.reverse
+    && Array.isArray(record.entries) && record.entries.length > 0
+}
+
+// What the status line says while the offer stands. The count is in the text
+// because "Moved to trash" beside an Undo button that would restore forty
+// messages says the wrong thing about what pressing it does.
+function undoNoticeText(record) {
+  if (!isUndoable(record)) return ""
+  var count = record.entries.length
+  if (count === 1) return "Moved to trash"
+  return pluralize(count, "message") + " moved to trash"
+}
+
+// One word, because the notice has room for one and the sentence beside it has
+// already said what would be undone.
+function undoActionLabel(record) {
+  return isUndoable(record) ? "Undo" : ""
+}
+
+// Where the cursor goes when the offer is taken: onto the row that came back,
+// which is where it was standing before the action moved it off. The first
+// entry, because a set restores as a block and the top of it is where the eye
+// was. Empty when there is nothing to restore, which leaves the cursor alone.
+function undoCursorKey(record) {
+  if (!isUndoable(record)) return ""
+  var first = record.entries[0]
+  return first && first.row ? rowKey(first.row) : ""
+}
+
+// Entries back into the list, each at the index it left from, lowest first so
+// an earlier insertion does not push a later one past its own place. Rows that
+// came back on their own — a refresh landed between the trash and the undo —
+// are left alone rather than duplicated.
+function restoreEntries(list, entries) {
+  var out = Array.isArray(list) ? list.slice() : []
+  var rows = Array.isArray(entries) ? entries.slice() : []
+  rows.sort(function(a, b) { return (a ? a.index : 0) - (b ? b.index : 0) })
+  for (var i = 0; i < rows.length; i++) {
+    var entry = rows[i]
+    if (!entry || !entry.row) continue
+    if (indexById(out, entry.id, entry.row.accountId) >= 0) continue
+    var at = Math.min(Math.max(0, entry.index), out.length)
+    out = out.slice(0, at).concat([entry.row], out.slice(at))
+  }
+  return out
+}
+
 // Skeleton rows replace only an empty list's first fetch. Loading another page
 // leaves useful messages in place and reports its progress at the list foot.
 // ------------------------------------------------------------- reading zoom

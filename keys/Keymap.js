@@ -78,6 +78,25 @@ var BINDINGS = [
   { id: "markUnread", keys: ["Shift+U"], contexts: MAIL,
     group: "Acting", label: "Mark unread" },
 
+  // Takes back the last trash, for as long as the notice offering it is up.
+  // `z` because it is the one bare letter a mail user already reaches for to
+  // undo — Gmail has bound it to exactly this for twenty years — and because
+  // it is the far corner of the keyboard rather than a neighbour of anything
+  // destructive: nothing here is one slip away from it. It earns a bare letter
+  // on the grounds the scarce ones are spent on: it answers a mistake, and a
+  // mistake is the moment with the least patience for a modifier.
+  //
+  // Deliberately not `Ctrl+Z`. There is no text being edited in the mailbox to
+  // confuse it with, and the one context where Ctrl+Z means something else —
+  // a draft — is a text-entry context, which binds no bare key and does not
+  // bind this one at all.
+  //
+  // Bound everywhere trash is, and answered only where there is something to
+  // take back: whether an offer stands is the account's question, not the
+  // table's, and it depends on the provider as well as on what just happened.
+  { id: "undo", keys: ["z"], contexts: MAIL,
+    group: "Acting", label: "Undo the last trash" },
+
   // Answering works from the list too, the way the row's own menu does: the
   // message is opened first and the draft waits for it. Binding these to the
   // reader only left the keyboard able to do less than a right-click.
