@@ -76,9 +76,15 @@ test-shell:
 # Found rather than hard-coded: the binary is at /usr/lib/qt6/bin on Arch and on
 # PATH as qmltestrunner6 on Debian and Ubuntu, and pinning one of those makes
 # the suite unrunnable on the other.
+# The Qt 6 runner, and only that one. On Arch the bare `qmltestrunner` on PATH
+# belongs to qt5-declarative, which cannot parse a versionless `import QtQuick`
+# — it exits 1 having printed nothing at all, so `make test` failed with no
+# output and nothing to search for. The explicit Qt 6 paths are tried before
+# the ambiguous name for that reason.
 QMLTESTRUNNER := $(shell command -v qmltestrunner6 2>/dev/null \
-	|| command -v qmltestrunner 2>/dev/null \
-	|| ls /usr/lib/qt6/bin/qmltestrunner 2>/dev/null)
+	|| ls /usr/lib/qt6/bin/qmltestrunner 2>/dev/null \
+	|| ls /usr/lib/x86_64-linux-gnu/qt6/bin/qmltestrunner 2>/dev/null \
+	|| command -v qmltestrunner 2>/dev/null)
 
 test-qml:
 	@test -n "$(QMLTESTRUNNER)" || { \
