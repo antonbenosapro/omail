@@ -258,7 +258,10 @@ different row under the still pointer, and the cursor snapped back to it — so
    is how the sheet shows a range instead of enumerating every key.
 2. Add a case to `runShortcut` in `App.qml`. The second argument is the
    sequence that fired, which is how a row of several keys tells them apart —
-   read it with `slotFor`, never by parsing the string.
+   read it with `slotFor`, never by parsing the string. `tests/test_keymap.js`
+   fails on a row with no case: the router builds a `Shortcut` for it either
+   way, so a forgotten case is a key that is swallowed and does nothing, which
+   is what `Ctrl+K` was.
 3. Add the row to the table above. The test will tell you if you forget.
 
 That is all. The shortcut sheet and the status hints pick it up on their own.

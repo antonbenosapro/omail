@@ -56,9 +56,15 @@ BarWidget {
     // which falls back to `urgent` — a warning colour for a window simply being
     // open. The glyph keeps its own colour and the open state is a fill behind
     // it, which is what a selected control looks like everywhere else here.
+    // Disconnected is the foreground mixed toward the ground rather than
+    // Qt.darker, for the reason App.qml's `dim` gives: on a light theme,
+    // darkening an almost-black glyph makes it heavier, not quieter.
     readonly property color glyphColor: connected
       ? root.foreground
-      : Qt.darker(root.foreground, 1.55)
+      : Qt.rgba(
+          root.foreground.r * 0.45 + Color.background.r * 0.55,
+          root.foreground.g * 0.45 + Color.background.g * 0.55,
+          root.foreground.b * 0.45 + Color.background.b * 0.55, 1)
     readonly property bool hasUnread: !!root.gmail && root.gmail.unreadTotal > 0
 
     // The bar's own `active` is left alone on purpose: it exists to recolour a

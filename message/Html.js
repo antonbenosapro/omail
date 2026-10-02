@@ -901,17 +901,26 @@ function cleanAttributes(node, keepColors, declarations) {
   var attrs = node.attrs
   var kept = attrs
   var dropped = false
+  // The first of a repeated attribute is the one the image policy judged, and
+  // Qt may honour the last, so only the first survives. `source` is not an
+  // attribute of img at all, but a loader that reads it as one would fetch what
+  // `src` was never asked about.
+  var seen = {}
+  var isImage = node.name === "img"
 
   for (var i = 0; i < attrs.length; i++) {
     var attr = attrs[i]
     var name = attr.name
     var drop = false
-    if (!keepColors && COLOUR_ATTRIBUTES[name] === true) drop = true
+    if (seen["$" + name] === true) drop = true
+    else if (isImage && name === "source") drop = true
+    else if (!keepColors && COLOUR_ATTRIBUTES[name] === true) drop = true
     // Event handlers, which Qt ignores but which have no business surviving a
     // trip through a mail client.
     else if (name.charCodeAt(0) === 111 && HANDLER_ATTRIBUTE.test(name)) drop = true
     else if (name === "href" && !safeHref(attr.value)) drop = true
     else if (uncentre && name === "align" && CENTRED.test(String(attr.value))) drop = true
+    seen["$" + name] = true
 
     if (drop && !dropped) {
       dropped = true
@@ -1219,13 +1228,74 @@ var MIN_IMAGE_WIDTH = 40
 // Which of the three fittings to apply, and the width to fit to. Kept as one
 // object because they are asked for together and because the answer for an
 // element is one pass over its attributes however many of them are on.
-function fitting(heights, sides, widths, available) {
+function fitting(heights, sides, widths, available, zoom) {
+  var scale = Number(zoom)
+  if (!isFinite(scale) || scale <= 0) scale = 1
   return {
     heights: heights === true,
     sides: sides === true,
     widths: widths === true,
-    limit: Math.max(MIN_IMAGE_WIDTH, Math.floor(Number(available) || 0))
+    limit: Math.max(MIN_IMAGE_WIDTH, Math.floor(Number(available) || 0)),
+    zoom: scale,
+    scaled: scale !== 1
   }
+}
+
+// ------------------------------------------------------------ zooming text
+//
+// The reader's zoom sets the document's default size, and everything relative
+// to it — em, %, <font size>, unstyled text — follows. Most mail is not
+// relative, though: it is table-and-inline-style HTML with every paragraph in
+// px or pt, and those ignore the default outright, so at 2x the message stayed
+// exactly where it was and only the header grew. Absolute sizes are therefore
+// multiplied here, on the way out, like the widths are.
+//
+// The floor is `Model.zoomedFontSize`'s: below 7px text is texture, so zooming
+// out stops there. It never lifts a size above the sender's own, though — a
+// 6px footnote zoomed out stays 6px rather than growing as the zoom shrinks.
+var ZOOM_FONT_MIN = 7
+var PT_TO_PX = 4 / 3
+var ABSOLUTE_LENGTH = /^(\d*\.?\d+)(px|pt)$/i
+// The size inside a `font` shorthand: the one length followed by a space, a
+// "/line-height" or the end. A weight is a bare number, never one with a unit.
+var SHORTHAND_SIZE = /(^|\s)(\d*\.?\d+)(px|pt)(?=\s|\/|$)/i
+var ZOOMABLE_DECLARATION = /font|line-height/i
+
+function absolutePixels(text) {
+  var match = String(text).match(ABSOLUTE_LENGTH)
+  if (!match) return -1
+  var size = Number(match[1])
+  return match[2].toLowerCase() === "pt" ? size * PT_TO_PX : size
+}
+
+function zoomedPixels(pixels, zoom, floor) {
+  var scaled = Math.round(pixels * zoom)
+  if (!floor) return scaled + "px"
+  return Math.max(Math.min(ZOOM_FONT_MIN, Math.round(pixels)), scaled) + "px"
+}
+
+// A size with a trailing !important keeps it: the sender's priority is about
+// their own cascade, which the zoom is not part of.
+function zoomLength(value, zoom, floor) {
+  var parts = String(value).match(/^(.*?)(\s*!important)?$/i)
+  var pixels = absolutePixels(parts[1])
+  if (pixels < 0) return value
+  return zoomedPixels(pixels, zoom, floor) + (parts[2] || "")
+}
+
+function zoomDeclaration(declaration, zoom) {
+  var name = declaration.name
+  var value = declaration.value
+  var zoomed = value
+  if (name === "font-size") zoomed = zoomLength(value, zoom, true)
+  else if (name === "line-height") zoomed = zoomLength(value, zoom, false)
+  else if (name === "font") {
+    zoomed = value.replace(SHORTHAND_SIZE, function(all, lead, size, unit) {
+      var pixels = Number(size) * (unit.toLowerCase() === "pt" ? PT_TO_PX : 1)
+      return lead + zoomedPixels(pixels, zoom, true)
+    })
+  }
+  return zoomed === value ? declaration : { name: name, value: zoomed }
 }
 
 // Senders lay their mail out for a wide window, and at a narrow one their
@@ -1265,6 +1335,7 @@ function fitDeclaration(declaration, node, fit) {
     // not read. Wrapping is the half of that promise the reader can keep.
     if (name === "white-space" && /^nowrap\b/i.test(declaration.value)) return null
   }
+  if (fit.scaled) return zoomDeclaration(declaration, fit.zoom)
   return declaration
 }
 
@@ -1284,13 +1355,16 @@ function fitAttributes(node, fit) {
   var isImage = fit.heights && node.name === "img"
   var isSized = fit.widths && SIZED_ELEMENTS[node.name] === true
   if (!isImage && !isSized && !fit.sides) {
-    if (!fit.widths) return attrs
-    // Anything can carry white-space:nowrap, so the fast path out of here has
-    // to ask every element about it — and asks with a substring test, because
-    // splitting the declarations of a document that has none is the whole cost
-    // of a relayout for nothing.
+    if (!fit.widths && !fit.scaled) return attrs
+    // Anything can carry white-space:nowrap or a font size, so the fast path
+    // out of here has to ask every element about them — and asks with a
+    // substring test, because splitting the declarations of a document that has
+    // none is the whole cost of a relayout for nothing.
     var carried = attributeOf(node, "style")
-    if (carried === null || String(carried.value).indexOf("nowrap") < 0) return attrs
+    if (carried === null) return attrs
+    var carriedText = String(carried.value)
+    if (!(fit.widths && carriedText.indexOf("nowrap") >= 0)
+      && !(fit.scaled && ZOOMABLE_DECLARATION.test(carriedText))) return attrs
   }
 
   var out = null
@@ -1306,7 +1380,8 @@ function fitAttributes(node, fit) {
     else if (isSized && attr.name === "width" && /^\d+$/.test(String(attr.value))
       && Number(attr.value) > fit.limit) replacement = null
     else if (attr.name === "style" && attr.value !== null && attr.value !== undefined
-      && (fit.sides || FITTABLE_DECLARATION.test(String(attr.value)))) {
+      && (fit.sides || FITTABLE_DECLARATION.test(String(attr.value))
+        || (fit.scaled && ZOOMABLE_DECLARATION.test(String(attr.value))))) {
       var declarations = splitDeclarations(attr.value)
       var kept = []
       var changed = false
@@ -1332,7 +1407,9 @@ function fitAttributes(node, fit) {
 }
 
 // The reader rebuilds its document whenever the window width or the zoom
-// changes, and the body it rebuilds from has not changed at all — so it hands
+// changes — the zoom is in the document itself, as the sender's absolute font
+// sizes multiplied out — and the body it rebuilds from has not changed at all,
+// so it hands
 // over the document `sanitize` already built rather than the string that was
 // written from it, and a whole drag costs no parse at all. A string is still
 // accepted, because a caller that only has one should not have to care.
@@ -1354,7 +1431,9 @@ function relaxFixedWidths(html, available) {
 }
 
 // Wraps the sanitised body in a document. `colors` styles the parts the sender
-// did not: the ground, the default text, links and quoted replies.
+// did not: the ground, the default text, links and quoted replies. Its `zoom`
+// is the reader's, and scales the sizes the sender fixed in px or pt — the ones
+// the reader's own font size cannot reach.
 function documentFor(bodyHtml, colors) {
   var palette = colors || {}
   var foreground = String(palette.foreground || "")
@@ -1373,7 +1452,8 @@ function documentFor(bodyHtml, colors) {
   // wide one reads better with the sender's own spacing. A width the window
   // cannot hold goes at every width: there is no horizontal scroll here, so
   // what overflows is not read at all.
-  var fit = fitting(true, palette.compact === true, maxImage >= MIN_IMAGE_WIDTH, maxImage)
+  var fit = fitting(true, palette.compact === true, maxImage >= MIN_IMAGE_WIDTH, maxImage,
+    palette.zoom)
 
   return "<html><head><style type=\"text/css\">"
     + "body{color:" + foreground + ";background-color:" + background + ";}"

@@ -183,7 +183,7 @@ assert.strictEqual(api.sendAsFor(null, "me@example.com"), null)
 {
   const headers = api.metadataQuery().metadataHeaders
   assert.strictEqual(api.metadataQuery().format, "metadata")
-  for (const needed of ["Reply-To", "Message-ID", "Cc"])
+  for (const needed of ["Reply-To", "Message-ID", "References", "Cc"])
     assert.ok(headers.indexOf(needed) >= 0,
       needed + " has to survive a metadata fetch: the reader replies out of it")
   for (const row of ["From", "To", "Subject", "Date", "List-Unsubscribe"])
@@ -196,5 +196,58 @@ assert.strictEqual(api.webMessageUrl("18f3a", 0), "https://mail.google.com/mail/
 assert.strictEqual(api.webMessageUrl("18f3a", 2), "https://mail.google.com/mail/u/2/#all/18f3a")
 assert.strictEqual(api.webMessageUrl("18f3a", -1), "https://mail.google.com/mail/u/0/#all/18f3a")
 assert.strictEqual(api.webSearchUrl("from:jane", 0), "https://mail.google.com/mail/u/0/#search/from%3Ajane")
+// The address names the mailbox whatever order the browser signed in; an index
+// only ever named the first account's.
+assert.strictEqual(api.webMessageUrl("18f3a", "work@example.com"),
+  "https://mail.google.com/mail/u/work@example.com/#all/18f3a")
+assert.strictEqual(api.webSearchUrl("is:unread", "work+x@example.com"),
+  "https://mail.google.com/mail/u/work%2Bx@example.com/#search/is%3Aunread")
+assert.strictEqual(api.webMessageUrl("18f3a", ""), "https://mail.google.com/mail/u/0/#all/18f3a")
+assert.ok(api.webMessageUrl("1", "a@b/../c").indexOf("/u/a@b%2F..%2Fc/") > 0,
+  "an address cannot add path segments of its own")
+
+// ----------------------------------------------------------------- send
+
+// Gmail refuses a field its message resource does not have, so the SMTP
+// envelope is not sent to it.
+deepEqual(api.sendBody({ raw: "abc", threadId: "t1", envelope: { recipients: ["a@b.c"] } }),
+  { raw: "abc", threadId: "t1" })
+deepEqual(api.sendBody({ raw: "abc", envelope: {} }), { raw: "abc" })
+
+// ------------------------------------------------------------------ drafts
+
+assert.strictEqual(api.safeApiUrl(api.draftsPath()), "https://gmail.googleapis.com/gmail/v1/users/me/drafts")
+assert.strictEqual(api.draftPath("r-12/x"), "/users/me/drafts/r-12%2Fx", "a draft id is one path segment")
+assert.strictEqual(api.draftSendPath(), "/users/me/drafts/send")
+
+// The resource carries only what Gmail knows: the token the IMAP client needs
+// rides on the same payload, and an unknown field is a 400.
+deepEqual(api.draftResource("", { raw: "abc", threadId: "t1", token: "omail-x" }),
+  { message: { raw: "abc", threadId: "t1" } })
+deepEqual(api.draftResource("r-1", { raw: "abc", token: "omail-x" }),
+  { message: { raw: "abc" }, id: "r-1" })
+deepEqual(api.draftResource(null, null), { message: { raw: "" } })
+
+deepEqual(api.parseDraft({ id: "r-1", message: { id: "m-1", threadId: "t-1", labelIds: ["DRAFT"] } }),
+  { id: "r-1", messageId: "m-1", threadId: "t-1" })
+deepEqual(api.parseDraft(null), { id: "", messageId: "", threadId: "" })
+
+const draftList = api.parseDraftList({
+  drafts: [
+    { id: "r-1", message: { id: "m-1", threadId: "t-1" } },
+    { message: { id: "orphan" } },
+    { id: "r-2", message: { id: "m-2", threadId: "t-2" } }
+  ],
+  nextPageToken: "p2"
+})
+assert.strictEqual(draftList.drafts.length, 2, "an entry with no draft id is skipped")
+assert.strictEqual(draftList.nextPageToken, "p2")
+// A row in the list is a message; the draft holding it is what an update and
+// a send address.
+assert.strictEqual(api.draftIdForMessage(draftList.drafts, "m-2"), "r-2")
+assert.strictEqual(api.draftIdForMessage(draftList.drafts, "m-9"), "")
+assert.strictEqual(api.draftIdForMessage(draftList.drafts, ""), "")
+deepEqual(api.parseDraftList({}), { drafts: [], nextPageToken: "" })
+deepEqual(api.draftListQuery("p2"), { maxResults: 500, pageToken: "p2" })
 
 console.log("test_gmail_api.js ok")

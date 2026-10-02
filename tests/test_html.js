@@ -674,6 +674,42 @@ assert.ok(bare.indexOf("x</body>") > 0)
   assert.ok(relaxed.indexOf("width:640px") < 0, "declared widths too")
 }
 
+// ------------------------------------------------------------ zooming text
+//
+// The reader's zoom sets the document's default size, which reaches relative
+// text and nothing else. Most mail fixes every paragraph in px or pt, so those
+// are multiplied out in the document itself.
+{
+  var sized = '<p style="font-size:14px">a</p><span style="font-size:12pt;color:red">b</span>'
+    + '<td style="font:bold 10px/14px Arial">c</td><div style="line-height:20px">d</div>'
+    + '<em style="font-size:1.2em">e</em><b style="font-size:11px !important">f</b>'
+  var big = html.documentFor(sized, { maxImageWidth: 380, zoom: 2 })
+  assert.ok(big.indexOf("font-size:28px") > 0, "px is multiplied")
+  assert.ok(big.indexOf("font-size:32px;color:red") > 0, "pt is converted and multiplied")
+  assert.ok(big.indexOf("font:bold 20px/14px Arial") > 0, "the shorthand's size too")
+  assert.ok(big.indexOf("line-height:40px") > 0, "a fixed line height grows with its text")
+  assert.ok(big.indexOf("font-size:1.2em") > 0, "relative sizes already follow the default")
+  assert.ok(big.indexOf("font-size:22px !important") > 0, "and priority survives")
+
+  var unzoomed = html.documentFor(sized, { maxImageWidth: 380 })
+  assert.ok(unzoomed.indexOf("font-size:14px") > 0 && unzoomed.indexOf("font-size:12pt") > 0,
+    "at 1.0 nothing is rewritten")
+  assert.strictEqual(html.documentFor(sized, { maxImageWidth: 380, zoom: 1 }), unzoomed)
+
+  // The floor is Model.zoomedFontSize's 7px, but it never lifts text above the
+  // sender's own size: zooming out must not make a footnote grow.
+  var small = html.documentFor('<p style="font-size:10px">a</p><i style="font-size:6px">b</i>',
+    { zoom: 0.6 })
+  assert.ok(small.indexOf("font-size:7px") > 0, "10px at 0.6 stops at the floor")
+  assert.ok(small.indexOf("font-size:6px") > 0, "6px stays 6px")
+
+  // Zooming writes the tree out rather than editing it, like every fitting.
+  var built = html.sanitize(sized, {})
+  html.documentFor(built.document, { zoom: 2.5 })
+  assert.ok(html.documentFor(built.document, {}).indexOf("font-size:14px") > 0,
+    "a zoomed pass leaves no mark on the next one")
+}
+
 
 // ------------------------------------------------------------ hidden text
 //
@@ -697,6 +733,23 @@ assert.ok(bare.indexOf("x</body>") > 0)
 
   assert.ok(html.sanitize('<div style="display:none">SECRET</div><p>real</p>').html.indexOf("SECRET") < 0,
     "and the sanitizer applies it")
+}
+
+// A repeated attribute is read first by the policy and possibly last by Qt, so
+// only the first may survive; `source` is dropped from images outright.
+{
+  const dup = html.sanitize('<img src="cid:a" src="https://t.example/x.png" width="40">',
+    { allowRemoteImages: true }).html
+  assert.ok(dup.indexOf("t.example") < 0, "second src is gone: " + dup)
+  assert.ok(dup.indexOf("cid:a") >= 0, "first src is kept")
+  const src = html.sanitize('<img src="cid:a" source="https://t.example/x.png">',
+    { allowRemoteImages: true }).html
+  assert.ok(src.indexOf("t.example") < 0, "source is gone: " + src)
+  const href = html.sanitize('<a href="javascript:x" href="https://ok.example/">go</a>').html
+  assert.ok(href.indexOf("ok.example") < 0, "a dropped first href is not replaced by a later one")
+  // The first src is what is judged, so a remote first src is still blocked.
+  const blocked = html.sanitize('<img src="https://t.example/x.png" src="cid:a">').html
+  assert.ok(blocked.indexOf("t.example") < 0 && blocked.indexOf("<img") < 0, "remote first src is blocked")
 }
 
 console.log("test_html.js ok")

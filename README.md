@@ -216,7 +216,7 @@ and the client itself are console-only; there is no CLI for them.
 | `/` or `Ctrl+K` | Search |
 | `Alt+1` … `Alt+0` | The mailbox with that number on the rail |
 | `Alt+A` | Switch account |
-| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom the pane you are in, or reset it. The list and the open message keep their own sizes; the focused one is what changes |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom what you are reading, or reset it: the open message when there is one, the list when there is not (in a single-column window, whichever is on screen). The two keep their own sizes. `Ctrl`+scroll over the message zooms it too |
 | `F5` | Check for mail |
 | `Ctrl+?` | Every shortcut |
 

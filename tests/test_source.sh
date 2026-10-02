@@ -220,7 +220,7 @@ for page in components/SetupPage.qml components/ImapSetupPage.qml; do
   grep -q 'required property color dangerColor' "$page" \
     || fail "$page must receive the semantic danger colour"
   awk '
-    /text: "Remove account"/ { in_remove = 1 }
+    /text: "Remove account\.\.\."/ { in_remove = 1 }
     in_remove && /foreground: root\.dangerColor/ { found = 1 }
     in_remove && /^[[:space:]]*\}/ { exit !found }
     END { if (!in_remove) exit 1; exit !found }
@@ -353,14 +353,14 @@ awk '
 # action row instead of falling onto a detached row beneath it.
 awk '
   /text: "Sign out"/ { saw_sign_out = 1 }
-  saw_sign_out && /text: "Remove account"/ { saw_remove_after = 1 }
+  saw_sign_out && /text: "Remove account\.\.\."/ { saw_remove_after = 1 }
   saw_remove_after && /bordered: false/ { ghost = 1 }
   END { exit !(saw_sign_out && saw_remove_after && ghost) }
 ' components/ImapSetupPage.qml \
   || fail "IMAP Remove account must be the trailing danger ghost beside Sign out"
 awk '
   /^  Button \{/ { top_button = 1; next }
-  top_button && /text: "Remove account"/ { exit 1 }
+  top_button && /text: "Remove account\.\.\."/ { exit 1 }
   top_button && /^  \}/ { top_button = 0 }
 ' components/ImapSetupPage.qml \
   || fail "IMAP Remove account must not be detached from the account action row"

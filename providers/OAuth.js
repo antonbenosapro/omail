@@ -120,6 +120,18 @@ function parseCallbackRequestLine(line, expectedPath) {
   return { ok: true, code: values.code, state: values.state || "" }
 }
 
+// What the listener does with a request line. Only a request carrying this
+// sign-in's own `state` is the browser coming back from Google, so anything
+// else is noise on a loopback port — a scan, a stale tab from an earlier
+// attempt, a page trying to cancel the sign-in — and is ignored without ending
+// it. A matching state is acted on whether it carries a code or an error.
+function callbackVerdict(line, expectedPath, expectedState) {
+  var callback = parseCallbackRequestLine(line, expectedPath)
+  var wanted = String(expectedState || "")
+  if (wanted === "" || callback.state !== wanted) return { action: "ignore", callback: callback }
+  return { action: callback.ok ? "accept" : "fail", callback: callback }
+}
+
 function parsePkceOutput(line) {
   var parts = String(line || "").trim().split("\t")
   if (parts.length !== 3) return { ok: false, error: "Could not create PKCE parameters" }
@@ -149,6 +161,9 @@ function redact(text) {
     .replace(/\bGOCSPX-[A-Za-z0-9._-]+/g, "[redacted]")
 }
 
+// What a token call that failed without saying why reads as.
+var TOKEN_FAILURE_FALLBACK = "Could not complete Google sign-in. Please try again"
+
 function tokenErrorMessage(payload, fallback) {
   if (!payload) return fallback
   var code = String(payload.error || "")
@@ -172,8 +187,7 @@ function parseTokenResponse(status, text, previousRefreshToken) {
     return {
       ok: false,
       invalidGrant: !!payload && payload.error === "invalid_grant",
-      error: tokenErrorMessage(payload,
-        "Could not complete Google sign-in. Please try again")
+      error: tokenErrorMessage(payload, TOKEN_FAILURE_FALLBACK)
     }
   }
   return {
@@ -183,6 +197,34 @@ function parseTokenResponse(status, text, previousRefreshToken) {
     expiresIn: Math.max(60, Number(payload.expires_in) || 3600),
     scope: String(payload.scope || "")
   }
+}
+
+// What a failed refresh means for the session. Only a grant Google has
+// revoked or expired is gone for good; everything else — no network, a 5xx, a
+// rate limit, a captive portal answering with HTML — says nothing about the
+// grant, and treating it as a sign-out is what left a laptop that woke up
+// offline signed out of Gmail until the shell restarted.
+//
+//   "signed_out"  the stored grant is dead: drop it and offer "Sign in"
+//   "retry"       keep the grant and the session; the next request tries again
+//   "ok"          not a failure at all
+var REFRESH_OK = "ok"
+var REFRESH_SIGNED_OUT = "signed_out"
+var REFRESH_RETRY = "retry"
+
+function refreshOutcome(result) {
+  if (!result || result.ok) return REFRESH_OK
+  return result.invalidGrant ? REFRESH_SIGNED_OUT : REFRESH_RETRY
+}
+
+// The sentence for a refresh that will be tried again. Google's own words when
+// it gave some, because "invalid_client" is worth reading; otherwise a plain
+// statement that nothing is lost, since a status-0 failure has no words at all.
+function refreshRetryMessage(result) {
+  var error = String((result && result.error) || "")
+  if (error === "" || error === TOKEN_FAILURE_FALLBACK)
+    return "Could not reach Google to refresh the session. Retrying on the next sync"
+  return redact(error)
 }
 
 // A grant is only useful if it came back with everything the panel needs. A

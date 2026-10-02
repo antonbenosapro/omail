@@ -4,6 +4,7 @@ import QtQuick.Controls as QQC
 import qs.Commons
 import qs.Ui
 import "../message/Message.js" as Mail
+import "../message/Draft.js" as Draft
 
 // Composing takes over the whole content area of the one window rather than
 // opening a second one: Omarchy's panel mechanism would give an extra window
@@ -34,10 +35,48 @@ Item {
   property string mode: "new"
   property string threadId: ""
   property string inReplyTo: ""
+  // The parent's References, which the reply extends with the parent itself.
+  property string references: ""
   property bool ccVisible: false
   property string fromEmail: ""
   property var replyRecipients: []
   property bool fromWasChosen: false
+
+  // ----------------------------------------------------------- the draft
+  //
+  // What the server holds of this compose, and whether the window has moved
+  // on from it. `draftId` is the copy a save replaces and a send removes —
+  // Gmail's draft id, or the IMAP message id of the copy last stored.
+  // `draftAccount` is the mailbox it lives in, held rather than followed: the
+  // compose's account is whichever is on screen once this closes, and a save
+  // landing after that must still reach the right one.
+  property string draftId: ""
+  property string draftToken: ""
+  property string draftAccount: ""
+  // The fields as they stood when the compose was filled in or last saved.
+  // Dirty is "differs from this", not "has text in it": a reply opens with a
+  // quote nobody has written yet.
+  property string baseline: ""
+  property bool draftSaving: false
+  // Close once the save in flight lands — Escape on a compose with something
+  // in it keeps it rather than throwing it away.
+  property bool closeAfterSave: false
+  // Send was pressed while a save was in the air. The send waits for it and
+  // goes out as the copy that save stored: sent at once, it would name the
+  // copy before, and the one landing after would be a draft of a message
+  // already gone.
+  property bool sendAfterSave: false
+  property bool confirmingDiscard: false
+  property string draftNotice: ""
+  // Bumped whenever the compose is emptied, so a save answering for a compose
+  // that has since been sent or discarded can tell it is too late.
+  property int session: 0
+
+  readonly property string currentSnapshot: snapshotNow()
+  readonly property bool dirty: opened && currentSnapshot !== baseline
+  readonly property bool canDraft: !!service && service.canDraft
+  readonly property bool sendingNow: sendAfterSave
+    || (!!service && (service.composeSending || service.sending))
 
   readonly property var fromAliases: {
     if (!root.service || !Array.isArray(root.service.sendAsAliases)) return []
@@ -48,10 +87,21 @@ Item {
     if (mode === "reply") return "Reply"
     if (mode === "replyAll") return "Reply all"
     if (mode === "forward") return "Forward"
+    if (mode === "draft") return "Draft"
     return "New message"
   }
 
   function reset() {
+    autosave.stop()
+    session++
+    draftId = ""
+    draftToken = ""
+    draftAccount = ""
+    draftSaving = false
+    closeAfterSave = false
+    sendAfterSave = false
+    confirmingDiscard = false
+    draftNotice = ""
     fromMenu.close()
     toField.text = ""
     ccField.text = ""
@@ -60,6 +110,7 @@ Item {
     mode = "new"
     threadId = ""
     inReplyTo = ""
+    references = ""
     ccVisible = false
     fromEmail = ""
     replyRecipients = []
@@ -91,20 +142,14 @@ Item {
     fromMenu.y = y
   }
 
-  // Everyone on the original except this mailbox: replying to yourself is
-  // never what reply-all was for. "This mailbox" is the one that received the
-  // message, not the one on screen — stripping the wrong address left the
-  // replier on their own reply-all and dropped somebody who belonged on it.
+  // Everyone on the original, To and Cc, except whoever the reply already goes
+  // To and this mailbox under any of its addresses. "This mailbox" is the one
+  // that received the message, not the one on screen — stripping the wrong
+  // address left the replier on their own reply-all and dropped somebody who
+  // belonged on it.
   function otherRecipients(summary) {
-    if (!summary) return ""
-    var mine = String(root.service ? root.service.composeEmail : "").toLowerCase()
-    var list = Array.isArray(summary.to) ? summary.to : []
-    var kept = []
-    for (var i = 0; i < list.length; i++) {
-      if (String(list[i].email || "").toLowerCase() === mine) continue
-      kept.push(list[i].email)
-    }
-    return kept.join(", ")
+    var own = [root.service ? root.service.composeEmail : ""].concat(root.fromAliases)
+    return Mail.replyAllCc(summary, own).join(", ")
   }
 
   function begin(nextMode, summary, bodyText) {
@@ -117,6 +162,7 @@ Item {
         ? summary.replyTo.email : summary.from.email
       threadId = summary.threadId
       inReplyTo = summary.messageId
+      references = String(summary.references || "")
       // Cc as well as To: an alias is just as often the address a thread
       // copied you on as the one it was sent to, and answering from the
       // account's default instead is how a thread ends up split in two.
@@ -126,7 +172,7 @@ Item {
       }
 
       if (mode === "forward") {
-        subjectField.text = "Fwd: " + summary.subject
+        subjectField.text = Mail.forwardSubject(summary.subject)
       } else {
         toField.text = replyTo
         subjectField.text = Mail.replySubject(summary.subject)
@@ -139,16 +185,69 @@ Item {
     }
 
     selectPreferredFrom()
+    startDraft("")
 
     // Focus is not placed here. Opening this changes the window's key context,
     // and the context is what moves the keyboard — one mechanism, so the two
     // cannot disagree about where the typing goes.
   }
 
+  // Read straight off the fields rather than through the binding above, so a
+  // value taken just after the fields were filled is the filled one.
+  function snapshotNow() {
+    return Draft.snapshot({
+      from: root.fromEmail, to: toField.text, cc: ccField.text,
+      subject: subjectField.text, body: bodyEdit.text
+    })
+  }
+
+  // The draft this compose saves to, and the state it is compared against.
+  // Called once the fields are filled, so an untouched compose is clean.
+  function startDraft(token) {
+    draftToken = Draft.token(token) || Draft.newToken(Date.now(), Math.random())
+    draftAccount = root.service ? root.service.composeAccountId : ""
+    baseline = snapshotNow()
+  }
+
+  // A saved draft, back in the window. Its threading headers come with it, so
+  // a reply begun yesterday still threads under the message it answers.
+  function beginDraft(fields) {
+    var values = fields || ({})
+    reset()
+    mode = "draft"
+    opened = true
+    toField.text = String(values.to || "")
+    ccField.text = String(values.cc || "")
+    ccVisible = ccField.text !== ""
+    subjectField.text = String(values.subject || "")
+    bodyEdit.text = String(values.body || "")
+    threadId = String(values.threadId || "")
+    inReplyTo = String(values.inReplyTo || "")
+    // Declared with the rest of the threading state; a draft that answered a
+    // deep thread keeps the whole chain rather than only its parent.
+    references = String(values.references || "")
+    var stored = String(values.from || "")
+    // The address it was written from, when this account may still send as
+    // it; otherwise the same choice a new message would make.
+    if (stored !== "" && root.fromAliases.some(function(alias) {
+          return String(alias.email || "").toLowerCase() === stored.toLowerCase()
+        })) {
+      fromEmail = stored
+      fromWasChosen = true
+    } else {
+      selectPreferredFrom()
+    }
+    startDraft(values.token)
+    draftId = String(values.draftId || "")
+  }
+
   // Where the keyboard goes when composing becomes the context. A reply starts
   // in the body above the quote; a new message starts at the address.
   function takeFocus() {
-    if (mode === "reply" || mode === "replyAll") {
+    if (mode === "draft" && toField.text !== "") {
+      bodyEdit.forceActiveFocus()
+      bodyEdit.cursorPosition = 0
+    } else if (mode === "reply" || mode === "replyAll") {
       bodyEdit.forceActiveFocus()
       bodyEdit.cursorPosition = 0
     } else {
@@ -167,8 +266,126 @@ Item {
     closed()
   }
 
+  function fields() {
+    return ({
+      from: root.fromEmail,
+      to: toField.text,
+      cc: ccField.text,
+      subject: subjectField.text,
+      body: bodyEdit.text,
+      threadId: root.mode === "forward" ? "" : root.threadId,
+      inReplyTo: root.mode === "forward" ? "" : root.inReplyTo,
+      references: root.mode === "forward" ? "" : root.references
+    })
+  }
+
+  // Stores what the window holds. Never while a send is in flight: the send is
+  // what this compose is becoming, and a copy landing after it would be a
+  // draft of a message already gone.
+  function saveDraft() {
+    if (!service || !canDraft || draftSaving || sendingNow) return
+    if (!dirty) {
+      if (closeAfterSave) finish()
+      return
+    }
+    autosave.stop()
+    var serial = session
+    var snap = snapshotNow()
+    var account = draftAccount
+    var replacing = draftId
+    draftSaving = true
+    draftNotice = "Saving draft"
+    service.saveDraft(account, replacing, draftToken, fields(), function(result, error) {
+      if (!root) return
+      if (serial !== root.session) {
+        // The compose was sent or discarded while this was in the air, so the
+        // copy it stored is one nobody wants. Only a copy this save created:
+        // an update of the same Gmail draft is already accounted for by the
+        // send or the discard that closed the window.
+        var stored = result ? String(result.id || "") : ""
+        if (stored !== "" && stored !== replacing && root.service)
+          root.service.deleteDraft(account, stored)
+        return
+      }
+      root.draftSaving = false
+      var sendNext = root.sendAfterSave
+      root.sendAfterSave = false
+      if (error) {
+        // The window stays open with the words still in it. Closing it would
+        // be the data loss this exists to prevent.
+        root.closeAfterSave = false
+        root.draftNotice = "Draft not saved: " + error
+        // A failed save left the copy before it in place, and `draftId` still
+        // names that one, so the send removes it as it goes.
+        if (sendNext) root.submit()
+        return
+      }
+      if (result && result.id) root.draftId = String(result.id)
+      root.baseline = snap
+      root.draftNotice = "Draft saved"
+      if (sendNext) {
+        // Sent as the copy just stored. A send that fails leaves it in Drafts.
+        root.submit()
+      } else if (root.closeAfterSave) {
+        // Anything typed while the save was in the air goes too.
+        if (root.dirty) root.saveDraft()
+        else root.finish()
+      } else if (root.dirty) {
+        autosave.restart()
+      }
+    })
+  }
+
+  // The one way out of a compose that is not a send: Escape, Back, and
+  // anything else in the window that leaves it. Answers whether the compose
+  // closed now — false when it is saving first, asking first, or sending.
+  function leave() {
+    if (confirmingDiscard) {
+      // Escape on the question is "no": keep writing.
+      confirmingDiscard = false
+      return false
+    }
+    var plan = Draft.closePlan({ sending: sendingNow, saving: draftSaving, dirty: dirty,
+      canDraft: canDraft })
+    if (plan === "ignore") return false
+    if (plan === "close") {
+      finish()
+      return true
+    }
+    if (plan === "confirm") {
+      confirmingDiscard = true
+      return false
+    }
+    closeAfterSave = true
+    if (plan === "save") saveDraft()
+    return false
+  }
+
+  // Throwing the message away, which is asked about first whenever there is
+  // something to lose — and which takes the saved draft with it.
+  function discard() {
+    var plan = Draft.discardPlan({ sending: sendingNow, dirty: dirty, saved: draftId !== "" })
+    if (plan === "ignore") return
+    if (plan === "close") finish()
+    else confirmingDiscard = true
+  }
+
+  function confirmDiscard() {
+    if (sendingNow) return
+    var id = draftId
+    var account = draftAccount
+    if (id !== "" && service) service.deleteDraft(account, id)
+    finish()
+  }
+
   function submit() {
     if (!service) return
+    autosave.stop()
+    confirmingDiscard = false
+    if (draftSaving) {
+      sendAfterSave = true
+      return
+    }
     service.send(({
       from: root.fromEmail,
       to: toField.text,
@@ -177,7 +394,12 @@ Item {
       body: bodyEdit.text,
       // A forward starts a new conversation; a reply must stay in the old one.
       threadId: root.mode === "forward" ? "" : root.threadId,
-      inReplyTo: root.mode === "forward" ? "" : root.inReplyTo
+      inReplyTo: root.mode === "forward" ? "" : root.inReplyTo,
+      references: root.mode === "forward" ? "" : root.references,
+      // A saved draft is sent as itself, so it leaves Drafts as it goes — but
+      // only through the mailbox it was saved in. A compose whose account
+      // changed under it sends plainly and leaves that draft where it is.
+      draftId: root.service.composeAccountId === root.draftAccount ? root.draftId : ""
     }))
   }
 
@@ -190,7 +412,27 @@ Item {
   focus: root.opened
 
   onFromAliasesChanged: {
-    if (opened && !fromWasChosen) selectPreferredFrom()
+    if (!opened || fromWasChosen) return
+    // The account's aliases arriving is not the user writing anything, so a
+    // compose that was clean stays clean.
+    var clean = !dirty
+    selectPreferredFrom()
+    if (clean) baseline = snapshotNow()
+  }
+
+  // Saved a moment after typing pauses, rather than on every key. Compared
+  // here rather than read off `dirty`, whose own binding may not have caught
+  // up with this change yet.
+  onCurrentSnapshotChanged: {
+    if (opened && currentSnapshot !== baseline && canDraft && !draftSaving && !sendingNow)
+      autosave.restart()
+  }
+
+  Timer {
+    id: autosave
+    interval: Draft.AUTOSAVE_MS
+    repeat: false
+    onTriggered: root.saveDraft()
   }
 
   // ----------------------------------------------------------- header
@@ -213,7 +455,7 @@ Item {
       textColor: root.textColor
       dimColor: root.dimColor
       panelFontFamily: root.panelFontFamily
-      onActivated: root.finish()
+      onActivated: root.leave()
     }
 
     Row {
@@ -587,14 +829,15 @@ Item {
       anchors.leftMargin: Style.space(18)
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(10)
+      visible: !root.confirmingDiscard
 
       IconTextButton {
         iconName: "send"
         tooltipText: "Send · Ctrl+Enter"
-        text: root.service && root.service.sending ? "Sending" : "Send"
+        text: root.sendAfterSave || (root.service && root.service.sending) ? "Sending" : "Send"
         foreground: root.textColor
         fontFamily: root.panelFontFamily
-        enabled: !!root.service && !root.service.sending
+        enabled: !!root.service && !root.service.sending && !root.sendAfterSave
         onClicked: root.submit()
       }
 
@@ -603,10 +846,64 @@ Item {
         foreground: root.dimColor
         bordered: false
         fontSize: Style.font.bodySmall
-        onClicked: root.finish()
+        enabled: !root.sendingNow
+        onClicked: root.discard()
       }
     }
 
+    // The question, asked where the button was rather than in a dialog of its
+    // own. Escape answers it "keep editing", which is the answer that loses
+    // nothing.
+    Row {
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(18)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(10)
+      visible: root.confirmingDiscard
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
+        text: root.draftId !== "" ? "Discard this draft and delete it from Drafts?"
+          : root.canDraft ? "Discard this message?"
+          : "This mailbox cannot keep drafts. Discard this message?"
+        color: root.textColor
+        font.family: root.panelFontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Button {
+        text: "Discard"
+        foreground: root.textColor
+        bordered: true
+        fontSize: Style.font.bodySmall
+        onClicked: root.confirmDiscard()
+      }
+
+      Button {
+        text: "Keep editing"
+        foreground: root.dimColor
+        bordered: false
+        fontSize: Style.font.bodySmall
+        onClicked: root.confirmingDiscard = false
+      }
+    }
+
+    // What became of the last save. Words, not a colour: a failed save is
+    // the one state here somebody has to act on.
+    Text {
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(18)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Math.min(implicitWidth, parent.width / 2)
+      visible: !root.confirmingDiscard && root.draftNotice !== ""
+      textFormat: Text.PlainText
+      text: root.draftNotice
+      color: root.dimColor
+      elide: Text.ElideRight
+      font.family: root.panelFontFamily
+      font.pixelSize: Style.font.caption
+    }
   }
 
 }

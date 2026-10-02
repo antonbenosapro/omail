@@ -9,6 +9,9 @@ Rectangle {
   required property color textColor
   required property string panelFontFamily
   property color tone: textColor
+  // Optional so the menus that build rows need not all pass one; without it the
+  // hover fill derives from the text colour alone, which is still the theme's.
+  property color accentColor: textColor
   property var collection: []
   property int cursorIndex: -1
   readonly property bool selected: collection.indexOf(root) === cursorIndex
@@ -19,7 +22,7 @@ Rectangle {
   radius: Style.cornerRadius
   opacity: enabled ? 1.0 : 0.4
   color: hover.hovered || selected
-    ? Qt.rgba(textColor.r, textColor.g, textColor.b, 0.08)
+    ? Style.hoverFillFor(textColor, accentColor)
     : "transparent"
 
   Text {

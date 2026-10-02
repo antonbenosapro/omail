@@ -11,9 +11,10 @@ script="$root/scripts/save-attachment.sh"
 work=$(mktemp -d "${TMPDIR:-/tmp}/omail-attachment-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM HUP
 
-# xdg-open must not actually run: these tests would open a viewer per case.
+# xdg-open is a marker here: saving must never run it, and the test below
+# fails if it did. It records the call rather than opening a viewer.
 mkdir -p "$work/bin"
-printf '#!/bin/sh\nexit 0\n' > "$work/bin/xdg-open"
+printf '#!/bin/sh\ntouch "%s/opened"\n' "$work" > "$work/bin/xdg-open"
 chmod +x "$work/bin/xdg-open"
 printf '#!/bin/sh\nexec "$@"\n' > "$work/bin/setsid"
 chmod +x "$work/bin/setsid"
@@ -140,6 +141,15 @@ if printf 'aGk\n' | sh "$script" >/dev/null 2>&1; then
   failures=$(( failures + 1 ))
 else
   printf '  ok   missing arguments are refused\n'
+fi
+
+# Saving is only saving: the window offers Open, the script never launches it.
+sleep 1
+if [ -e "$work/opened" ]; then
+  printf '  FAIL a save ran xdg-open\n'
+  failures=$(( failures + 1 ))
+else
+  printf '  ok   a save does not open the file\n'
 fi
 
 if [ "$failures" -ne 0 ]; then

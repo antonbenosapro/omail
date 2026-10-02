@@ -219,3 +219,28 @@ function postBody() {
 function postContentType() {
   return "application/x-www-form-urlencoded"
 }
+
+// The POST as a curl command, handed to the process as an argument array. curl
+// rather than XMLHttpRequest because the engine follows a redirect on its own,
+// and a sender's address that answers 302 would turn one request to a URL the
+// sender named into one to wherever it points next. Nothing here follows one
+// (no -L, and --max-redirs 0 as well), and --proto keeps it to https. The body
+// is printed as a status code and nothing else is read.
+function postCommand(url) {
+  return ["curl", "--silent", "--show-error", "--output", "/dev/null",
+    "--write-out", "%{http_code}", "--max-time", "20",
+    "--max-redirs", "0", "--proto", "=https",
+    "--request", "POST", "--header", "Content-Type: " + postContentType(),
+    "--data", postBody(), "--url", String(url || "")]
+}
+
+// The status curl printed, or 0 when it printed nothing usable. Only a 2xx
+// counts as removed: a redirect is not followed, so it is not an answer.
+function postStatus(output) {
+  var match = String(output || "").trim().match(/(\d{3})$/)
+  return match ? Number(match[1]) : 0
+}
+
+function postSucceeded(status) {
+  return status >= 200 && status < 300
+}

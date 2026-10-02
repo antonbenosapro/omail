@@ -50,8 +50,8 @@ if [ -n "${CURL_STUB_FAIL_TIMES:-}" ]; then
   if [ "$count" -lt "$CURL_STUB_FAIL_TIMES" ]; then
     printf '%s' "$(( count + 1 ))" > "$CURL_STUB_FAIL_COUNTER"
     cat >/dev/null
-    printf 'curl: (56) response reading failed\n' >&2
-    exit 56
+    printf 'curl: (%s) transport failed\n' "${CURL_STUB_FAIL_CODE:-56}" >&2
+    exit "${CURL_STUB_FAIL_CODE:-56}"
   fi
 fi
 if [ -n "${CURL_STUB_HEADER:-}" ] && [ -n "$header_file" ]; then
@@ -186,6 +186,74 @@ if [ "$sections" = "2" ]; then
   printf '  ok   each section repeats the URL, because --next resets it\n'
 else
   printf '  FAIL expected 2 url lines, found %s\n' "$sections"
+  failures=$(( failures + 1 ))
+fi
+
+# --------------------------------------------------------------- APPEND
+#
+# A draft saved to Drafts and a sent message filed in Sent are both an upload
+# to an IMAP folder. The folder is the URL's path; libcurl writes the APPEND
+# itself, so what the script owes it is the upload and the commands after.
+
+draft_message=$(printf 'X-Omail-Draft: omail-abc\r\nTo: friend@example.com\r\n\r\nhello\r\n')
+append_req="append $(b64 'imaps://imap.example.org:993/Drafts') $(b64 'jane:pw') $(b64 "$draft_message") $(b64 'UID SEARCH HEADER X-Omail-Draft "omail-abc"')"
+config=$(printf '%s\n' "$append_req" \
+  | CURL_STUB_UPLOAD="$work/appended" \
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" \
+  | sed -n '2p' | base64 -d)
+check "an append uploads into the folder the URL names" "$config" 'url = "imaps://imap.example.org:993/Drafts"'
+check "an append is an upload" "$config" 'upload-file = "'
+check "the command after an append is a section of its own" "$config" 'next'
+check "and runs in the same folder" "$config" 'request = "UID SEARCH HEADER X-Omail-Draft \"omail-abc\""'
+check_absent "the message itself is never a config value" "$config" 'friend@example.com'
+uploads=$(printf '%s' "$config" | grep -c '^upload-file = ' || true)
+if [ "$uploads" = "1" ]; then
+  printf '  ok   one upload, in the first section only\n'
+else
+  printf '  FAIL expected 1 upload-file line, found %s\n' "$uploads"
+  failures=$(( failures + 1 ))
+fi
+if [ -f "$work/appended" ] && [ "$(cat "$work/appended")" = "$draft_message" ]; then
+  printf '  ok   the uploaded bytes are the message, CRLFs and all\n'
+else
+  printf '  FAIL the uploaded file is not the message\n'
+  failures=$(( failures + 1 ))
+fi
+
+# A bare append — the Sent copy — has no commands after it.
+config=$(config_for "append $(b64 'imaps://imap.example.org:993/Sent') $(b64 'jane:pw') $(b64 "$draft_message")")
+check "an append with no commands still uploads" "$config" 'upload-file = "'
+check_absent "and adds no section" "$config" 'next'
+
+# An empty message is not something to store.
+if printf '%s\n' "append $(b64 'imaps://imap.example.org:993/Drafts') $(b64 'jane:pw') $(b64 '')" \
+  | XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then
+  printf '  FAIL an empty append was accepted\n'
+  failures=$(( failures + 1 ))
+else
+  printf '  ok   an empty append is refused\n'
+fi
+
+# Uploading a message to an SMTP URL sends it. An append is never that.
+if printf '%s\n' "append $(b64 'smtps://smtp.example.org:465') $(b64 'jane:pw') $(b64 "$draft_message")" \
+  | XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then
+  printf '  FAIL an append to an SMTP URL was accepted\n'
+  failures=$(( failures + 1 ))
+else
+  printf '  ok   an append to an SMTP URL is refused\n'
+fi
+
+# What came back on the connection: the SEARCH answer arrives through the
+# header channel when stdout is empty, the same as any other IMAP request.
+search_reply='* SEARCH 41 42'
+out=$(printf '%s\n' "$append_req" \
+  | CURL_STUB_HEADER="$search_reply" \
+    XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
+decoded=$(printf '%s\n' "$out" | sed -n '2p' | base64 -d)
+if [ "$decoded" = "$search_reply" ]; then
+  printf '  ok   an append hands back the conversation that followed it\n'
+else
+  printf '  FAIL an append lost the answer to its SEARCH\n'
   failures=$(( failures + 1 ))
 fi
 
@@ -612,6 +680,42 @@ else
   printf '  FAIL the retry count was %s, not 4\n' "$(cat "$counter" 2>/dev/null)"
   failures=$(( failures + 1 ))
 fi
+
+# An APPEND or an SMTP send that died after connecting may already have been
+# stored or delivered, so running it again would file a second copy or send
+# the mail twice. Only a failure to connect at all — 7, or 35 for a TLS
+# handshake that never reached LOGIN — is retried for those.
+# attempts <label> <request> <exit code> <times to fail> -> "<status> <attempts>"
+attempts() {
+  rm -rf "$work/cache"
+  rm -f "$counter"
+  status=$(printf '%s\n' "$2" \
+    | CURL_STUB_CAPABILITY="$axigen_imap" CURL_STUB_FAIL_TIMES="$4" \
+      CURL_STUB_FAIL_CODE="$3" CURL_STUB_FAIL_COUNTER="$counter" \
+      XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" | sed -n '1p')
+  printf '%s %s' "$status" "$(cat "$counter" 2>/dev/null)"
+}
+for case_line in \
+  "append|56|99|56 1|an APPEND that may have landed is not run again" \
+  "append|52|99|52 1|an APPEND answered with nothing is not run again" \
+  "smtp|55|99|55 1|an SMTP send that may have been delivered is not run again" \
+  "smtp|56|99|56 1|an SMTP send cut off mid-reply is not run again" \
+  "append|35|1|0 1|an APPEND whose TLS handshake failed is retried" \
+  "smtp|7|1|0 1|an SMTP send that never connected is retried"; do
+  kind=$(printf '%s' "$case_line" | cut -d'|' -f1)
+  code=$(printf '%s' "$case_line" | cut -d'|' -f2)
+  times=$(printf '%s' "$case_line" | cut -d'|' -f3)
+  expected=$(printf '%s' "$case_line" | cut -d'|' -f4)
+  label=$(printf '%s' "$case_line" | cut -d'|' -f5)
+  if [ "$kind" = "append" ]; then request=$append_req; else request=$smtp_req; fi
+  got=$(attempts "$label" "$request" "$code" "$times")
+  if [ "$got" = "$expected" ]; then
+    printf '  ok   %s\n' "$label"
+  else
+    printf '  FAIL %s: got "%s", wanted "%s"\n' "$label" "$got" "$expected"
+    failures=$(( failures + 1 ))
+  fi
+done
 
 # ----------------------------------------------- a partly failed sequence
 #

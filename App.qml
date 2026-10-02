@@ -73,10 +73,12 @@ Item {
   // wants plain text wants it for their mail, not for one message. The service
   // holds it because that is what writes it to disk.
   readonly property bool plainTextForced: !!service && service.plainTextForced
-  // Reading zoom for the message body only. The window's own chrome follows
-  // the theme's font scale, which is Omarchy's to set, not this app's. The
-  // service holds it because it is written to disk: a size somebody reached for
-  // is theirs until they change it, not until they close the window.
+  // Reading zoom for the open message — its header, notices, invitation,
+  // attachments and body, including the sizes the sender fixed in px — and
+  // list zoom for the rows. The window's own chrome follows the theme's font
+  // scale, which is Omarchy's to set, not this app's. The service holds them
+  // because they are written to disk: a size somebody reached for is theirs
+  // until they change it, not until they close the window.
   readonly property real readingZoom: service ? service.readingZoom : 1.0
   readonly property real listZoom: service ? service.listZoom : 1.0
   // 0 means "proportional"; anything else is a width somebody dragged to.
@@ -194,12 +196,41 @@ Item {
   // Plain text is a preference and survives; the heavy-document override is a
   // per-message decision about one specific message and does not.
   function openMessage(key) {
-    if (!service) return
+    // An empty list has no cursor, and opening "nothing" still switched the
+    // window to the reader — a blank pane, and on a narrow window the list gone.
+    if (!service || String(key || "") === "") return
     pendingComposeMode = ""
     reader.forceRichAnyway = false
     cursorKey = String(key || "")
     service.select(cursorKey)
     currentView = "reader"
+  }
+
+  // What Enter and a click on a row mean. A draft opens where it is written
+  // rather than where it is read. Only these two: a reader stepping on to the
+  // next message after an archive goes through `openMessage`, and landing in a
+  // compose there would be a surprise nobody asked for.
+  function activateMessage(key) {
+    if (service && service.isDraftKey(key)) return openDraft(key)
+    openMessage(key)
+  }
+
+  // The compose is told which mailbox the draft belongs to before it is
+  // filled, the way an answer is, so it saves back to that mailbox.
+  function openDraft(key) {
+    if (!service) return
+    var target = String(key || "")
+    cursorKey = target
+    composeReturnView = currentView
+    service.beginComposeFor(target)
+    service.openDraft(target, function(fields) {
+      if (!root.service) return
+      if (!fields) {
+        if (!root.composing) root.service.endCompose()
+        return
+      }
+      compose.beginDraft(fields)
+    })
   }
 
   function backToList() {
@@ -317,7 +348,7 @@ Item {
     if (!service) return
     var wasOpen = currentView === "reader"
       && Model.isMarked(service.markedKeys, service.selectedKey)
-    var leaves = !Model.survivesAction(service.mailboxKey, action)
+    var leaves = !service.survives(action)
     // Worked out while the rows still have neighbours, the same way the single
     // path does: a cursor inside a set that is leaving would be unfindable
     // afterwards, and an unfindable cursor sends the next j to the top.
@@ -342,7 +373,7 @@ Item {
     var wasOpen = currentView === "reader" && service.selectedKey === acted
     // Worked out before the action, while the row still has neighbours.
     var next = Model.cursorAfterRemoval(service.messages, acted)
-    var leaves = !Model.survivesAction(service.mailboxKey, action)
+    var leaves = !service.survives(action, acted)
     service.act(acted, action)
     if (!leaves) return
     // The row is going and the cursor must not go with it: a cursor on a
@@ -417,7 +448,7 @@ Item {
     }
     if (id === "cursorDown") return moveCursor(1)
     if (id === "cursorUp") return moveCursor(-1)
-    if (id === "open") return openMessage(cursorKey)
+    if (id === "open") return activateMessage(cursorKey)
     if (id === "backToList") return backToList()
     if (id === "toggleMark") {
       if (service && cursorKey !== "") service.toggleMark(cursorKey)
@@ -455,6 +486,7 @@ Item {
     }
     if (id === "send") return compose.submit()
     if (id === "search") return searchBar.focusField()
+    if (id === "searchAnywhere") return searchFromAnywhere()
     if (id === "goMailbox") return goSlot(Keymap.slotFor(id, sequence))
     if (id === "switchAccount") return accountSwitcher.openCentered()
     if (id === "zoomIn") return zoomBy(0.1)
@@ -471,12 +503,43 @@ Item {
     if (id === "back") return goBack()
   }
 
+  // Ctrl+K's whole point is reaching search from somewhere `/` cannot, and the
+  // field is not drawn over a page or a draft, so those are left first. A first
+  // run has nothing behind its setup form to search, and stays put.
+  function searchFromAnywhere() {
+    if (showPage && !leavePage()) return
+    // Through the draft guard, never around it: an unsaved compose is saved
+    // (or asked about) first, and search waits for the next Ctrl+K.
+    if (composing && !compose.leave()) return
+    searchBar.focusField()
+  }
+
+  // Leaving setup goes through leaveSetup(), which discards an account row
+  // created for a form nobody finished, and puts the provider question down —
+  // left up, it came back the next time setup opened. Reports whether there
+  // was anywhere to go: the first-run form is the whole window.
+  function leavePage() {
+    if (showSetup) {
+      if (!anyReady) return false
+      leaveSetup()
+      pickingProvider = false
+    }
+    settingsVisible = false
+    return true
+  }
+
   // What Escape means, in the order the window is stacked. The row menu, the
   // app menu and the account switcher are absent on purpose: a QQC.Popup with
   // CloseOnEscape consumes the key itself, so a branch for them here would
   // never run.
   function goBack() {
     if (shortcutHelpVisible) shortcutHelpVisible = false
+    // A page covers everything below it, so it is what Escape leaves — Settings
+    // opened from the reader used to close the reader behind the page and
+    // leave the page standing.
+    else if (showPage) {
+      if (!leavePage()) requestClose()
+    }
     // A selection is the nearest thing there is to put down, and putting it
     // down is not leaving anywhere — so it comes before every branch below.
     // Escape out of a reader with twelve rows still marked behind it would
@@ -485,18 +548,14 @@ Item {
     // A query being typed is the nearest thing to leave: clear it if there is
     // one, then hand the keyboard back to the mailbox. This used to live in
     // SearchBar as its own Keys handler, which a window Shortcut silently beats.
-    // A query being typed is the nearest thing to leave: clear it if there is
-    // one, then hand the keyboard back. Parked directly rather than through
-    // applyContextFocus, which would still read the context as "search" —
-    // the field has not lost the focus yet at this point.
+    // Parked directly rather than through applyContextFocus, which would still
+    // read the context as "search" — the field has not lost the focus yet.
     else if (searchBar.fieldFocused) {
       if (searchBar.queryText !== "") searchBar.clear()
       focusScope.parkKeyboard()
     }
-    else if (composing) compose.finish()
+    else if (composing) compose.leave()
     else if (currentView === "reader") backToList()
-    else if (setupVisible) setupVisible = false
-    else if (settingsVisible) settingsVisible = false
     else if (service && service.searchQuery !== "") service.search("")
     else requestClose()
   }
@@ -831,6 +890,10 @@ Item {
           onSubmitted: function(query) {
             if (!root.service) return
             root.service.search(query)
+            // The query is done once it is sent, so the keyboard goes back to
+            // the mail it found. backToList() alone re-applies the context,
+            // which still reads "search" while the field holds the focus.
+            focusScope.parkKeyboard()
             root.backToList()
           }
           onCleared: {
@@ -957,7 +1020,11 @@ Item {
           width: root.compact
             ? (root.currentView === "list" ? parent.width : 0)
             : Math.max(Style.space(100),
-                Math.min(parent.width - Style.space(360),
+                // The reader's floor is measured from what is left after the
+                // rail, which shares this parent: without it the reader went
+                // down to about 207px in the narrowest window.
+                Math.min(parent.width - (sidebar.visible ? sidebar.width : 0)
+                    - Style.space(360),
                   root.listWidth > 0 ? root.listWidth
                     : Math.min(Style.space(460), Math.round(parent.width * 0.34))))
           visible: width > 0 && !root.showPage && !root.composing
@@ -989,7 +1056,7 @@ Item {
               panelFontFamily: root.fontFamily
               zoom: root.listZoom
               cursorKey: root.cursorKey
-              onMessageActivated: function(key) { root.openMessage(key) }
+              onMessageActivated: function(key) { root.activateMessage(key) }
               onMenuRequested: function(key, sceneX, sceneY) {
                 root.cursorKey = key
                 rowMenu.openAt(key, sceneX, sceneY)
@@ -1380,10 +1447,14 @@ Item {
           // is its own thing — a refused duplicate mailbox — and has nothing
           // to take back.
           actionLabel: root.notice === "" && !!root.service
-            && root.service.actionStatus !== "" ? root.service.undoLabel : ""
+            && root.service.actionStatus !== ""
+            ? (root.service.openLabel !== "" ? root.service.openLabel : root.service.undoLabel) : ""
           busy: !!root.service && root.service.undoBusy
           busyLabel: "Undoing…"
-          onActivated: root.undoLastAction()
+          onActivated: {
+            if (root.service && root.service.openLabel !== "") root.service.openSaved()
+            else root.undoLastAction()
+          }
         }
 
         KeyHints {

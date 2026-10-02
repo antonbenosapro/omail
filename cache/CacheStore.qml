@@ -76,6 +76,9 @@ Item {
   // Switching accounts swaps the file underneath, so what is in memory belongs
   // to the account that just left.
   onAccountIdChanged: {
+    // A save still pending is the previous account's store, and `path` has
+    // already moved: let it fire and it overwrites the new account's cache.
+    saveTimer.stop()
     loaded = false
     store = Cache.emptyStore()
     if (directoryMaker.running) return

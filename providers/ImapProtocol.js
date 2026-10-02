@@ -362,7 +362,7 @@ function sequenceSet(uids) {
 // What a list row needs, and no more. BODY.PEEK rather than BODY so reading
 // the list does not mark everything in it as seen — the single most common way
 // a hand-rolled IMAP client ruins a mailbox.
-var LIST_HEADERS = "HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID REPLY-TO LIST-UNSUBSCRIBE)"
+var LIST_HEADERS = "HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID REFERENCES REPLY-TO LIST-UNSUBSCRIBE)"
 
 function searchCommand(criteria) {
   var text = trimmed(criteria)
@@ -435,6 +435,140 @@ function expungeCommand(uids) {
   // every \Deleted message in the folder, including ones another client marked
   // — which is somebody else's mail disappearing because this one archived.
   return set === "" ? "" : "UID EXPUNGE " + set
+}
+
+// Removing named messages: mark them \Deleted, then expunge exactly those.
+// `UID EXPUNGE` is UIDPLUS's command, and plain EXPUNGE is never the fallback —
+// it would take every \Deleted message in the folder, including ones another
+// client marked. A server without UIDPLUS is left holding the copies flagged
+// \Deleted, which every client hides, rather than losing somebody else's.
+function removeCommands(uids, capabilities) {
+  var set = sequenceSet(uids)
+  if (set === "") return []
+  var commands = ["UID STORE " + set + " +FLAGS.SILENT (\\Deleted)"]
+  if (hasCapability(capabilities, "UIDPLUS")) commands.push(expungeCommand(uids))
+  return commands
+}
+
+// ------------------------------------------------------------------ drafts
+//
+// A draft is saved by storing a new copy and removing the old one: IMAP has no
+// "replace this message", and a message on the server is immutable. curl writes
+// the APPEND itself and removes the tagged `OK [APPENDUID ...]` that would have
+// named the new copy, so the copy is found again by a header this client put
+// on it — a token that stays the same for as long as the draft is being
+// written. Message-ID would not do: a draft is not sent yet, and nothing says
+// whatever builds the message keeps one id across saves.
+
+var DRAFT_HEADER = "X-Omail-Draft"
+
+// A token is ours, so it is held to an alphabet that cannot end a quoted
+// string or a header line, whatever arrived in a draft somebody else wrote.
+function draftToken(value) {
+  return trimmed(value).replace(/[^A-Za-z0-9._-]/g, "").substring(0, 64)
+}
+
+// NOT DELETED, because a copy an earlier save flagged on a server without
+// UIDPLUS is still in the folder, and the newest of those is not the draft.
+function findDraftCommand(token) {
+  var value = draftToken(token)
+  if (value === "") return ""
+  return "UID SEARCH NOT DELETED HEADER " + DRAFT_HEADER + " " + quote(value)
+}
+
+// The UID the next message stored in `folder` will get, asked before a save
+// stores its copy. Some servers index headers lazily and answer the token
+// search with nothing for a copy stored a moment ago; the copy is then the one
+// stored at or after this UID.
+function uidNextCommand(folder) {
+  return "STATUS " + quote(folder) + " (UIDNEXT)"
+}
+
+// `* STATUS "Drafts" (UIDNEXT 43)`. Zero when the server did not say.
+function parseUidNext(text) {
+  var lines = splitResponse(text)
+  for (var i = 0; i < lines.length; i++) {
+    var match = lines[i].match(/^\*\s+STATUS\s+[\s\S]*\(([^)]*)\)\s*$/i)
+    if (!match) continue
+    var next = match[1].match(/UIDNEXT\s+(\d+)/i)
+    if (next) return Math.floor(Number(next[1])) || 0
+  }
+  return 0
+}
+
+function appendedSinceCommand(uidNext) {
+  var next = Math.floor(Number(uidNext)) || 0
+  return next > 0 ? "UID SEARCH UID " + next + ":*" : ""
+}
+
+// Which of what `appendedSinceCommand` found is the copy just stored. `n:*`
+// always names the folder's last message, even one older than `n`, so only
+// UIDs from `n` on count. More than one is a copy some other client stored at
+// the same moment, and which is ours cannot be told — so none is claimed, and
+// the save is reported as failed rather than adopting somebody else's message.
+function appendedCopy(found, uidNext) {
+  var next = Math.floor(Number(uidNext)) || 0
+  var list = Array.isArray(found) ? found : []
+  var copies = []
+  for (var i = 0; i < list.length; i++) {
+    var uid = Math.floor(Number(list[i]))
+    if (next > 0 && isFinite(uid) && uid >= next && copies.indexOf(uid) < 0) copies.push(uid)
+  }
+  return copies.length === 1 ? copies[0] : 0
+}
+
+// Which copy is the draft now, and which are stale. The newest copy carrying
+// the token is the one just stored — a UID only ever grows within a folder —
+// and every other copy carrying it is an earlier save. The copy the draft was
+// opened from is stale too, but only when it is in the same folder: an id
+// from anywhere else names somebody else's message, not this draft.
+function draftReplacement(found, previousId, folder) {
+  var list = Array.isArray(found) ? found : []
+  var keep = 0
+  for (var i = 0; i < list.length; i++) {
+    var uid = Math.floor(Number(list[i]))
+    if (isFinite(uid) && uid > keep) keep = uid
+  }
+  var remove = []
+  for (var j = 0; j < list.length; j++) {
+    var other = Math.floor(Number(list[j]))
+    if (isFinite(other) && other > 0 && other !== keep && remove.indexOf(other) < 0) remove.push(other)
+  }
+  // Nothing found is not a save that worked. The copy just stored cannot be
+  // named, so the earlier one stays: removing it would leave a draft whose
+  // only copy nobody can address.
+  if (keep === 0) return { keep: 0, remove: [] }
+  var previous = parseMessageId(previousId)
+  if (previous.uid > 0 && previous.uid !== keep && trimmed(previous.folder) === trimmed(folder)
+      && remove.indexOf(previous.uid) < 0)
+    remove.push(previous.uid)
+  return { keep: keep, remove: remove }
+}
+
+// What follows a save, on one connection: the new copy gains \Draft — curl's
+// APPEND can only say \Seen — and the stale copies go.
+function draftSettleCommands(plan, capabilities) {
+  var value = plan || {}
+  var commands = []
+  var keep = Math.floor(Number(value.keep)) || 0
+  if (keep > 0) commands.push("UID STORE " + keep + " +FLAGS.SILENT (\\Draft)")
+  return commands.concat(removeCommands(value.remove, capabilities))
+}
+
+// Whether a copy of sent mail is this client's to file. Gmail's SMTP files
+// every message it relays in Sent Mail by itself, so appending another would
+// put each one there twice.
+//
+// Office 365 and Outlook.com are listed on Microsoft's word that their SMTP
+// submission saves to Sent Items. Unverified against a live mailbox: if Sent
+// turns out empty for them, these three are the lines to remove.
+var FILES_SENT_ITSELF = ["imap.gmail.com", "imap.googlemail.com",
+  "outlook.office365.com", "imap-mail.outlook.com", "outlook.office.com"]
+
+function savesSentCopy(settings) {
+  var host = normalizeSettings(settings).imapHost.toLowerCase()
+  if (host === "") return false
+  return FILES_SENT_ITSELF.indexOf(host) < 0
 }
 
 function statusCommand(folder) {
@@ -786,7 +920,13 @@ function labelIdsFor(flags, folder, special) {
 // The other direction: what an action asks the server to change. Returns the
 // flags to add and remove, plus a folder to move to where the action is a move
 // rather than a flag — which is the whole difference between IMAP and Gmail.
-function actionPlan(action, special) {
+//
+// `origin` is only read by untrash: the folder the message is going back to,
+// as a name or a special-use attribute ("\\Sent"). A trash destroys where the
+// message was, so whoever knows says so — an undo recorded it, and a message
+// the account itself sent belongs in Sent. With nothing to say it goes to
+// INBOX, the one place a user will look for it.
+function actionPlan(action, special, origin) {
   var map = special || {}
   var verb = String(action || "")
 
@@ -800,7 +940,11 @@ function actionPlan(action, special) {
   if (verb === "archive") return { add: [], remove: [], move: map["\\archive"] || "" }
   if (verb === "unarchive") return { add: [], remove: [], move: "INBOX" }
   if (verb === "trash") return { add: [], remove: [], move: map["\\trash"] || "" }
-  if (verb === "untrash") return { add: [], remove: ["\\Deleted"], move: "INBOX" }
+  if (verb === "untrash") {
+    var back = trimmed(origin)
+    return { add: [], remove: ["\\Deleted"],
+      move: back === "" ? "INBOX" : resolveFolder(back, map) }
+  }
   return null
 }
 

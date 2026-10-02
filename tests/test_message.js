@@ -301,6 +301,140 @@ assert.strictEqual(
   Buffer.from(payload.raw, "base64url").toString("utf8").indexOf("To: a@b.com"), 0)
 assert.strictEqual(message.buildSendPayload({ to: "a@b.com" }).threadId, undefined)
 
+// ------------------------------------------------------- address encoding
+//
+// The name goes out encoded and the address beside it does not. Encoding the
+// whole list as one word sent `José <a@x.com>, Bob <b@y.com>` to Bob alone: a
+// reader decodes it back into one phrase, and the comma no longer separates
+// anything.
+{
+  const unfold = (raw) => raw.split("\r\n\r\n")[0].replace(/\r\n[ \t]/g, " ")
+  const header = (raw, name) => {
+    const line = unfold(raw).split("\r\n").find((l) => l.indexOf(name + ": ") === 0)
+    return line === undefined ? undefined : line.substring(name.length + 2)
+  }
+  const raw = message.buildRawMessage({
+    to: "José <a@x.com>, Bob <b@y.com>", cc: '"Doe, Jane" <jane@x.com>, carl@z.com', body: "x"
+  })
+  deepEqual(message.parseAddressList(header(raw, "To")).map((a) => [a.name, a.email]),
+    [["José", "a@x.com"], ["Bob", "b@y.com"]])
+  deepEqual(message.parseAddressList(header(raw, "Cc")).map((a) => a.email),
+    ["jane@x.com", "carl@z.com"])
+  // The adapter the IMAP client reads with agrees.
+  const parsed = message.parseRfc822(raw)
+  deepEqual(message.parseAddressList(message.headerFrom(parsed.headers, "To")).map((a) => a.email),
+    ["a@x.com", "b@y.com"])
+
+  // RFC 5322 folds at 78 and forbids 998. A long Cc is folded after commas and
+  // unfolds back into every address.
+  const many = []
+  for (let i = 0; i < 80; i++) many.push("Person Number " + i + " <person" + i + "@example.com>")
+  const long = message.buildRawMessage({ to: "a@b.com", cc: many.join(", "), subject: "word ".repeat(60).trim(), body: "x" })
+  for (const line of long.split("\r\n\r\n")[0].split("\r\n"))
+    assert.ok(line.length <= 78, "header line folded: " + line)
+  assert.strictEqual(message.parseAddressList(header(long, "Cc")).length, 80)
+  assert.strictEqual(header(long, "Subject"), "word ".repeat(60).trim(),
+    "an ASCII subject folds at its own spaces and unfolds unchanged")
+
+  // A long non-ASCII subject becomes several encoded words, none past 75 and
+  // none splitting a character, and decodes back whole.
+  const subject = "Привет 😀 ".repeat(20).trim()
+  const encoded = message.buildRawMessage({ to: "a@b.com", subject: subject, body: "x" })
+  for (const word of encoded.match(/=\?UTF-8\?B\?[^?]*\?=/g)) assert.ok(word.length <= 75)
+  assert.strictEqual(message.decodeHeaderValue(header(encoded, "Subject")), subject)
+  // The first word folds onto a line of its own when it will not fit beside
+  // the name, rather than leaving that one line past the width.
+  for (const line of encoded.split("\r\n\r\n")[0].split("\r\n"))
+    assert.ok(line.length <= 78, "encoded header line folded: " + line)
+  assert.ok(encoded.indexOf("Subject:\r\n =?UTF-8?B?") >= 0, "folded before the first encoded word")
+  const shortWord = message.buildRawMessage({ to: "a@b.com", subject: "Привет", body: "x" })
+  assert.ok(shortWord.indexOf("Subject: =?UTF-8?B?") >= 0, "a word that fits stays beside the name")
+
+  // A space-free ASCII subject past the hard limit is encoded rather than left
+  // as one line no server will take.
+  const solid = message.buildRawMessage({ to: "a@b.com", subject: "x".repeat(1200), body: "x" })
+  for (const line of solid.split("\r\n\r\n")[0].split("\r\n")) assert.ok(line.length <= 998)
+  assert.strictEqual(message.decodeHeaderValue(header(solid, "Subject")), "x".repeat(1200))
+}
+
+// ---------------------------------------------------------------- envelope
+//
+// SMTP is told who a message is for apart from its headers, and is told it
+// from the typed fields rather than by reading the encoded headers back.
+{
+  const payload = message.buildSendPayload({
+    from: "me@example.com", to: "José <a@x.com>, Bob <b@y.com>", cc: "A@x.com, carl@z.com", body: "x"
+  })
+  deepEqual(payload.envelope, {
+    from: "me@example.com", recipients: ["a@x.com", "b@y.com", "carl@z.com"], invalid: []
+  })
+  deepEqual(message.sendEnvelope({ to: "jane doe, ok@x.com" }).invalid, ["jane doe"],
+    "an entry that is not an address is reported, not dropped")
+  deepEqual(message.sendEnvelope({ to: "a@b.com\r\nBcc: evil@x.com" }).recipients, [])
+}
+
+// --------------------------------------------------------------- threading
+{
+  const chain = message.buildRawMessage({
+    to: "a@b.com", body: "x", inReplyTo: "<p@x>", references: "<r1@x>\r\n <r2@x> <p@x>"
+  })
+  assert.ok(chain.indexOf("References: <r1@x> <r2@x> <p@x>\r\n") > 0,
+    "the parent's chain is kept and the parent is not repeated")
+  const deep = []
+  for (let i = 0; i < 40; i++) deep.push("<m" + i + "@example.com>")
+  const ids = message.referenceChain(deep.join(" "), "<parent@example.com>")
+  assert.strictEqual(ids.length, 20)
+  assert.strictEqual(ids[0], "<m0@example.com>", "the root survives trimming")
+  assert.strictEqual(ids[19], "<parent@example.com>")
+  assert.strictEqual(message.summarize({ payload: { headers: [
+    { name: "References", value: "<r1@x> <r2@x>" }] } }).references, "<r1@x> <r2@x>")
+}
+
+// ------------------------------------------------------- reply-all, forward
+{
+  const summary = {
+    from: { email: "boss@corp.com" },
+    replyTo: { email: "" },
+    to: [{ email: "me@corp.com" }, { email: "ann@corp.com" }],
+    cc: [{ email: "Alias@Me.com" }, { email: "ann@corp.com" }, { email: "bob@corp.com" },
+      { email: "boss@corp.com" }]
+  }
+  deepEqual(message.replyAllCc(summary, ["me@corp.com", { email: "alias@me.com" }]),
+    ["ann@corp.com", "bob@corp.com"])
+  deepEqual(message.replyAllCc(null, []), [])
+
+  assert.strictEqual(message.forwardSubject("Invoice"), "Fwd: Invoice")
+  assert.strictEqual(message.forwardSubject("Fwd: Invoice"), "Fwd: Invoice")
+  assert.strictEqual(message.forwardSubject("FW: Invoice"), "FW: Invoice")
+  assert.strictEqual(message.forwardSubject("Re: Invoice"), "Fwd: Re: Invoice")
+  assert.strictEqual(message.forwardSubject(""), "Fwd: (no subject)")
+
+  assert.strictEqual(message.outgoingBody("\n\n    indented\n  more\n\n"), "    indented\n  more")
+  assert.strictEqual(message.outgoingBody(" \n\t\n"), "")
+}
+
+// ------------------------------------------------------- transport headers
+{
+  const when = new Date(Date.UTC(2026, 9, 1, 12, 0, 0))
+  assert.ok(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d\d (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d\d:\d\d:\d\d [+-]\d{4}$/
+    .test(message.messageDateHeader(when)))
+  assert.strictEqual(new Date(message.messageDateHeader(when)).getTime(), when.getTime())
+  assert.ok(/^<[a-z0-9.]+@example\.com>$/.test(message.newMessageId("me@example.com", when)))
+  assert.notStrictEqual(message.newMessageId("a@b.c"), message.newMessageId("a@b.c"))
+
+  const bare = "From: me@example.com\r\nSubject: hi\r\n\r\nDate: not a header"
+  const stamped = message.withTransportHeaders(bare, "me@example.com", when)
+  const head = stamped.split("\r\n\r\n")[0]
+  assert.ok(/(^|\r\n)Date: /.test(head) && /(^|\r\n)Message-ID: <[^>]+@example\.com>/.test(head))
+  assert.ok(stamped.endsWith(bare))
+  assert.strictEqual(message.withTransportHeaders(stamped, "me@example.com", when), stamped,
+    "a message that already has both is left alone")
+  // A caller that knows both may state them, and is not stamped over.
+  const stated = message.buildRawMessage({ to: "a@b.com", body: "x", date: when, messageId: "<id@x>" })
+  assert.ok(stated.indexOf("Message-ID: <id@x>\r\n") > 0)
+  assert.strictEqual(message.withTransportHeaders(stated, "a@b.com", when), stated)
+}
+
 // ------------------------------------------------------------- a calendar
 //
 // An RSVP is an ordinary mail with a `text/calendar` part beside the sentence

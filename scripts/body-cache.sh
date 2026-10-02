@@ -73,8 +73,18 @@ case "$command" in
     ;;
   clear)
     # Only ever the directory this plugin built, and only if it looks like it.
+    # A `..` component would let the prefix match and still resolve elsewhere,
+    # so it is refused outright, and the resolved path must match as well.
     case "$dir" in
-      */omail/bodies/*) rm -rf -- "$dir" ;;
+      */../*|*/..) usage ;;
+    esac
+    case "$dir" in
+      */omail/bodies/*) ;;
+      *) usage ;;
+    esac
+    resolved=$(realpath -m -- "$dir" 2>/dev/null) || usage
+    case "$resolved" in
+      */omail/bodies/*) rm -rf -- "$resolved" ;;
       *) usage ;;
     esac
     ;;

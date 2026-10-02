@@ -1079,12 +1079,54 @@ function withResponse(invite, address, response) {
   return copy
 }
 
-// Whether the panel may draw the buttons at all. A cancellation and a reply
-// somebody else sent are both invitations worth showing and neither is one to
-// answer, and an organiser cannot RSVP to their own meeting.
-function canRespond(invite, address) {
-  if (!invite || invite.method !== "REQUEST") return false
-  if (String(invite.status || "") === "CANCELLED") return false
-  if (replyRecipient(invite) === "") return false
-  return !sameAddress(replyRecipient(invite), address)
+// What a click on Yes, Maybe or No does: "" draws no buttons, "send" sends at
+// once, "confirm" asks first. A cancellation and a reply somebody else sent are
+// both invitations worth showing and neither is one to answer, and an organiser
+// cannot RSVP to their own meeting. An organiser outside the sender's domain is
+// still answerable — plenty of real invitations come through a booking service
+// — but the click that would mail a third party says so before it does.
+function respondStep(invite, address, sender) {
+  if (!invite || invite.method !== "REQUEST") return ""
+  if (String(invite.status || "") === "CANCELLED") return ""
+  if (replyRecipient(invite) === "") return ""
+  if (sameAddress(replyRecipient(invite), address)) return ""
+  return replyMismatch(invite, sender) !== "" ? "confirm" : "send"
+}
+
+// Whether the panel may draw the buttons at all.
+function canRespond(invite, address, sender) {
+  return respondStep(invite, address, sender) !== ""
+}
+
+// Whether a click has to be confirmed first; see `respondStep`.
+function needsConfirm(invite, address, sender) {
+  return respondStep(invite, address, sender) === "confirm"
+}
+
+// The question the card asks before an answer goes to an organiser the
+// message did not come from. It names the address, because "a third party" is
+// not something the reader can check.
+function confirmPrompt(mismatch) {
+  return "Your reply goes to " + String(mismatch || "") + ", not the sender. Send it?"
+}
+
+function domainOf(address) {
+  var text = String(address || "").trim().toLowerCase()
+  var at = text.lastIndexOf("@")
+  return at < 0 ? "" : text.substring(at + 1)
+}
+
+// The organiser's address when an answer would go somewhere the message did not
+// come from, otherwise empty. The ORGANIZER line is inside the sender's file and
+// can name anybody, so an RSVP to it is a mail to a third party that one click
+// sends on the sender's say-so. The domain is what has to agree: a calendar
+// invitation legitimately comes from the organiser's own system, and nothing
+// legitimate names an organiser in a domain the message did not come from. A
+// sender that cannot be read counts as a mismatch.
+function replyMismatch(invite, sender) {
+  var to = replyRecipient(invite)
+  if (to === "") return ""
+  var wanted = domainOf(to)
+  var from = domainOf(sender)
+  return wanted !== "" && wanted === from ? "" : to
 }

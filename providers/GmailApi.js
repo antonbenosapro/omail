@@ -123,8 +123,20 @@ function labelsPath() { return "/users/me/labels" }
 function labelPath(id) { return "/users/me/labels/" + encode(id) }
 function profilePath() { return "/users/me/profile" }
 function sendAsPath() { return "/users/me/settings/sendAs" }
+function draftsPath() { return "/users/me/drafts" }
+function draftPath(id) { return "/users/me/drafts/" + encode(id) }
+function draftSendPath() { return "/users/me/drafts/send" }
 function attachmentPath(messageId, attachmentId) {
   return "/users/me/messages/" + encode(messageId) + "/attachments/" + encode(attachmentId)
+}
+
+// The send endpoint takes a message resource and refuses a field it does not
+// know, so the SMTP envelope the payload carries for the IMAP client is left
+// behind here.
+function sendBody(payload) {
+  var body = { raw: String(payload && payload.raw ? payload.raw : "") }
+  if (payload && payload.threadId) body.threadId = String(payload.threadId)
+  return body
 }
 
 function listQuery(query, maxResults, pageToken) {
@@ -149,7 +161,7 @@ function listQuery(query, maxResults, pageToken) {
 // instead of Reply-To, threaded under nothing, and dropped every Cc.
 var LIST_HEADERS = [
   "From", "To", "Cc", "Subject", "Date",
-  "Reply-To", "Message-ID", "List-Unsubscribe"
+  "Reply-To", "Message-ID", "References", "List-Unsubscribe"
 ]
 
 function metadataQuery() {
@@ -299,18 +311,78 @@ function isSendAsAllowed(aliases, email) {
   return sendAsFor(aliases, email) !== null
 }
 
-// --------------------------------------------------------------- browsing
+// ------------------------------------------------------------------ drafts
 
-// Gmail's web UI addresses accounts by index, not address, and there is no way
-// to map one to the other from the API. Index 0 is right for the common
-// single-account case and wrong in a way the user can see and fix, which beats
-// a link that silently opens somebody else's mailbox.
-function webMessageUrl(messageId, accountIndex) {
-  var index = Math.max(0, Math.floor(Number(accountIndex) || 0))
-  return WEB_BASE + "/" + index + "/#all/" + encode(messageId)
+// A Draft resource: an id, and the message it currently holds. Only `raw` and
+// `threadId` go into the message — the payload this is built from also carries
+// what the IMAP client needs, and Google refuses a request naming a field it
+// does not know.
+function draftResource(draftId, payload) {
+  var source = payload && typeof payload === "object" ? payload : {}
+  var message = { raw: String(source.raw || "") }
+  if (source.threadId) message.threadId = String(source.threadId)
+  var resource = { message: message }
+  var id = String(draftId === undefined || draftId === null ? "" : draftId)
+  if (id !== "") resource.id = id
+  return resource
 }
 
-function webSearchUrl(query, accountIndex) {
-  var index = Math.max(0, Math.floor(Number(accountIndex) || 0))
-  return WEB_BASE + "/" + index + "/#search/" + encode(String(query || ""))
+function parseDraft(payload) {
+  var body = payload && typeof payload === "object" ? payload : {}
+  var message = body.message && typeof body.message === "object" ? body.message : {}
+  return {
+    id: String(body.id || ""),
+    messageId: String(message.id || ""),
+    threadId: String(message.threadId || "")
+  }
+}
+
+function parseDraftList(payload) {
+  var body = payload && typeof payload === "object" ? payload : {}
+  var entries = arrayValues(body.drafts)
+  var drafts = []
+  for (var i = 0; i < entries.length; i++) {
+    var draft = parseDraft(entries[i])
+    if (draft.id !== "") drafts.push(draft)
+  }
+  return { drafts: drafts, nextPageToken: String(body.nextPageToken || "") }
+}
+
+// The list shows messages, and a message is not a draft's address: every
+// update replaces the message under a draft id that stays the same. So the
+// row opened is matched back to the draft that holds it.
+function draftIdForMessage(drafts, messageId) {
+  var list = Array.isArray(drafts) ? drafts : []
+  var wanted = String(messageId || "")
+  if (wanted === "") return ""
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].messageId === wanted) return String(list[i].id || "")
+  }
+  return ""
+}
+
+function draftListQuery(pageToken) {
+  return { maxResults: 500, pageToken: String(pageToken || "") }
+}
+
+// --------------------------------------------------------------- browsing
+
+// Gmail's web UI addresses a signed-in account by its position in the
+// browser's account list, which the API has no way to tell us — so index 0
+// opened the first account's mailbox for every account but the first. The
+// path also takes the address itself, and that names the right mailbox
+// whatever order the browser signed in. An index is still accepted for the
+// case where no address is known.
+function webAccountPath(account) {
+  var text = String(account === undefined || account === null ? "" : account).trim()
+  if (text.indexOf("@") > 0) return encode(text).replace(/%40/g, "@")
+  return String(Math.max(0, Math.floor(Number(text) || 0)))
+}
+
+function webMessageUrl(messageId, account) {
+  return WEB_BASE + "/" + webAccountPath(account) + "/#all/" + encode(messageId)
+}
+
+function webSearchUrl(query, account) {
+  return WEB_BASE + "/" + webAccountPath(account) + "/#search/" + encode(String(query || ""))
 }

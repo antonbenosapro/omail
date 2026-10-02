@@ -79,8 +79,10 @@ Rectangle {
         root.menuRequested(scene.x, scene.y)
       } else if (event.button === Qt.MiddleButton) {
         // Middle-click archives: the one triage action worth having without
-        // moving the pointer to a button.
-        root.archiveRequested()
+        // moving the pointer to a button. Gated the way the button is: where
+        // the account has nowhere to archive to, the gesture does nothing
+        // rather than promise an action the provider cannot keep.
+        if (root.canArchive) root.archiveRequested()
       } else {
         root.activated()
       }
@@ -145,8 +147,12 @@ Rectangle {
     // Ends exactly where the body's text begins, so the three columns still
     // start their content on one vertical line.
     anchors.leftMargin: Style.space(2)
-    anchors.top: parent.top
-    anchors.topMargin: Style.space(9)
+    // Level with the subject line, which is what the dot is about. A fixed
+    // offset from the top was level at 1.0 and nowhere else: the subject grows
+    // with the list zoom and the box was left beside the sender instead. The
+    // slot itself keeps its size, because it has only the body's inset to live
+    // in and the columns' shared left edge is not the gutter's to move.
+    y: body.y + subjectLine.y + (subject.height - height) / 2
     width: Style.space(12)
     height: Style.space(12)
 
@@ -211,14 +217,21 @@ Rectangle {
     // list for; the sender had the top line and the weight, which put the
     // emphasis on who wrote rather than on what about.
     Item {
+      id: subjectLine
       width: parent.width
       implicitHeight: Math.max(subject.implicitHeight, time.implicitHeight)
+      // The time gives way before the subject does. At the top of the zoom range
+      // in a narrow list it took enough of the line to squeeze the subject to a
+      // lone "…", which is a row that says nothing; the time is on the message
+      // itself when it is opened. Six ems is a few words of subject.
+      readonly property bool roomForTime: width - time.implicitWidth - Style.space(8)
+        >= Model.zoomedFontSize(Style.font.body, root.zoom) * 6
 
       Text {
         id: subject
         anchors.left: parent.left
-        anchors.right: time.left
-        anchors.rightMargin: Style.space(8)
+        anchors.right: time.visible ? time.left : parent.right
+        anchors.rightMargin: time.visible ? Style.space(8) : 0
         // A stranger wrote this. Qt's default AutoText switches a string that
         // looks like markup into rich text, and rich text with an <img> in it is
         // a fetch — the same beacon the message body is stripped of.
@@ -233,6 +246,7 @@ Rectangle {
 
       Text {
         id: time
+        visible: subjectLine.roomForTime
         anchors.right: parent.right
         anchors.baseline: subject.baseline
         textFormat: Text.PlainText

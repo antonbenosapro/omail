@@ -236,4 +236,56 @@ assert.strictEqual(oauth.byteLength(""), 0)
   assert.ok(normal.indexOf("CaskaydiaMono Nerd Font") > 0)
 }
 
+// A request without this sign-in's state is ignored, not a failed sign-in.
+{
+  const path = oauth.CALLBACK_PATH
+  const mine = "a".repeat(32)
+  const line = (query) => "GET " + path + query + " HTTP/1.1"
+  assert.strictEqual(oauth.callbackVerdict(line("?code=c&state=" + mine), path, mine).action, "accept")
+  assert.strictEqual(oauth.callbackVerdict(line("?code=c&state=other"), path, mine).action, "ignore",
+    "a wrong state is ignored")
+  assert.strictEqual(oauth.callbackVerdict(line("?code=c"), path, mine).action, "ignore",
+    "no state is ignored")
+  assert.strictEqual(oauth.callbackVerdict(line("?error=access_denied"), path, mine).action, "ignore",
+    "an error with no state is not Google answering this attempt")
+  assert.strictEqual(oauth.callbackVerdict("GET /x HTTP/1.1", path, mine).action, "ignore")
+  assert.strictEqual(oauth.callbackVerdict(line("?error=access_denied&state=" + mine), path, mine).action, "fail",
+    "Google refusing this attempt still ends it")
+  assert.strictEqual(oauth.callbackVerdict(line("?code=c&state="), path, "").action, "ignore")
+}
+
+// ------------------------------------------------- a refresh that failed
+//
+// Only a grant Google has revoked signs a mailbox out. Every other failure —
+// no network at all, a 5xx, a rate limit, a captive portal's HTML — says
+// nothing about the grant, and treating it as a sign-out left a laptop that
+// woke up offline signed out until the shell restarted.
+{
+  const revoked = oauth.parseTokenResponse(400, JSON.stringify({ error: "invalid_grant" }), "1//old")
+  assert.strictEqual(oauth.refreshOutcome(revoked), oauth.REFRESH_SIGNED_OUT)
+
+  const offline = oauth.parseTokenResponse(0, "", "1//old")
+  assert.strictEqual(oauth.refreshOutcome(offline), oauth.REFRESH_RETRY, "status 0 is no network")
+  const serverError = oauth.parseTokenResponse(503, "<html>Service Unavailable</html>", "1//old")
+  assert.strictEqual(oauth.refreshOutcome(serverError), oauth.REFRESH_RETRY)
+  const limited = oauth.parseTokenResponse(429, JSON.stringify({ error: "rate_limit_exceeded" }), "1//old")
+  assert.strictEqual(oauth.refreshOutcome(limited), oauth.REFRESH_RETRY)
+  // A client problem is worth reading about, but the grant is not what broke.
+  const client = oauth.parseTokenResponse(401, JSON.stringify({ error: "invalid_client" }), "1//old")
+  assert.strictEqual(oauth.refreshOutcome(client), oauth.REFRESH_RETRY)
+
+  const fine = oauth.parseTokenResponse(200, JSON.stringify({ access_token: "ya29.x", expires_in: 3599 }), "1//old")
+  assert.strictEqual(oauth.refreshOutcome(fine), oauth.REFRESH_OK)
+  assert.strictEqual(oauth.refreshOutcome(null), oauth.REFRESH_OK)
+
+  // A failure with no words of its own says that nothing is lost; one with
+  // Google's words keeps them.
+  assert.ok(/Retrying/.test(oauth.refreshRetryMessage(offline)))
+  assert.ok(/Retrying/.test(oauth.refreshRetryMessage(serverError)))
+  assert.ok(/OAuth client/.test(oauth.refreshRetryMessage(client)))
+  // Nothing that could carry a credential reaches the sentence.
+  const leaky = { ok: false, error: "bad refresh_token=1//abcdefghijklmnopqrstuvwxyz" }
+  assert.ok(oauth.refreshRetryMessage(leaky).indexOf("abcdefghij") < 0)
+}
+
 console.log("test_oauth.js ok")

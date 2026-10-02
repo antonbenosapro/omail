@@ -13,6 +13,13 @@
 #
 #   imap <b64 url> <b64 user:password> <b64 command> [<b64 command> ...]
 #   smtp <b64 url> <b64 user:password> <b64 from> <b64 message> <b64 rcpt> ...
+#   append <b64 url> <b64 user:password> <b64 message> [<b64 command> ...]
+#
+# `append` is IMAP APPEND: the message is uploaded into the folder the URL
+# names, which is how a draft reaches Drafts and a sent message reaches Sent.
+# libcurl writes the command itself — `APPEND <folder> (\Seen) {size}`, the
+# flag hard-coded — so anything else a stored copy needs, a draft's \Draft
+# flag, is one of the commands that follow on the same connection.
 #
 # base64 rather than the values themselves, for three reasons that each bite
 # once during this script's life:
@@ -91,9 +98,15 @@ credentials=$(decode "$3")
 shift 3
 
 case "$mode" in
-  imap|smtp) ;;
-  *) fail 'mail-transport.sh: mode must be imap or smtp' ;;
+  imap|smtp|append) ;;
+  *) fail 'mail-transport.sh: mode must be imap, smtp or append' ;;
 esac
+
+# The protocol on the wire. An append is an IMAP conversation like any other —
+# the same probe, the same mechanisms and the same capability cache — and only
+# the config it is given differs.
+protocol=$mode
+[ "$mode" = "smtp" ] || protocol=imap
 
 # The URL is built and validated by Imap.js, which has already refused anything
 # carrying userinfo, a port inside the host, or characters that could end the
@@ -104,6 +117,15 @@ case "$url" in
   imaps://*|imap://*|smtps://*|smtp://*) ;;
   *) fail 'mail-transport.sh: refusing a URL that is not imap(s) or smtp(s)' ;;
 esac
+
+# An append is an IMAP request, and a message uploaded to an SMTP URL is a
+# message sent rather than one stored.
+if [ "$mode" = "append" ]; then
+  case "$url" in
+    imaps://*|imap://*) ;;
+    *) fail 'mail-transport.sh: append needs an imap(s) URL' ;;
+  esac
+fi
 
 escaped_url=$(escape "$url")
 escaped_credentials=$(escape "$credentials")
@@ -136,7 +158,7 @@ probe_root() {
   scheme=${root%%://*}
   rest=${root#*://}
   authority=${rest%%/*}
-  if [ "$mode" = "imap" ]; then
+  if [ "$protocol" = "imap" ]; then
     printf '%s://%s/' "$scheme" "$authority"
   else
     printf '%s://%s' "$scheme" "$authority"
@@ -155,7 +177,7 @@ have_kerberos_ticket() {
 # The advertised mechanisms, uppercased and space-padded so a match on
 # " NAME " cannot hit a prefix of a longer one.
 run_probe() {
-  if [ "$mode" = "imap" ]; then
+  if [ "$protocol" = "imap" ]; then
     curl --config - --silent --show-error --max-time 20 --connect-timeout 20 <<PROBE 2>&1
 url = "$1"
 noproxy = "*"
@@ -192,7 +214,7 @@ advertised_mechanisms() {
   # host from probing in parallel at startup — the case that produced the
   # empty answers in the first place.
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omail/capabilities"
-  cache_file="$cache_dir/$(printf '%s|%s' "$mode" "$probe_url" | md5sum | cut -d' ' -f1)"
+  cache_file="$cache_dir/$(printf '%s|%s' "$protocol" "$probe_url" | md5sum | cut -d' ' -f1)"
   if [ -s "$cache_file" ]; then
     cat "$cache_file"
     return 0
@@ -313,6 +335,25 @@ if [ "$mode" = "smtp" ]; then
   # from a file rather than from a string — stdin is already carrying this
   # config. It lands in the 0700 directory the trap removes on any exit.
   printf 'upload-file = "%s"\n' "$(escape "$work/message")"
+elif [ "$mode" = "append" ]; then
+  # The upload is the first section, and the URL's path is the folder it is
+  # stored in. Every command after it is a section of its own on the same
+  # connection, with the same folder selected — which is where the copy just
+  # stored can be found again and flagged.
+  shift 1
+  printf 'url = "%s"\n' "$escaped_url"
+  printf 'noproxy = "*"\n'
+  printf 'user = "%s"\n' "$escaped_credentials"
+  [ -z "$mechanism" ] || printf 'login-options = "AUTH=%s"\n' "$mechanism"
+  printf 'upload-file = "%s"\n' "$(escape "$work/message")"
+  for argument in "$@"; do
+    printf 'next\n'
+    printf 'url = "%s"\n' "$escaped_url"
+    printf 'noproxy = "*"\n'
+    printf 'user = "%s"\n' "$escaped_credentials"
+    [ -z "$mechanism" ] || printf 'login-options = "AUTH=%s"\n' "$mechanism"
+    printf 'request = "%s"\n' "$(escape "$(decode "$argument")")"
+  done
 else
   # IMAP: one section per command, so a sequence — search a folder, then fetch
   # what came back — runs on a single connection. curl reuses the connection
@@ -344,6 +385,11 @@ fi
 if [ "$mode" = "smtp" ]; then
   [ $# -ge 3 ] || fail 'mail-transport.sh: smtp needs a sender, a message and a recipient'
   decode "$2" > "$work/message"
+elif [ "$mode" = "append" ]; then
+  decode "$1" > "$work/message"
+  # An empty upload is not a message, and libcurl refuses to APPEND one whose
+  # size it cannot state.
+  [ -s "$work/message" ] || fail 'mail-transport.sh: append needs a message'
 fi
 
 # curl is the last stage, so `$?` is curl's own exit code rather than the
@@ -401,10 +447,23 @@ while : ; do
   # the time after: retrying it spends seven seconds to reach the identical
   # answer while the panel shows nothing. The rest are connection-level and
   # say nothing about whether the request was right.
-  case "$status" in
-    35|52|55|56) ;;
-    *) break ;;
-  esac
+  #
+  # An append or a send is retried only when no connection was made at all: 7
+  # (could not connect) and 35 (the TLS handshake failed, so no LOGIN either).
+  # 52, 55 and 56 can arrive after the server took the message — an APPEND
+  # stored, an SMTP DATA accepted — and running the whole config again would
+  # store a second copy or deliver the mail twice.
+  if [ "$mode" = "imap" ]; then
+    case "$status" in
+      35|52|55|56) ;;
+      *) break ;;
+    esac
+  else
+    case "$status" in
+      7|35) ;;
+      *) break ;;
+    esac
+  fi
   [ "$attempt" -lt 4 ] || break
   # 1, 2, 4 seconds. Doubling keeps the early retry quick for a single dropped
   # connection while still reaching a useful total for a throttled one.
@@ -421,7 +480,7 @@ done
 set -e
 
 printf '%s\n' "$status"
-if [ "$mode" = "imap" ] && [ ! -s "$work/out" ] && [ -s "$work/headers" ]; then
+if [ "$protocol" = "imap" ] && [ ! -s "$work/out" ] && [ -s "$work/headers" ]; then
   # libcurl recognises only a single numeric UID as a BODY FETCH. A legal IMAP
   # sequence-set is treated as a generic custom request, whose response is
   # delivered through curl's protocol-header callback instead of stdout.

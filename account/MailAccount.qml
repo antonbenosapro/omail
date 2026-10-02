@@ -8,9 +8,11 @@ import "../cache/Cache.js" as Cache
 import "../message/Html.js" as Html
 import "../providers/GmailApi.js" as Api
 import "../message/Message.js" as Mail
+import "../message/Draft.js" as Draft
 import "../message/Calendar.js" as Calendar
 import "../message/Unsubscribe.js" as Unsub
 import "Model.js" as Model
+import "Accounts.js" as Accounts
 import "../providers/Registry.js" as Provider
 import "../providers/ImapProtocol.js" as Imap
 import "../providers/OAuth.js" as OAuth
@@ -109,6 +111,9 @@ Item {
   // notice offers no Undo rather than one that would fail after the user had
   // committed to it.
   readonly property bool canUndo: Provider.can(providerId, "undo")
+  // Whether unsent mail can be kept on the server: a Drafts mailbox, a compose
+  // that saves itself, and an Escape that keeps what was written.
+  readonly property bool canDraft: Provider.can(providerId, "drafts")
 
   // What the cache is keyed on. The page size is part of it: the same query at
   // a different size is a different result set, not a stale one.
@@ -134,6 +139,17 @@ Item {
   property bool listLoaded: false
   property var listHandle: null
   property int listSerial: 0
+  // Bumped by every navigation, and only by navigation. `listSerial` also
+  // moves on each poll and load-more, which replace nothing the user chose;
+  // this is what an answer arriving late compares against to know whether the
+  // list it would change is still the one it was sent from.
+  property int viewSerial: 0
+  // What is on screen for `Model.survivesAction`: the mailbox, or a label or a
+  // search opened over it.
+  readonly property string viewKey: Model.listViewKey(mailboxKey, searchQuery, rawQuery)
+  // Whether an action moves a message between folders rather than relabelling
+  // it, which is what decides whether IMAP's archive leaves Flagged.
+  readonly property bool movesBetweenFolders: !hasLabels
 
   property string selectedId: ""
   property var selectedMessage: null
@@ -217,7 +233,14 @@ Item {
   readonly property string selectedResponse: selectedInvite
     ? Calendar.responseOf(selectedInvite, receivedAsAddress) : ""
   readonly property bool canRespondToInvite: !!selectedInvite && canSend
-    && Calendar.canRespond(selectedInvite, receivedAsAddress)
+    && Calendar.canRespond(selectedInvite, receivedAsAddress, senderAddress)
+  // Who the message says it is from, and, when the invitation would be answered
+  // to someone else, who that is. The card asks before sending to them.
+  readonly property string senderAddress: selectedMessage && selectedMessage.from
+    ? String(selectedMessage.from.email || "") : ""
+  readonly property string inviteMismatch: selectedInvite
+    && selectedInvite.method === "REQUEST" && String(selectedInvite.status || "") !== "CANCELLED"
+    ? Calendar.replyMismatch(selectedInvite, senderAddress) : ""
 
   readonly property string unsubscribeLabel: unsubscribeDone !== "" ? ""
     : Unsub.label(selectedUnsubscribe, canSend)
@@ -283,9 +306,14 @@ Item {
   // control that vanishes under the pointer reads as a misclick.
   property bool undoBusy: false
   readonly property string undoLabel: Model.undoActionLabel(undoRecord)
+  // The file the last save wrote, offered as an explicit Open beside the notice.
+  // Saving never opens anything by itself: the sender chose the file.
+  property string openPath: ""
+  readonly property string openLabel: openPath !== "" ? "Open..." : ""
   // Where the cursor belongs once the offer is taken: the first row it would
   // put back, as a row key, because a bare id addresses no row in a merged list.
-  readonly property string undoKey: Model.undoCursorKey(undoRecord)
+  // Empty when the undo would not put its rows into the list on screen.
+  readonly property string undoKey: Model.undoCursorKey(undoRecord, viewStamp())
 
   // Notifications only start once the first successful load has established
   // what was already there.
@@ -371,6 +399,7 @@ Item {
     lastError = ""
     actionStatus = ""
     undoRecord = null
+    openPath = ""
   }
 
   // One call sets the sentence and whatever it offers, so the two cannot be set
@@ -381,6 +410,7 @@ Item {
   function note(text, record) {
     actionStatus = String(text || "")
     undoRecord = record || null
+    openPath = ""
     if (actionStatus !== "") noticeTimer.restart()
   }
 
@@ -400,11 +430,13 @@ Item {
   function refreshCounts() {
     if (!ready || countLoading) return
     countLoading = true
+    var serial = sessionSerial
     // Counted with the same query the Unread mailbox uses, not from the INBOX
     // label. The label counts every categorised message too, which is how this
     // reached 2483 on a real account — a number that is never zero, can only be
     // reported as "999+", and cannot tell anyone whether something is waiting.
     api.listMessages(Provider.unreadQuery(providerId), 1, "", function(page, error) {
+      if (serial !== root.sessionSerial) return
       root.countLoading = false
       if (error || !page) return
       var before = root.inboxUnread
@@ -431,15 +463,36 @@ Item {
     })
   }
 
-  function loadProfile() {
-    if (!ready || profile) return
-    if (cacheStore.loaded && cacheStore.store.profile) profile = cacheStore.store.profile
+  // Which session the answers in flight belong to. Signing out and being
+  // handed a different mailbox both move it, and a reply stamped with an older
+  // one is dropped: otherwise a count or a label list that was already in the
+  // air lands after the sign-out and puts the old mailbox back on screen.
+  property int sessionSerial: 0
+
+  // `force` is for right after a sign-in. A profile already on screen is not
+  // proof of who just signed in: re-signing in to an expired session opens
+  // Google's account chooser, and picking a different account there used to
+  // file that account's token and mail under this one's name.
+  function loadProfile(force) {
+    if (!ready || (profile && force !== true)) return
+    if (!profile && cacheStore.loaded && cacheStore.store.profile) profile = cacheStore.store.profile
+    var serial = sessionSerial
     api.getProfile(function(result, error) {
+      if (serial !== root.sessionSerial) return
       if (error || !result) return
       // The shell can tear this account down — a reload, a removed account —
       // while the request is still in the air. The object outlives its methods
       // for a moment, so the reply has to check before it uses them.
       if (typeof cacheStore.bindAccount !== "function") return
+      // A mailbox that already has a name only ever accepts that name back.
+      // Only an OAuth sign-in can come back as somebody else; an IMAP profile
+      // is the address the user typed.
+      if (root.accountId !== "" && String(result.email || "") !== ""
+          && Provider.usesOAuth(root.providerId)
+          && !Accounts.isSameMailbox(root.accountId, result.email, root.providerId)) {
+        root.rejectIdentity(String(result.email))
+        return
+      }
       root.profile = result
       if (result.email !== "") root.accountIdentified(result.email)
       // A cache belongs to one mailbox. Binding the address here is what stops
@@ -449,11 +502,23 @@ Item {
     })
   }
 
+  // Signed in as the wrong account. The token just stored is under this
+  // mailbox's name and is not this mailbox's, so the sign-out that drops it is
+  // the whole remedy; the sentence says which account to choose next time.
+  function rejectIdentity(email) {
+    var expected = configuredEmail !== "" ? configuredEmail : accountId
+    signOut()
+    fail("That sign-in was " + email + ", not " + expected + ". Sign in again and choose "
+      + expected)
+  }
+
   function loadLabels() {
     if (!ready) return
     if (cacheStore.loaded && cacheStore.store.labels.length > 0 && labels.length === 0)
       labels = cacheStore.store.labels
+    var serial = sessionSerial
     api.getLabels(function(result, error) {
+      if (serial !== root.sessionSerial) return
       if (error) return
       root.labels = result
       cacheStore.putLabels(result)
@@ -467,7 +532,9 @@ Item {
   function loadSendAs() {
     if (!ready || sendAsLoading || sendAsLoaded) return
     sendAsLoading = true
+    var serial = sessionSerial
     api.getSendAs(function(result, error) {
+      if (serial !== root.sessionSerial) return
       root.sendAsLoading = false
       // Not a notice: a sender list that did not arrive costs the user a menu,
       // not a mailbox, and a banner over the inbox would be out of proportion.
@@ -556,8 +623,8 @@ Item {
           return
         }
         root.resultEstimate = page.estimate
-        root.nextPageToken = page.nextPageToken
         if (page.ids.length === 0) {
+          root.nextPageToken = page.nextPageToken
           root.listLoading = false
           root.listLoaded = true
           if (!append) {
@@ -577,11 +644,14 @@ Item {
           root.listRefreshed()
           return
         }
-        root.fetchSummaries(page.ids, append, serial)
+        // A first page's token is settled with the merge in `applySummaries`,
+        // which is the moment it is known whether loaded pages are kept.
+        if (append) root.nextPageToken = page.nextPageToken
+        root.fetchSummaries(page.ids, append, serial, page.nextPageToken)
       })
   }
 
-  function fetchSummaries(ids, append, serial) {
+  function fetchSummaries(ids, append, serial, pageToken) {
     api.getMessages(ids, false, function(payloads, error) {
       if (serial !== root.listSerial) return
       root.listLoading = false
@@ -592,11 +662,13 @@ Item {
       var now = new Date()
       var summaries = []
       for (var i = 0; i < payloads.length; i++) summaries.push(Mail.summarize(payloads[i], now))
-      root.applySummaries(summaries, append)
+      root.applySummaries(summaries, append, pageToken)
+      // The cache holds page one, so it keeps page one's own token whatever
+      // the list on screen kept.
       if (!append) cacheStore.putQuery(root.cacheKey, ({
         summaries: summaries,
         estimate: root.resultEstimate,
-        nextPageToken: root.nextPageToken
+        nextPageToken: String(pageToken || "")
       }))
     }, listHandle)
   }
@@ -626,12 +698,23 @@ Item {
     return out
   }
 
-  function applySummaries(rawSummaries, append) {
+  function applySummaries(rawSummaries, append, pageToken) {
     var summaries = tagOwnership(rawSummaries)
+    // Decided before the merge, from the same count the merge reads, so the
+    // token and the rows kept cannot disagree: more than a page listed keeps
+    // the token for the page after the last one, which is the page kept.
+    if (!append) nextPageToken = Model.tokenAfterFirstPage(root.messages.length,
+      root.maxMessages, nextPageToken, pageToken)
     // Appended with the seam row dropped. IMAP re-runs the whole SEARCH and
     // slices it, so a message arriving between two pages pushes the boundary
     // down and the first row of the new page is the last row of the old one.
-    var merged = append ? Model.appendPage(root.messages, summaries) : summaries
+    //
+    // A first page is laid over what is already listed rather than replacing
+    // it. Each poll reloads page one, and replacing the list threw away every
+    // page loaded since — and the marks on them, which are filtered against
+    // the list. A navigation empties the list first, so there it is the page.
+    var merged = append ? Model.appendPage(root.messages, summaries)
+      : Model.mergeFirstPage(root.messages, summaries, root.maxMessages)
     var arrivals = append ? [] : Model.newArrivals(summaries, seenIds, notificationsPrimed)
 
     var seen = {}
@@ -913,7 +996,7 @@ Item {
     return Quickshell.env("HOME") + "/Downloads"
   }
 
-  // Save one attachment and let the desktop open it.
+  // Save one attachment. Opening it is a separate, explicit offer.
   //
   // For IMAP this costs no request: the whole message was fetched to read it,
   // so `getAttachment` walks the MIME tree it already holds. Gmail describes a
@@ -940,8 +1023,8 @@ Item {
     var messageId = selectedId
 
     api.getAttachment(messageId, wanted, function(data, error) {
-      // The reader moved on. The file would still be correct, but opening a
-      // viewer for a message the user has left is not what the click asked
+      // The reader moved on. The file would still be correct, but offering to open a
+      // file for a message the user has left is not what the click asked
       // for.
       if (messageId !== root.selectedId) {
         root.savingAttachment = ""
@@ -995,10 +1078,22 @@ Item {
       root.savingAttachment = ""
       var name = savedAs !== "" ? savedAs : filename
       savedAs = ""
-      if (code === 0) root.note("Saved " + name + " to Downloads")
-      else root.fail("Could not save " + filename)
+      if (code === 0) {
+        root.note("Saved " + name + " to Downloads")
+        root.openPath = Model.savedPath(root.downloadDirectory, name)
+        // Counted again from here, at the longer interval the offer earns.
+        noticeTimer.restart()
+      } else root.fail("Could not save " + filename)
       filename = ""
     }
+  }
+
+  // Takes the Open offer beside a save notice. The path is read before it is
+  // spent, and goes to the process as one argument.
+  function openSaved() {
+    var command = Model.openCommand(openPath)
+    openPath = ""
+    if (command.length > 0) Quickshell.execDetached(command)
   }
 
   function showRemoteImages() {
@@ -1037,6 +1132,28 @@ Item {
     return Model.cursorAfterOffset(messages, cursorKey, delta)
   }
 
+  // Whether a row stays in the list on screen after `action`. The window asks
+  // this too, to move its cursor the same way the list is about to move.
+  function survives(action) {
+    return Model.survivesAction(viewKey, action, movesBetweenFolders)
+  }
+
+  function viewStamp() {
+    return Model.viewStamp(viewSerial, viewKey)
+  }
+
+  // Every address this mailbox sends as, for telling its own mail from mail
+  // it received.
+  function ownAddresses() {
+    var out = []
+    if (ownAddress !== "") out.push(ownAddress)
+    var aliases = availableSendAsAliases
+    for (var i = 0; i < aliases.length; i++) {
+      if (aliases[i] && aliases[i].email) out.push(String(aliases[i].email))
+    }
+    return out
+  }
+
   // -------------------------------------------------------------- actions
 
   // Every action moves the list immediately and reconciles afterwards. Waiting
@@ -1052,7 +1169,13 @@ Item {
     if (index < 0) return
     var before = messages[index]
     var updated = Model.applyLabelChange(before, action)
-    var survives = Model.survivesAction(mailboxKey, action)
+    var survives = root.survives(action)
+    var view = viewStamp()
+    // Untrashing from the Trash mailbox, where nothing recorded where the
+    // message had been. Sent mail goes back to Sent rather than to INBOX.
+    var folder = String(restoreFolder || "")
+    if (action === "untrash" && folder === "")
+      folder = Model.untrashFolder(before, ownAddresses())
 
     if (action === "markRead" && before.unread) inboxUnread = Math.max(0, inboxUnread - 1)
     if (action === "markUnread" && !before.unread) inboxUnread = inboxUnread + 1
@@ -1072,10 +1195,13 @@ Item {
       else selectedMessage = updated
     }
 
+    // Back into the list it left, and only that one: after a navigation the
+    // row belongs to a mailbox that is no longer drawn, and its index means
+    // nothing in the rows that replaced it.
     function restore(error) {
-      root.messages = removed
-        ? root.messages.slice(0, index).concat([before], root.messages.slice(index))
-        : Model.replaceById(root.messages, before)
+      if (Model.sameView(view, root.viewStamp()))
+        root.messages = Model.revertRows(root.messages,
+          [Model.undoEntry(before, index)], removed)
       root.refreshCounts()
       root.fail(error)
     }
@@ -1085,7 +1211,7 @@ Item {
     // list, and on IMAP the message has moved to another folder under a UID
     // this client is never told. A record rebuilt afterwards would be a guess.
     var undo = quiet === true || !canUndo ? null
-      : Model.undoRecordFor(action, [Model.undoEntry(before, index)], mailboxKey)
+      : Model.undoRecordFor(action, [Model.undoEntry(before, index)], viewKey, view)
 
     pendingAction = action
     var done = function(payload, error) {
@@ -1102,7 +1228,7 @@ Item {
     // The folder it came from, not a guess. Untrashing moved every message to
     // INBOX once, so undoing a trash from Archive put the message somewhere it
     // had never been. Gmail names no folder and is handed none.
-    else if (action === "untrash") api.untrashMessage(messageId, done, restoreFolder)
+    else if (action === "untrash") api.untrashMessage(messageId, done, folder)
     else {
       var change = Model.labelChangesFor(action)
       if (!change) {
@@ -1133,12 +1259,15 @@ Item {
     var verb = String(action || "")
     if (verb === "") return
 
-    var before = messages.slice()
     var beforeUnread = inboxUnread
-    var survives = Model.survivesAction(mailboxKey, verb)
+    var survives = root.survives(verb)
+    var view = viewStamp()
     var next = []
     var touched = 0
-    var undoEntries = []
+    // Every touched row with its index, for putting back on a refusal; the
+    // undo offer is the same entries, kept only where undo is offered at all.
+    var entries = []
+    var folders = {}
     for (var i = 0; i < messages.length; i++) {
       var row = messages[i]
       if (wanted.indexOf(row.id) < 0) {
@@ -1150,7 +1279,8 @@ Item {
       // the reason the single-message path builds its own early: afterwards the
       // row is out of the list, and on IMAP it carries a UID this client is
       // never told. Rebuilt later it would be a guess.
-      if (canUndo) undoEntries.push(Model.undoEntry(row, i))
+      entries.push(Model.undoEntry(row, i))
+      if (verb === "untrash") folders[row.id] = Model.untrashFolder(row, ownAddresses())
       if (verb === "markRead" && row.unread) inboxUnread = Math.max(0, inboxUnread - 1)
       if (verb === "markUnread" && !row.unread) inboxUnread = inboxUnread + 1
       // The reader is showing one of these and it is about to leave the list.
@@ -1162,9 +1292,14 @@ Item {
     if (touched === 0) return
     messages = next
 
+    // Only the touched rows, and only into the list they came from: a poll
+    // may have refreshed the rest meanwhile, and after a navigation none of
+    // these rows belongs to what is on screen.
     function restore(error) {
-      root.messages = before
-      root.inboxUnread = beforeUnread
+      if (Model.sameView(view, root.viewStamp())) {
+        root.messages = Model.revertRows(root.messages, entries, !survives)
+        root.inboxUnread = beforeUnread
+      }
       root.refreshCounts()
       root.fail(error)
     }
@@ -1189,8 +1324,8 @@ Item {
       // mail the user never trashed — so the honest notice is the count alone,
       // with no button beside it.
       root.note(Model.bulkResultLabel(verb, moved, touched),
-        Model.offersUndoAfterBulk(moved, touched)
-          ? Model.undoRecordFor(verb, undoEntries, mailboxKey) : null)
+        canUndo && Model.offersUndoAfterBulk(moved, touched)
+          ? Model.undoRecordFor(verb, entries, viewKey, view) : null)
       root.refreshCounts()
       // A partial failure leaves the list disagreeing with the server about
       // the messages that did not move, and only the server knows which.
@@ -1214,14 +1349,14 @@ Item {
           if (!error) restored++
           remaining--
           if (remaining === 0) done({ done: restored }, firstError)
-        })
+        }, folders[wanted[u]] || "")
       }
       return
     }
     var change = Model.labelChangesFor(verb)
     if (!change) {
       pendingAction = ""
-      messages = before
+      messages = Model.revertRows(messages, entries, !survives)
       return
     }
     api.batchModify(wanted, change.add, change.remove, done)
@@ -1241,12 +1376,18 @@ Item {
     if (!Model.isUndoable(record)) return
     var entries = record.entries
     var reverse = record.reverse
+    // Taken from another mailbox than the one on screen, the restore still
+    // happens on the server — that is what was offered — but the rows are not
+    // inserted into a list they were never in. A refresh afterwards shows them
+    // if they do belong here.
+    var view = viewStamp()
+    var here = Model.undoRestoresHere(record, view)
 
     // The offer is spent the moment it is taken. Leaving it up would let a
     // second press ask the server to restore what it is already restoring.
     undoRecord = null
     undoBusy = true
-    messages = Model.restoreEntries(messages, entries)
+    if (here) messages = Model.restoreEntries(messages, entries)
 
     var remaining = entries.length
     var firstError = ""
@@ -1256,16 +1397,20 @@ Item {
       root.undoBusy = false
       if (firstError !== "") {
         // The server kept the message where it was put, so the list must not
-        // claim otherwise. The rows go back out and the reason is shown.
-        for (var i = 0; i < entries.length; i++) {
-          root.messages = Model.removeById(root.messages, entries[i].id,
-            root.accountId)
+        // claim otherwise. The rows go back out and the reason is shown —
+        // from the list they were put into, if it is still the one on screen.
+        if (here && Model.sameView(view, root.viewStamp())) {
+          for (var i = 0; i < entries.length; i++) {
+            root.messages = Model.removeById(root.messages, entries[i].id,
+              root.accountId)
+          }
         }
         root.fail(firstError)
         return
       }
       root.note(root.actionLabel(reverse))
       root.refreshCounts()
+      if (!here) root.refresh()
     }
 
     for (var i = 0; i < entries.length; i++) {
@@ -1315,15 +1460,28 @@ Item {
       if (messages[i].unread) ids.push(messages[i].id)
     }
     if (ids.length === 0) return
-    var before = messages.slice()
+    var survives = root.survives("markRead")
+    var view = viewStamp()
+    var entries = []
     var next = []
-    for (var j = 0; j < messages.length; j++) next.push(Model.applyLabelChange(messages[j], "markRead"))
-    messages = Model.survivesAction(mailboxKey, "markRead") ? next : []
+    for (var j = 0; j < messages.length; j++) {
+      if (messages[j].unread) entries.push(Model.undoEntry(messages[j], j))
+      next.push(Model.applyLabelChange(messages[j], "markRead"))
+    }
+    // Only the unread rows leave a list that drops read mail; the rest were
+    // already read and stay. Emptying the whole list took them with it.
+    var kept = []
+    for (var k = 0; k < next.length; k++) {
+      if (survives || !messages[k].unread) kept.push(next[k])
+    }
+    messages = kept
     pendingAction = "markRead"
     api.batchModify(ids, [], ["UNREAD"], function(payload, error) {
       root.pendingAction = ""
       if (error) {
-        root.messages = before
+        // Back into the list it was taken from, and nowhere else.
+        if (Model.sameView(view, root.viewStamp()))
+          root.messages = Model.revertRows(root.messages, entries, !survives)
         root.fail(error)
         return
       }
@@ -1340,7 +1498,7 @@ Item {
   function send(fields) {
     if (!ready || sending) return
     var values = fields || ({})
-    var body = String(values.body || "").trim()
+    var body = Mail.outgoingBody(values.body)
     if (body === "") {
       fail("Write something before sending")
       return
@@ -1360,7 +1518,7 @@ Item {
       return
     }
     sending = true
-    api.sendMessage(Mail.buildSendPayload({
+    root.dispatchSend(values.draftId, Mail.buildSendPayload({
       from: from,
       fromName: alias ? String(alias.displayName || "") : "",
       to: to,
@@ -1376,12 +1534,131 @@ Item {
         root.fail(error)
         return
       }
-      root.note("Sent")
+      root.note(root.sentNote(payload))
       root.replySent()
+    }, function(copyError) {
+      // Heard after "Sent", and only when something went wrong: the message
+      // has gone either way, and a copy that landed needs no sentence.
+      if (copyError) root.note("Sent, but no copy was kept in Sent: " + copyError)
     })
   }
 
   signal replySent()
+
+  // ---------------------------------------------------------------- drafts
+
+  // A send from a saved draft goes through the draft, so the provider can
+  // remove it as part of sending: one request on Gmail, a send and then a
+  // removal on IMAP. Anything else is an ordinary send.
+  //
+  // `filed` hears how the Sent copy went, on a provider that files one itself
+  // after the send has been answered; Gmail never calls it.
+  function dispatchSend(draftId, payload, callback, filed) {
+    var id = String(draftId || "")
+    if (id === "") return api.sendMessage(payload, callback, filed)
+    return api.sendDraft(id, payload, function(result, error) {
+      if (!error) root.refreshDrafts()
+      callback(result, error)
+    }, filed)
+  }
+
+  // "Sent" is the whole sentence only when everything that goes with a send
+  // happened. The message is gone either way, so what did not land is said
+  // beside it rather than as a failure. The Sent copy is told apart, through
+  // `dispatchSend`'s `filed`, because it lands after this.
+  function sentNote(result) {
+    var answer = result || ({})
+    if (answer.draftError) return "Sent, but the draft is still in Drafts: " + answer.draftError
+    return "Sent"
+  }
+
+  // A row in the list is a draft this mailbox can reopen into compose.
+  function isDraft(id) {
+    if (!canDraft) return false
+    var index = Model.indexById(messages, id, accountId)
+    return index >= 0 && messages[index].isDraft === true
+  }
+
+  // The Drafts mailbox on screen is a list of what was saved, and a save, a
+  // send or a discard changes it. Only that mailbox: anywhere else nothing a
+  // draft did is on screen.
+  function refreshDrafts() {
+    if (mailboxKey === "drafts" && searchQuery === "" && rawQuery === "") refresh()
+  }
+
+  // The stored message, as the fields a compose window is filled from, plus
+  // the id a save or a send addresses — which on Gmail is the draft's and not
+  // the message's, so it is asked for.
+  function openDraft(id, callback) {
+    var messageId = String(id || "")
+    if (!ready || !canDraft || messageId === "") {
+      if (typeof callback === "function") callback(null, "This mailbox cannot keep drafts")
+      return
+    }
+    api.getMessage(messageId, true, function(payload, error) {
+      if (error || !payload) {
+        root.fail(error || "Could not open that draft")
+        if (typeof callback === "function") callback(null, error || "Could not open that draft")
+        return
+      }
+      var fields = Draft.fieldsFromMessage(payload)
+      api.draftIdFor(messageId, function(draftId, lookupError) {
+        if (lookupError || !draftId) {
+          root.fail(lookupError || "That draft is no longer in the mailbox")
+          if (typeof callback === "function") callback(null, lookupError)
+          return
+        }
+        fields.draftId = draftId
+        if (typeof callback === "function") callback(fields, "")
+      })
+    })
+  }
+
+  // Saves the window's fields as the draft `draftId` names, or as a new draft
+  // when it names none. The answer's `id` is what the next save and the send
+  // address: Gmail keeps one, IMAP issues a new one with every copy stored.
+  //
+  // The From is checked against the alias list for the same reason a send
+  // checks it — a stored draft is the message Send would build.
+  function saveDraft(draftId, token, fields, callback) {
+    if (!ready || !canDraft) {
+      if (typeof callback === "function") callback(null, "This mailbox cannot keep drafts")
+      return
+    }
+    var values = fields || ({})
+    var from = String(values.from || "").trim()
+    var alias = from === "" ? null : Api.sendAsFor(availableSendAsAliases, from)
+    api.saveDraft(String(draftId || ""), Draft.payload({
+      from: alias ? from : "",
+      fromName: alias ? String(alias.displayName || "") : "",
+      to: String(values.to || "").trim(),
+      cc: String(values.cc || "").trim(),
+      subject: String(values.subject || ""),
+      body: String(values.body || ""),
+      threadId: values.threadId,
+      inReplyTo: values.inReplyTo,
+      references: values.references
+    }, token), function(result, error) {
+      if (!error) root.refreshDrafts()
+      if (typeof callback === "function") callback(result, error)
+    })
+  }
+
+  // Discarding a saved draft removes it from the server. A failure is said,
+  // because the draft is then still sitting in Drafts after the user threw it
+  // away.
+  function deleteDraft(draftId, callback) {
+    var id = String(draftId || "")
+    if (!ready || !canDraft || id === "") {
+      if (typeof callback === "function") callback("")
+      return
+    }
+    api.deleteDraft(id, function(ignored, error) {
+      if (error) root.fail("The draft could not be removed from Drafts: " + error)
+      else root.refreshDrafts()
+      if (typeof callback === "function") callback(error || "")
+    })
+  }
 
   // ------------------------------------------------------------------ RSVP
 
@@ -1477,6 +1754,10 @@ Item {
     var how = Unsub.plan(info, canSend)
     if (how === "") return
     clearNotice()
+    // The message the request is about. The reader can move on while the
+    // request is out, and the answer must not mark whatever is open by then
+    // as the one that was unsubscribed from.
+    var about = selectedId
 
     if (how === "browser") {
       Qt.openUrlExternally(info.url)
@@ -1507,12 +1788,13 @@ Item {
           root.fail(error)
           return
         }
+        if (root.selectedId !== about) return
         root.unsubscribeDone = "Unsubscribe request sent to " + info.mail.to
       })
       return
     }
 
-    postUnsubscribe(info.postUrl)
+    postUnsubscribe(info.postUrl, about)
   }
 
   // The RFC 8058 one-click request: a fixed body, to an https address on the
@@ -1524,25 +1806,38 @@ Item {
   // The reply is never read beyond its status. It is a document from whoever
   // sent the mail, and the only question being asked of it is whether the
   // address is off the list.
-  function postUnsubscribe(url) {
+  //
+  // `about` is the message open when it was sent; the answer only marks the
+  // reader if that message is still the one open.
+  function postUnsubscribe(url, about) {
+    if (unsubscribePoster.running) return
+    unsubscribePoster.about = String(about || "")
     unsubscribing = true
-    var request = new XMLHttpRequest()
-    request.onreadystatechange = function() {
-      if (request.readyState !== XMLHttpRequest.DONE) return
-      if (!root) return
+    unsubscribePoster.command = Unsub.postCommand(url)
+    unsubscribePoster.running = true
+  }
+
+  // curl, not XMLHttpRequest: the engine follows a redirect by itself, and the
+  // sender's address must not be able to send this request anywhere else.
+  Process {
+    id: unsubscribePoster
+
+    // The message open when the request went out; see postUnsubscribe.
+    property string about: ""
+
+    stdout: StdioCollector { id: posterOutput; waitForEnd: true }
+
+    onExited: function(code) {
       root.unsubscribing = false
-      var status = Number(request.status) || 0
-      if (status >= 200 && status < 400) {
-        root.unsubscribeDone = "Unsubscribed from this list"
+      var status = code === 0 ? Unsub.postStatus(posterOutput.text) : 0
+      if (Unsub.postSucceeded(status)) {
+        if (root.selectedId === unsubscribePoster.about) root.unsubscribeDone = "Unsubscribed from this list"
         return
       }
       root.fail(status === 0
         ? "The unsubscribe request could not be sent"
         : "This list refused the unsubscribe request (" + status + ")")
     }
-    request.open("POST", url)
-    request.setRequestHeader("Content-Type", Unsub.postContentType())
-    request.send(Unsub.postBody())
   }
 
   // -------------------------------------------------------- notifications
@@ -1550,13 +1845,17 @@ Item {
   function notify(arrivals) {
     var list = Array.isArray(arrivals) ? arrivals : []
     if (list.length === 0) return
+    // Which mailbox it came to. With several accounts a sender's name alone
+    // does not say whether the mail is waiting in work or at home.
+    var mailbox = ownAddress
     // "--" before the summary and body: both are written by whoever sent the
     // mail, and a display name of "-u" would otherwise be read by notify-send
     // as an option rather than as a name.
     if (list.length === 1) {
       Quickshell.execDetached(["notify-send", "-a", "Omail", "-i",
         root.pluginDir + "/assets/omail.svg",
-        "--", Model.notificationTitle(list[0]), Model.notificationBody(list[0])])
+        "--", Accounts.notificationHeading(Model.notificationTitle(list[0]), mailbox),
+        Model.notificationBody(list[0])])
       return
     }
     // One notification per message turns a batch sync into a wall of popups.
@@ -1564,7 +1863,8 @@ Item {
     for (var i = 0; i < list.length && i < 3; i++) names.push(Model.notificationTitle(list[i]))
     Quickshell.execDetached(["notify-send", "-a", "Omail", "-i",
       root.pluginDir + "/assets/omail.svg",
-      "--", Model.pluralize(list.length, "new message"), names.join(", ")])
+      "--", Accounts.notificationHeading(Model.pluralize(list.length, "new message"), mailbox),
+      names.join(", ")])
   }
 
   // ------------------------------------------------------------ navigation
@@ -1574,6 +1874,7 @@ Item {
     mailboxKey = String(key || "inbox")
     searchQuery = ""
     rawQuery = ""
+    viewSerial++
     clearSelection()
     messages = []
     listLoaded = false
@@ -1586,6 +1887,7 @@ Item {
     searchQuery = query
     // Typing in the search box leaves whatever label was selected.
     rawQuery = ""
+    viewSerial++
     clearSelection()
     messages = []
     listLoaded = false
@@ -1599,6 +1901,7 @@ Item {
     if (query === "" || query === rawQuery) return
     searchQuery = ""
     rawQuery = query
+    viewSerial++
     clearSelection()
     messages = []
     listLoaded = false
@@ -1606,11 +1909,11 @@ Item {
   }
 
   function openInBrowser(id) {
-    Quickshell.execDetached(["xdg-open", Api.webMessageUrl(id, 0)])
+    Quickshell.execDetached(["xdg-open", Api.webMessageUrl(id, ownAddress)])
   }
 
   function openWebInbox() {
-    Quickshell.execDetached(["xdg-open", Api.webSearchUrl(effectiveQuery, 0)])
+    Quickshell.execDetached(["xdg-open", Api.webSearchUrl(effectiveQuery, ownAddress)])
   }
 
   function openCloudConsole() {
@@ -1630,7 +1933,7 @@ Item {
   // in each component, because the two sign-ins differ in everything except
   // what has to happen afterwards.
   function afterSignIn() {
-    loadProfile()
+    loadProfile(true)
     loadLabels()
     loadSendAs()
     refreshCounts()
@@ -1648,6 +1951,18 @@ Item {
   }
 
   function signOut() {
+    // Everything still in the air belongs to the session being ended. Without
+    // this a list or a count that was already requested arrived afterwards and
+    // put the signed-out mailbox back on screen.
+    sessionSerial++
+    listSerial++
+    // A failed action that lands later must not put rows back into this list.
+    viewSerial++
+    abortRequest(listHandle)
+    listHandle = null
+    listLoading = false
+    countLoading = false
+    nextPageToken = ""
     if (auth) auth.logout()
     messages = []
     labels = []
@@ -1741,9 +2056,60 @@ Item {
   }
 
   // The address is only known after the first profile read, and it is what the
-  // cache file and the keyring entry are named after.
-  onAccountEmailChanged: {
-    if (accountEmail !== "" && accountId === "") accountId = accountEmail
+  // cache file and the keyring entry are named after. It reaches `accountId`
+  // through `accountIdentified` and the account list, never by assigning it
+  // here: an assignment breaks the binding to the list, and a host whose id no
+  // longer follows its row keeps one mailbox's session after the rows move.
+
+  // The id this object's state was built for. Hosts are kept by position, so
+  // removing an account hands every host below it the next account's entry —
+  // with the previous one's session, list, profile and unread count still in
+  // it. Only a draft learning its own address keeps what it has; any other
+  // change of id starts this mailbox from nothing.
+  property string boundAccountId: ""
+  // Ids assigned while the object is still being built are its first, not a
+  // change: there is nothing yet to reset.
+  property bool accountIdTracked: false
+  Component.onCompleted: {
+    boundAccountId = accountId
+    accountIdTracked = true
+  }
+
+  onAccountIdChanged: {
+    if (!accountIdTracked) return
+    var previous = boundAccountId
+    boundAccountId = accountId
+    if (previous === accountId) return
+    if (previous === "" && profile
+        && Accounts.isSameMailbox(accountId, profile.email, providerId)) return
+    resetForAccount()
+  }
+
+  function resetForAccount() {
+    sessionSerial++
+    listSerial++
+    // A failed action that lands later must not put rows back into this list.
+    viewSerial++
+    abortRequest(listHandle)
+    listHandle = null
+    listLoading = false
+    countLoading = false
+    nextPageToken = ""
+    resultEstimate = 0
+    clearSelection()
+    clearNotice()
+    messages = []
+    labels = []
+    sendAsAliases = []
+    sendAsLoading = false
+    sendAsLoaded = false
+    profile = null
+    inboxUnread = 0
+    listLoaded = false
+    seenIds = ({})
+    notificationsPrimed = false
+    countPrimed = false
+    if (auth && typeof auth.switchAccount === "function") auth.switchAccount()
   }
 
   signal accountIdentified(string email)
@@ -1857,10 +2223,11 @@ Item {
   // message reappearing for no reason anybody can still connect to a keystroke.
   Timer {
     id: noticeTimer
-    interval: 4000
+    interval: Model.noticeDurationMs(root.openPath !== "")
     onTriggered: {
       root.actionStatus = ""
       root.undoRecord = null
+      root.openPath = ""
     }
   }
 

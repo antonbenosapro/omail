@@ -300,4 +300,34 @@ listSequences.forEach(function (row) {
   })
 }
 
+// ------------------------------------------------ every row is answered
+
+// A row in the table is a Shortcut the router builds and fires, whether or not
+// App.qml answers it, so a missing case is a key that is listed on the sheet,
+// swallowed when pressed, and does nothing. Ctrl+K was exactly that. Read off
+// runShortcut's own text, because the answer lives in QML and nowhere else.
+{
+  const fs = require("fs")
+  const path = require("path")
+  const app = fs.readFileSync(path.join(__dirname, "..", "App.qml"), "utf8")
+  const start = app.indexOf("  function runShortcut(")
+  assert.ok(start >= 0, "App.qml answers keys in runShortcut")
+  // The function ends at the first closing brace back at its own indent.
+  const end = app.indexOf("\n  }\n", start)
+  const body = app.substring(start, end)
+
+  keymap.BINDINGS.forEach(function (binding) {
+    assert.ok(body.indexOf('id === "' + binding.id + '"') >= 0,
+      "runShortcut in App.qml has no case for " + binding.id)
+  })
+
+  // And the other way: a case for an id the table no longer has is an answer
+  // to a question nothing asks, usually a rename that only went halfway.
+  const handled = body.match(/id === "[A-Za-z]+"/g) || []
+  handled.forEach(function (match) {
+    const id = match.slice('id === "'.length, -1)
+    assert.ok(byId(id), "runShortcut answers " + id + ", which keys/Keymap.js does not bind")
+  })
+}
+
 console.log("test_keymap.js ok")

@@ -288,14 +288,37 @@ assert.strictEqual(calendar.responseOf(invite, "GRACE@EXAMPLE.COM"), "accepted",
   "an address matches whatever case it was written in")
 assert.strictEqual(calendar.responseOf(invite, "nobody@example.com"), "")
 
-assert.strictEqual(calendar.canRespond(invite, "jason@example.com"), true)
-assert.strictEqual(calendar.canRespond(invite, "ada@example.com"), false,
+assert.strictEqual(calendar.canRespond(invite, "jason@example.com", "ada@example.com"), true)
+assert.strictEqual(calendar.canRespond(invite, "ada@example.com", "ada@example.com"), false,
   "the organiser does not RSVP to their own meeting")
+// The ORGANIZER line is the sender's to write, so an answer to an organiser
+// outside the sender's domain is asked about before it is sent.
+assert.strictEqual(calendar.respondStep(invite, "jason@example.com", "ada@example.com"), "send",
+  "an organiser in the sender's domain is answered at once")
+assert.strictEqual(calendar.needsConfirm(invite, "jason@example.com", "ada@example.com"), false)
+assert.strictEqual(calendar.canRespond(invite, "jason@example.com", "mailer@evil.test"), true,
+  "an organiser in another domain is still answerable")
+assert.strictEqual(calendar.respondStep(invite, "jason@example.com", "mailer@evil.test"), "confirm",
+  "but only after the reader confirms")
+assert.strictEqual(calendar.needsConfirm(invite, "jason@example.com", "mailer@evil.test"), true)
+assert.strictEqual(calendar.replyMismatch(invite, "mailer@evil.test"), "ada@example.com",
+  "and the card is told who it would go to")
+assert.strictEqual(calendar.confirmPrompt("ada@example.com"),
+  "Your reply goes to ada@example.com, not the sender. Send it?")
+assert.strictEqual(calendar.respondStep(invite, "jason@example.com", "calendar@EXAMPLE.com"), "send",
+  "any sender in the organiser's domain will do")
+assert.strictEqual(calendar.respondStep(invite, "jason@example.com", ""), "confirm",
+  "an unreadable sender cannot vouch for the organiser")
+assert.strictEqual(calendar.respondStep(invite, "ada@example.com", "mailer@evil.test"), "",
+  "the organiser has nothing to confirm, mismatch or not")
+assert.strictEqual(calendar.replyMismatch(invite, "ada@example.com"), "")
 
 const cancelled = calendar.invitationFrom(
   GOOGLE_INVITE.replace("STATUS:CONFIRMED", "STATUS:CANCELLED"))
 assert.strictEqual(calendar.canRespond(cancelled, "jason@example.com"), false,
   "a cancelled meeting has nothing to accept")
+assert.strictEqual(calendar.respondStep(cancelled, "jason@example.com", "mailer@evil.test"), "",
+  "nor anything to confirm")
 
 const reply = calendar.invitationFrom(GOOGLE_INVITE.replace("METHOD:REQUEST", "METHOD:REPLY"))
 assert.strictEqual(reply.method, "REPLY")
@@ -501,7 +524,7 @@ assert.strictEqual(wanted.body.attachmentId, "att-calendar",
 const fetched = calendar.fromAttachment(wanted, b64url(GOOGLE_INVITE))
 assert.strictEqual(fetched.uid, "abc123@google.com")
 assert.strictEqual(fetched.method, "REQUEST")
-assert.strictEqual(calendar.canRespond(fetched, "jason@example.com"), true,
+assert.strictEqual(calendar.canRespond(fetched, "jason@example.com", "Ada@Example.com"), true,
   "and it can be answered like any other")
 
 // A part too big to parse is not worth a round trip either.
