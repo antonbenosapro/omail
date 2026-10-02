@@ -299,9 +299,71 @@ Item {
   }
 
   function sendMessage(payload, callback) {
-    return request("POST", Api.sendPath(), null, payload,
+    // The SMTP envelope rides on the payload for the IMAP client; Gmail
+    // refuses a field it does not know.
+    return request("POST", Api.sendPath(), null, Api.sendBody(payload),
       function(status, body, error) {
         if (typeof callback === "function") callback(body, error)
       })
+  }
+
+  // --------------------------------------------------------------- drafts
+
+  // Create when there is no draft yet, update when there is. Either way the
+  // answer names the draft, and the id handed back is what the next save and
+  // the send address — Gmail keeps it across updates.
+  function saveDraft(draftId, payload, callback) {
+    var id = String(draftId || "")
+    return request(id === "" ? "POST" : "PUT", id === "" ? Api.draftsPath() : Api.draftPath(id),
+      null, Api.draftResource(id, payload), function(status, body, error) {
+        if (typeof callback !== "function") return
+        callback(error ? null : Api.parseDraft(body), error)
+      })
+  }
+
+  function deleteDraft(draftId, callback) {
+    return request("DELETE", Api.draftPath(draftId), null, null,
+      function(status, body, error) {
+        if (typeof callback === "function") callback(body, error)
+      })
+  }
+
+  // One request: the draft's latest content goes with it, so a send does not
+  // wait on the save before it. Gmail removes the draft as it sends it.
+  function sendDraft(draftId, payload, callback) {
+    if (String(draftId || "") === "") return sendMessage(payload, callback)
+    return request("POST", Api.draftSendPath(), null, Api.draftResource(draftId, payload),
+      function(status, body, error) {
+        if (typeof callback === "function") callback(body, error)
+      })
+  }
+
+  // Which draft holds a message. The list is paged through rather than
+  // searched: a draft carries no Message-ID worth searching on until it is
+  // sent. Bounded, because a mailbox with thousands of drafts is a mailbox
+  // where giving up beats walking all of them.
+  function draftIdFor(messageId, callback) {
+    var handle = newHandle()
+    var pages = 0
+    function page(token) {
+      handle.children.push(request("GET", Api.draftsPath(), Api.draftListQuery(token), null,
+        function(status, body, error) {
+          if (handle.aborted || typeof callback !== "function") return
+          if (error) {
+            callback("", error)
+            return
+          }
+          var listed = Api.parseDraftList(body)
+          var found = Api.draftIdForMessage(listed.drafts, messageId)
+          pages++
+          if (found !== "" || listed.nextPageToken === "" || pages >= 10) {
+            callback(found, found === "" ? "That draft is no longer in the mailbox" : "")
+            return
+          }
+          page(listed.nextPageToken)
+        }))
+    }
+    page("")
+    return handle
   }
 }

@@ -1,5 +1,7 @@
 #!/bin/sh
-# Writes one attachment to the downloads directory and opens it.
+# Writes one attachment to the downloads directory. It does not open it: a file
+# the sender chose is not something to hand to a desktop handler unasked, so the
+# window offers an explicit Open once the save has been reported.
 #
 # The octets arrive base64 on stdin, which is what both providers already hand
 # back: Gmail sends base64url in the attachment resource and `parseRfc822`
@@ -111,12 +113,5 @@ printf '%s' "$normalized" | base64 -d > "$temporary" 2>/dev/null \
 chmod 600 -- "$temporary"
 mv -f -- "$temporary" "$target"
 trap - EXIT INT TERM HUP
-
-# Detached, and its output discarded: the handler is a desktop application
-# whose lifetime is nothing to do with this script, and a viewer that writes to
-# stderr must not look like a failed save.
-if command -v xdg-open >/dev/null 2>&1; then
-  setsid xdg-open -- "$target" >/dev/null 2>&1 &
-fi
 
 printf '%s\n' "$name"

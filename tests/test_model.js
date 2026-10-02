@@ -61,6 +61,104 @@ assert.strictEqual(model.survivesAction("inbox", "trash"), false)
 assert.strictEqual(model.survivesAction("trash", "trash"), true)
 assert.strictEqual(model.survivesAction("trash", "untrash"), false)
 
+// Spam leaves every list the rail offers: Gmail keeps it out of every search
+// that does not ask for it, and IMAP moves it to Junk. It had no case at all,
+// so a reported message sat in the Inbox until the next load.
+assert.strictEqual(model.survivesAction("inbox", "spam"), false)
+assert.strictEqual(model.survivesAction("starred", "spam"), false)
+assert.strictEqual(model.survivesAction("label", "spam"), false)
+
+// IMAP archives by moving, so the message leaves whatever folder was listed.
+// The Gmail rules kept it in Flagged, Sent and Trash, where it no longer was.
+assert.strictEqual(model.survivesAction("starred", "archive", true), false,
+  "IMAP's Flagged is a view of INBOX, which the message just left")
+assert.strictEqual(model.survivesAction("sent", "archive", true), false)
+assert.strictEqual(model.survivesAction("trash", "archive", true), false)
+assert.strictEqual(model.survivesAction("label", "archive", true), false,
+  "a folder opened from the sidebar is still a folder it moved out of")
+assert.strictEqual(model.survivesAction("archive", "archive", true), true)
+assert.strictEqual(model.survivesAction("inbox", "archive", true), false)
+assert.strictEqual(model.survivesAction("starred", "unstar", true), false)
+assert.strictEqual(model.survivesAction("inbox", "markRead", true), true)
+assert.strictEqual(model.survivesAction("starred", "archive", false), true,
+  "Gmail's Starred still holds an archived message")
+
+// A label or a search is a view of its own, not the mailbox last clicked.
+assert.strictEqual(model.listViewKey("unread", "", ""), "unread")
+assert.strictEqual(model.listViewKey("unread", "", "label:Work"), "label")
+assert.strictEqual(model.listViewKey("inbox", "invoice", ""), "search")
+assert.strictEqual(model.listViewKey("", "  ", ""), "inbox")
+assert.strictEqual(model.survivesAction(model.listViewKey("unread", "", "label:Work"),
+  "markRead"), true, "mark-all-read in a label opened from Unread keeps its rows")
+assert.strictEqual(model.survivesAction(model.listViewKey("inbox", "", "label:Work"),
+  "archive"), true, "archiving on Gmail leaves the label on the message")
+assert.strictEqual(model.survivesAction(model.listViewKey("inbox", "x", ""),
+  "trash"), false, "a trashed message leaves a search too")
+
+// The stamp an answer arriving late is checked against.
+assert.strictEqual(model.sameView(model.viewStamp(3, "inbox"), model.viewStamp(3, "inbox")), true)
+assert.strictEqual(model.sameView(model.viewStamp(3, "inbox"), model.viewStamp(4, "inbox")), false,
+  "Inbox left and returned to is a list fetched afresh")
+assert.strictEqual(model.sameView(model.viewStamp(3, "inbox"), model.viewStamp(3, "trash")), false)
+assert.strictEqual(model.sameView(null, model.viewStamp(0, "inbox")), false)
+
+// Putting back only what an action touched, so a refresh that landed while the
+// request was out is not undone with it.
+{
+  const a = { id: "a", accountId: "x", unread: true }
+  const b = { id: "b", accountId: "x", unread: true }
+  const fresh = { id: "new", accountId: "x" }
+  const refreshed = [fresh, a]
+  const back = model.revertRows(refreshed, [model.undoEntry(b, 1)], true)
+  deepEqual(back.map(function (r) { return r.id }), ["new", "b", "a"],
+    "the removed row goes back at its index; the refreshed rows stay")
+  const twice = model.revertRows([a, b], [model.undoEntry(b, 1)], true)
+  assert.strictEqual(twice.length, 2, "a row a refresh already brought back is not listed twice")
+  const changed = [{ id: "a", accountId: "x", unread: false }, fresh]
+  const swapped = model.revertRows(changed, [model.undoEntry(a, 0)], false)
+  assert.strictEqual(swapped[0], a, "a row that stayed is swapped back for what it was")
+  assert.strictEqual(swapped[1], fresh)
+  deepEqual(model.revertRows(null, null, true), [])
+}
+
+// Untrashing from Trash: the account's own mail goes back to Sent.
+assert.strictEqual(model.untrashFolder({ from: { email: "Me@Host.org" } },
+  ["me@host.org"]), "\\Sent", "matched without regard to case")
+assert.strictEqual(model.untrashFolder({ from: { email: "alias@host.org" } },
+  ["me@host.org", "alias@host.org"]), "\\Sent", "any address it sends as")
+assert.strictEqual(model.untrashFolder({ labelIds: ["SENT"] }, []), "\\Sent")
+assert.strictEqual(model.untrashFolder({ from: { email: "news@shop.com" } },
+  ["me@host.org"]), "", "received mail is left to the INBOX default")
+assert.strictEqual(model.untrashFolder({ from: {} }, ["me@host.org"]), "")
+assert.strictEqual(model.untrashFolder(null, ["me@host.org"]), "")
+
+// A poll's first page laid over a list holding more than one page.
+{
+  const day = 86400000
+  const row = function (id, at) { return { id: id, accountId: "x", date: new Date(at * day) } }
+  // Two pages of two: 9, 8 | 7, 6.
+  const listed = [row("9", 9), row("8", 8), row("7", 7), row("6", 6)]
+  // New mail 10 arrived, pushing 8 onto page two.
+  const merged = model.mergeFirstPage(listed, [row("10", 10), row("9", 9)], 2)
+  deepEqual(merged.map(function (r) { return r.id }), ["10", "9", "8", "7", "6"],
+    "loaded pages are kept, and a row pushed down by new mail stays")
+  // 9 was deleted elsewhere: page one is now 8, 7 and nothing was pushed.
+  const gone = model.mergeFirstPage(listed, [row("8", 8), row("7", 7)], 2)
+  deepEqual(gone.map(function (r) { return r.id }), ["8", "7", "6"],
+    "a row newer than the page's last is gone, not pushed down")
+  // A short page is the whole mailbox's head: anything missing from it is gone.
+  const short = model.mergeFirstPage(listed, [row("8", 8)], 2)
+  deepEqual(short.map(function (r) { return r.id }), ["8", "7", "6"])
+  // One page listed is simply replaced, as it always was.
+  deepEqual(model.mergeFirstPage([row("9", 9)], [row("10", 10)], 2)
+    .map(function (r) { return r.id }), ["10"])
+  deepEqual(model.mergeFirstPage(null, null, 2), [])
+}
+assert.strictEqual(model.tokenAfterFirstPage(4, 2, "page3", "page2"), "page3",
+  "pages kept, so the next fetch is the one after the last kept")
+assert.strictEqual(model.tokenAfterFirstPage(2, 2, "page3", "page2"), "page2")
+assert.strictEqual(model.tokenAfterFirstPage(0, 25, "", "p"), "p")
+
 deepEqual(model.labelChangesFor("archive"), { add: [], remove: ["INBOX"] })
 deepEqual(model.labelChangesFor("star"), { add: ["STARRED"], remove: [] })
 assert.strictEqual(model.labelChangesFor("trash"), null, "trash is its own endpoint, not a label change")
@@ -363,6 +461,33 @@ assert.strictEqual(model.zoomedFontSize(12, "nonsense"), 12, "and 1.0 is the ans
 assert.strictEqual(model.zoomedFontSize(undefined, 1), 7)
 assert.strictEqual(model.zoomedFontSize(0, 1), 7)
 assert.strictEqual(model.zoomedFontSize(-4, 1), 7)
+
+// Ctrl+wheel. A notch is a step; a touchpad's stream of small deltas adds up to
+// one rather than being a step each, a sideways scroll is nothing, and turning
+// round starts the count again. Compared as JSON: the result comes from the
+// module's own realm, whose Object is not this one.
+function wheel(pending, delta) { return JSON.parse(JSON.stringify(model.wheelZoomSteps(pending, delta))) }
+assert.deepStrictEqual(wheel(0, 120), { steps: 1, pending: 0 })
+assert.deepStrictEqual(wheel(0, -120), { steps: -1, pending: 0 })
+assert.deepStrictEqual(wheel(0, 240), { steps: 2, pending: 0 })
+assert.deepStrictEqual(wheel(0, 0), { steps: 0, pending: 0 },
+  "a horizontal scroll is not a zoom out")
+assert.deepStrictEqual(wheel(40, 0), { steps: 0, pending: 40 })
+{
+  let pending = 0
+  let steps = 0
+  for (let i = 0; i < 10; i++) {
+    const next = model.wheelZoomSteps(pending, 15)
+    pending = next.pending
+    steps += next.steps
+  }
+  assert.strictEqual(steps, 1, "ten touchpad deltas of 15 are one step")
+  assert.strictEqual(pending, 30)
+}
+assert.deepStrictEqual(wheel(100, -15), { steps: 0, pending: -15 },
+  "a reversal drops what was pending the other way")
+assert.deepStrictEqual(wheel(-100, -30), { steps: -1, pending: -10 })
+assert.deepStrictEqual(wheel(undefined, 60), { steps: 0, pending: 60 })
 
 // ------------------------------------------------- identity across accounts
 //
@@ -1264,6 +1389,22 @@ assert.strictEqual(model.isUndoable({ reverse: "untrash", entries: [] }), false)
     "the top of the block is where the eye was")
 }
 
+// An undo taken from another list restores on the server but does not insert
+// its rows into what is on screen, and sends the cursor nowhere.
+{
+  const here = model.viewStamp(2, "inbox")
+  const record = model.undoRecordFor("trash", [model.undoEntry(imapRow, 0)], "inbox", here)
+  assert.strictEqual(model.undoRestoresHere(record, model.viewStamp(2, "inbox")), true)
+  assert.strictEqual(model.undoRestoresHere(record, model.viewStamp(3, "trash")), false)
+  assert.strictEqual(model.undoCursorKey(record, model.viewStamp(3, "trash")), "",
+    "no row comes back here, so there is nothing to put the cursor on")
+  assert.strictEqual(model.undoCursorKey(record, here), model.rowKey(imapRow))
+  assert.strictEqual(model.undoRestoresHere(
+    model.undoRecordFor("trash", [model.undoEntry(imapRow, 0)], "inbox"), here), false,
+    "a record that names no list restores into none")
+  assert.strictEqual(model.undoRestoresHere(null, here), false)
+}
+
 // ------------------------------------------------------ putting rows back
 
 {
@@ -1307,5 +1448,18 @@ assert.strictEqual(model.isUndoable({ reverse: "untrash", entries: [] }), false)
 }
 deepEqual(model.restoreEntries(null, null), [])
 deepEqual(model.restoreEntries([], [null]), [])
+
+// The Open offer after a save: one path inside the directory, and a command
+// that is an argument array, never a shell string.
+assert.strictEqual(model.savedPath("/home/u/Downloads/", "a b.pdf"), "/home/u/Downloads/a b.pdf")
+assert.strictEqual(model.savedPath("/d", "../x"), "")
+assert.strictEqual(model.savedPath("", "x"), "")
+deepEqual(model.openCommand("/d/$(x).pdf"), ["xdg-open", "--", "/d/$(x).pdf"])
+deepEqual(model.openCommand(""), [])
+
+// A notice that offers Open... outlasts one that only reports.
+assert.strictEqual(model.noticeDurationMs(true), 10000)
+assert.strictEqual(model.noticeDurationMs(false), 4000)
+assert.ok(model.noticeDurationMs(true) > model.noticeDurationMs(false))
 
 console.log("test_model.js ok")

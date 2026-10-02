@@ -100,15 +100,104 @@ function setupActionLabel(state, provider, authKind) {
 // viewed. Archiving from Inbox removes the row; archiving from All mail does
 // not. Getting this wrong either strands a row that is gone or hides one that
 // is still there.
-function survivesAction(mailboxKey, action) {
+//
+// `mailboxKey` is the view rather than the last mailbox clicked — see
+// `listViewKey`, which is what turns a label or a search into a key of its own.
+//
+// `folders` is whether the account files a message in one folder rather than
+// tagging it with labels, which is the whole difference between IMAP and Gmail
+// here. Gmail archives by taking the INBOX label off, so the message is still
+// in Starred, Sent and every label it carries. IMAP archives by *moving* it, so
+// it leaves whichever folder was listed — Flagged and Sent included — and is
+// only still on screen if the list was Archive itself.
+//
+// Spam leaves every view on both. Gmail keeps spam out of every search that
+// does not ask for it, and no mailbox in the rail asks; IMAP moves it to Junk.
+function survivesAction(mailboxKey, action, folders) {
   var key = String(mailboxKey || "inbox")
   var verb = String(action || "")
+  if (verb === "spam") return false
   if (verb === "trash") return key === "trash"
   if (verb === "untrash") return key !== "trash"
-  if (verb === "archive") return key !== "inbox" && key !== "unread"
+  if (verb === "archive") {
+    if (folders === true) return key === "archive"
+    return key !== "inbox" && key !== "unread"
+  }
   if (verb === "markRead") return key !== "unread"
   if (verb === "unstar") return key !== "starred"
   return true
+}
+
+// What the list on screen is, for the rules above. A label and a typed search
+// replace the list without changing `mailboxKey`, which still names the last
+// mailbox clicked — and acting on that one meant mark-all-read emptied a
+// label opened from Unread, and archive cleared rows out of a label they never
+// left. Neither is any mailbox in the rail, so each has a key of its own that
+// no rule removes a row from on a label change.
+//
+// A label wins over a search because selecting one clears the search, and
+// typing a search clears the label; only one is ever set, and this reads it.
+function listViewKey(mailboxKey, searchQuery, rawQuery) {
+  if (String(rawQuery || "") !== "") return "label"
+  if (String(searchQuery || "").trim() !== "") return "search"
+  return String(mailboxKey || "inbox")
+}
+
+// Which list an answer that arrives later belongs to.
+//
+// Every action changes the list at once and settles when the server answers,
+// and a refusal puts the rows back. By then the user may have moved to another
+// mailbox, and putting Inbox's rows back into Trash is a list describing a
+// mailbox that does not hold them. The stamp is taken when the action is sent
+// and compared when it lands: a navigation bumps the serial, so the same
+// mailbox left and come back to is a different list too — its rows were
+// fetched afresh and the saved index means nothing in them.
+function viewStamp(serial, key) {
+  return { serial: Math.floor(Number(serial) || 0), key: String(key || "") }
+}
+
+function sameView(a, b) {
+  if (!a || !b) return false
+  return a.serial === b.serial && a.key === b.key
+}
+
+// The rows an action touched, put back after the server refused it. Only those
+// rows: the rest of the list may have been refreshed while the request was out,
+// and restoring a whole copy taken before would undo the refresh as well.
+//
+// A row that left the list goes back at the index it left from, through
+// `restoreEntries`, which also declines to list it twice if a refresh already
+// brought it back. A row that stayed is swapped back for what it was.
+function revertRows(list, entries, removed) {
+  if (removed === true) return restoreEntries(list, entries)
+  var out = Array.isArray(list) ? list.slice() : []
+  var rows = Array.isArray(entries) ? entries : []
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i] && rows[i].row) out = replaceById(out, rows[i].row)
+  }
+  return out
+}
+
+// Where an IMAP message untrashed from the Trash mailbox should go, when no
+// undo recorded where it came from. Browsing Trash, nothing did, and INBOX was
+// the answer for everything — which put the user's own sent mail in their
+// inbox. A message from one of the account's own addresses goes to Sent.
+//
+// A note-to-self lands in Sent too. That is the one case this gets wrong, and
+// it is still a folder the message plausibly belongs in, where INBOX for a
+// sent reply never is. "" leaves the client to its INBOX default; Gmail ignores
+// the folder and restores the labels it kept.
+function untrashFolder(summary, ownAddresses) {
+  if (!summary) return ""
+  var labels = Array.isArray(summary.labelIds) ? summary.labelIds : []
+  if (labels.indexOf("SENT") >= 0) return "\\Sent"
+  var from = String((summary.from && summary.from.email) || "").trim().toLowerCase()
+  if (from === "") return ""
+  var own = Array.isArray(ownAddresses) ? ownAddresses : []
+  for (var i = 0; i < own.length; i++) {
+    if (String(own[i] || "").trim().toLowerCase() === from) return "\\Sent"
+  }
+  return ""
 }
 
 function labelChangesFor(action) {
@@ -204,7 +293,7 @@ function undoEntry(summary, index) {
 // The record the notice offers, or null when there is nothing to offer. Null
 // rather than an empty record, so a caller cannot end up drawing an Undo
 // button for an action that has no reverse.
-function undoRecordFor(action, entries, mailboxKey) {
+function undoRecordFor(action, entries, mailboxKey, view) {
   var reverse = reverseAction(action)
   if (reverse === "") return null
   var source = Array.isArray(entries) ? entries : []
@@ -217,8 +306,39 @@ function undoRecordFor(action, entries, mailboxKey) {
     action: String(action || ""),
     reverse: reverse,
     entries: rows,
-    mailboxKey: String(mailboxKey || "inbox")
+    mailboxKey: String(mailboxKey || "inbox"),
+    // The list the rows were taken from, so an undo pressed after moving
+    // elsewhere restores the messages on the server without inserting them
+    // into a list they were never in.
+    view: view || null
   }
+}
+
+// Where a saved attachment is, for the Open offer. The name is what the save
+// script printed, which has had every separator removed, so joining it cannot
+// leave the directory; an empty part means there is nothing to open.
+function savedPath(directory, name) {
+  var dir = String(directory || "").replace(/\/+$/, "")
+  var file = String(name || "")
+  if (dir === "" || file === "" || file.indexOf("/") >= 0) return ""
+  return dir + "/" + file
+}
+
+// The command that opens it. An array handed straight to the process, never a
+// shell string: the name came off a message and must stay one argument.
+function openCommand(path) {
+  var target = String(path || "")
+  if (target === "") return []
+  return ["xdg-open", "--", target]
+}
+
+// Whether taking the offer should put its rows back into the list on screen.
+// Only into the list they left: after a navigation the server restore still
+// happens, but the rows belong to a mailbox that is not being drawn, and the
+// next load of that mailbox is what shows them.
+function undoRestoresHere(record, view) {
+  if (!isUndoable(record)) return false
+  return sameView(record.view, view)
 }
 
 // Which pane a zoom key resizes.
@@ -296,8 +416,13 @@ function undoActionLabel(record) {
 // which is where it was standing before the action moved it off. The first
 // entry, because a set restores as a block and the top of it is where the eye
 // was. Empty when there is nothing to restore, which leaves the cursor alone.
-function undoCursorKey(record) {
+//
+// `view` is optional, and given it the key is empty unless the rows would be
+// put back into that list — a cursor sent to a row the undo does not insert is
+// a cursor on nothing.
+function undoCursorKey(record, view) {
   if (!isUndoable(record)) return ""
+  if (view !== undefined && !undoRestoresHere(record, view)) return ""
   var first = record.entries[0]
   return first && first.row ? rowKey(first.row) : ""
 }
@@ -365,6 +490,26 @@ function zoomedFontSize(size, zoom) {
   var base = Number(size)
   if (!isFinite(base) || base <= 0) return ZOOM_FONT_MIN
   return Math.max(ZOOM_FONT_MIN, Math.round(base * clampZoom(zoom)))
+}
+
+// How many zoom steps a Ctrl+wheel event is worth, and what is left over for
+// the next one. A mouse notch is 120; a touchpad sends the same distance as a
+// stream of small deltas, and counting each of those as a step took one swipe
+// from 1.0 to 2.5. So deltas are added up and a step is taken per 120. A delta
+// of 0 — a sideways scroll — is no step at all rather than a step out, and a
+// change of direction starts the count again rather than paying back the
+// remainder first.
+var WHEEL_NOTCH = 120
+
+function wheelZoomSteps(pending, delta) {
+  var held = Number(pending)
+  if (!isFinite(held)) held = 0
+  var by = Number(delta)
+  if (!isFinite(by) || by === 0) return { steps: 0, pending: held }
+  if (held !== 0 && (held > 0) !== (by > 0)) held = 0
+  var total = held + by
+  var steps = total > 0 ? Math.floor(total / WHEEL_NOTCH) : -Math.floor(-total / WHEEL_NOTCH)
+  return { steps: steps, pending: total - steps * WHEEL_NOTCH }
 }
 
 function showInitialListSkeleton(loading, messageCount) {
@@ -505,6 +650,13 @@ function openOffsetMs(accountId) {
   return spreadHash(accountId) % OPEN_SPREAD_MS
 }
 
+// How long a notice stays. One that offers Open... beside a saved attachment
+// stays longer: the reader has to find the file's name in it, decide, and
+// reach for the button, which four seconds does not leave room for.
+function noticeDurationMs(offersOpen) {
+  return offersOpen ? 10000 : 4000
+}
+
 // --------------------------------------------------------- rebuilding a list
 //
 // Whether a new page of summaries is worth assigning over the list that is on
@@ -612,6 +764,52 @@ function appendPage(current, page) {
     out.push(summary)
   }
   return out
+}
+
+// A fresh first page laid over a list that may hold more than one.
+//
+// Every poll reloads page one, and replacing the list with it threw away every
+// page the user had scrolled in with load-more, and the marks on them with the
+// rows. So the fresh page is the head — it is the server's answer, in its
+// order — and the rows the list already held beyond it are kept below.
+//
+// A row that was in the old first page and is missing from the new one either
+// went away or was pushed down by new mail. Pushed down is only possible when
+// the new page is full and the row is no newer than its last row; otherwise it
+// is gone, and it is dropped rather than kept on screen. A list that never held
+// more than a page is simply replaced, which is what it always was.
+function mergeFirstPage(current, page, pageSize) {
+  var existing = Array.isArray(current) ? current : []
+  var fresh = Array.isArray(page) ? page : []
+  var size = Math.max(1, Math.floor(Number(pageSize) || 0))
+  if (existing.length <= size) return fresh.slice()
+
+  var full = fresh.length >= size
+  var floor = full && fresh.length > 0 ? receivedRank(fresh[fresh.length - 1]) : 0
+  var out = fresh.slice()
+  for (var i = 0; i < existing.length; i++) {
+    var row = existing[i]
+    if (!row) continue
+    if (indexById(out, row.id, row.accountId) >= 0) continue
+    if (i < size) {
+      // From the old first page and not in the new one.
+      if (!full) continue
+      var rank = receivedRank(row)
+      if (floor > 0 && (rank === 0 || rank > floor)) continue
+    }
+    out.push(row)
+  }
+  return out
+}
+
+// The token a refreshed first page leaves the list with. Once more than a page
+// is loaded the next page to fetch is the one after the last loaded, which the
+// old token names; the fresh one names page two, and fetching that again would
+// only bring back rows already listed.
+function tokenAfterFirstPage(currentCount, pageSize, currentToken, freshToken) {
+  var size = Math.max(1, Math.floor(Number(pageSize) || 0))
+  var count = Math.floor(Number(currentCount) || 0)
+  return count > size ? String(currentToken || "") : String(freshToken || "")
 }
 
 // ------------------------------------------------------- opening a message

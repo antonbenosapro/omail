@@ -162,4 +162,22 @@ assert.strictEqual(unsub.fromMessage(null).available, false)
 assert.strictEqual(unsub.postBody(), "List-Unsubscribe=One-Click")
 assert.strictEqual(unsub.postContentType(), "application/x-www-form-urlencoded")
 
+// The one-click POST is curl with redirects and other schemes refused.
+{
+  const command = unsub.postCommand("https://list.example/u/1")
+  assert.strictEqual(command[0], "curl")
+  assert.ok(command.indexOf("--max-redirs") >= 0 && command[command.indexOf("--max-redirs") + 1] === "0")
+  assert.ok(command.indexOf("--proto") >= 0 && command[command.indexOf("--proto") + 1] === "=https")
+  assert.ok(command.indexOf("-L") < 0 && command.indexOf("--location") < 0)
+  assert.strictEqual(command[command.indexOf("--url") + 1], "https://list.example/u/1",
+    "the address is one argument, after --url")
+  assert.strictEqual(command[command.indexOf("--data") + 1], "List-Unsubscribe=One-Click")
+  assert.strictEqual(unsub.postStatus("200"), 200)
+  assert.strictEqual(unsub.postStatus(""), 0)
+  assert.strictEqual(unsub.postStatus("000"), 0)
+  assert.strictEqual(unsub.postSucceeded(204), true)
+  assert.strictEqual(unsub.postSucceeded(302), false, "a redirect is never followed, so it is not success")
+  assert.strictEqual(unsub.postSucceeded(0), false)
+}
+
 console.log("test_unsubscribe.js ok")

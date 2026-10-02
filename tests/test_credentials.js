@@ -456,4 +456,91 @@ deepEqual(credentials.accountIds(damaged), ["three@work.com"])
   }
 }
 
+// ------------------------------------------------- one client per account
+//
+// Saving goes through withAccount, so the other accounts' clients stay put.
+{
+  const a = { clientId: "111-a.apps.googleusercontent.com", clientSecret: "GOCSPX-a", projectId: "pa" }
+  const b = { clientId: "222-b.apps.googleusercontent.com", clientSecret: "GOCSPX-b", projectId: "pb" }
+  const saved = credentials.withAccount(
+    credentials.withAccount(credentials.emptyStore(), "a@gmail.com", a), "b@gmail.com", b)
+  const read = credentials.loadStore(credentials.serialize(saved))
+  assert.strictEqual(credentials.forAccount(read, "a@gmail.com").clientId, a.clientId,
+    "saving b's client left a's alone")
+  assert.strictEqual(credentials.forAccount(read, "b@gmail.com").clientId, b.clientId)
+
+  // A draft saves under the nameless id, and claims that entry once named, so
+  // its own client is the one it then uses rather than the first in the file.
+  const draft = credentials.withAccount(saved, "", { clientId: "333-c.apps.googleusercontent.com" })
+  assert.strictEqual(credentials.effective(credentials.serialize(draft), "c@gmail.com").clientId,
+    a.clientId, "before the claim the named mailbox would borrow somebody else's client")
+  const claimed = credentials.adoptUnnamed(draft, "c@gmail.com")
+  assert.ok(claimed)
+  assert.strictEqual(credentials.forAccount(claimed, "c@gmail.com").clientId,
+    "333-c.apps.googleusercontent.com")
+  deepEqual(credentials.accountIds(claimed), ["a@gmail.com", "b@gmail.com", "c@gmail.com"],
+    "claimed in place, so the order is kept")
+  assert.strictEqual(credentials.adoptUnnamed(claimed, "c@gmail.com"), null, "already its own")
+  assert.strictEqual(credentials.adoptUnnamed(saved, "c@gmail.com"), null, "nothing nameless to claim")
+  assert.strictEqual(credentials.adoptUnnamed(draft, ""), null, "no name, nothing to claim it under")
+  assert.strictEqual(credentials.adoptUnnamed(draft, "a@gmail.com"), null, "a has its own")
+
+  // The pre-accounts file is the one store a named mailbox may claim on sight.
+  const legacy = credentials.loadStore(downloaded)
+  assert.strictEqual(credentials.isLegacyStore(legacy), true)
+  assert.strictEqual(credentials.isLegacyStore(saved), false)
+  assert.strictEqual(credentials.isLegacyStore(draft), false)
+  const named = credentials.adoptUnnamed(legacy, "Me@Gmail.com")
+  deepEqual(credentials.accountIds(named), ["Me@Gmail.com"])
+  assert.strictEqual(credentials.forAccount(named, "me@gmail.com").clientId, "1234-abc.apps.googleusercontent.com")
+}
+
+// --------------------------------------------------- removing an account
+{
+  const a = { clientId: "111-a.apps.googleusercontent.com", clientSecret: "GOCSPX-a" }
+  const b = { clientId: "222-b.apps.googleusercontent.com", clientSecret: "GOCSPX-b" }
+  const both = credentials.withAccount(
+    credentials.withAccount(credentials.emptyStore(), "a@gmail.com", a), "b@gmail.com", b)
+
+  // Its own entry goes, and the others stay.
+  const withoutB = credentials.withoutAccount(both, "b@gmail.com", ["a@gmail.com"])
+  deepEqual(credentials.accountIds(withoutB), ["a@gmail.com"])
+
+  // An entry another mailbox borrows is handed to it, in place, rather than
+  // deleted: deleting it would move the borrower onto a different client, under
+  // which it has no refresh token.
+  const lent = credentials.withoutAccount(both, "a@gmail.com", ["b@gmail.com", "c@gmail.com"])
+  deepEqual(credentials.accountIds(lent), ["c@gmail.com", "b@gmail.com"])
+  assert.strictEqual(credentials.effective(credentials.serialize(lent), "c@gmail.com").clientId, a.clientId,
+    "the borrower keeps the client it signed in with")
+  assert.strictEqual(credentials.effective(credentials.serialize(lent), "d@gmail.com").clientId, a.clientId,
+    "and so does any other borrower, because the entry kept its place")
+
+  // Nobody borrowing: it simply goes.
+  deepEqual(credentials.accountIds(credentials.withoutAccount(both, "a@gmail.com", ["b@gmail.com"])),
+    ["b@gmail.com"])
+  // Not in the file, or no name: nothing to write.
+  assert.strictEqual(credentials.withoutAccount(both, "z@gmail.com", []), null)
+  assert.strictEqual(credentials.withoutAccount(both, "", []), null)
+  // A pre-accounts entry is nobody's in particular and is left alone.
+  assert.strictEqual(credentials.withoutAccount(credentials.loadStore(downloaded), "me@gmail.com", []), null)
+  // The input is never edited in place.
+  deepEqual(credentials.accountIds(both), ["a@gmail.com", "b@gmail.com"])
+}
+
+// ---------------------------------------------------- a keyring that is locked
+{
+  assert.strictEqual(credentials.keyringLookupFailure(0, ""), "")
+  // No entry is a silent exit 1.
+  assert.strictEqual(credentials.keyringLookupFailure(1, ""), "")
+  assert.strictEqual(credentials.keyringLookupFailure(1, "  \n"), "")
+  // Anything said on stderr is the keyring itself failing.
+  assert.strictEqual(credentials.keyringLookupFailure(1, "secret-tool: Cannot get secret of a locked object"),
+    credentials.KEYRING_UNAVAILABLE)
+  assert.strictEqual(credentials.keyringLookupFailure(1,
+    "secret-tool: The name org.freedesktop.secrets was not provided by any .service files"),
+    credentials.KEYRING_UNAVAILABLE)
+  assert.ok(/keyring/i.test(credentials.KEYRING_UNAVAILABLE))
+}
+
 console.log("test_credentials.js ok")

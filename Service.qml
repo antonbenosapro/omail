@@ -6,6 +6,7 @@ import "account"
 import "account/Accounts.js" as Accounts
 import "account/Model.js" as Model
 import "providers/Registry.js" as Provider
+import "providers/Credentials.js" as Credentials
 
 // Every mailbox on this machine, and whichever one is on screen.
 //
@@ -210,6 +211,8 @@ Item {
     // refetching every list to arrive back where it started.
     if (root.mergedCount < 2) return
     activeIndex = -1
+    // A notice left over from an earlier visit is not about this one.
+    root.actionHost = null
     accountList = Accounts.setUnified(accountList, true)
     saveAccounts()
     clearSelection()
@@ -266,17 +269,83 @@ Item {
   }
 
   function removeAccount(id) {
-    activeIndex = -1
-    accountList = Accounts.remove(accountList, id)
-    saveAccounts()
-    refreshCurrent()
+    var accounts = accountList ? accountList.accounts : []
+    for (var i = 0; i < accounts.length; i++) {
+      if (accounts[i].id !== "" && accounts[i].id === String(id)) {
+        removeAccountAt(i)
+        return
+      }
+    }
   }
 
+  // Removing a mailbox removes what this machine kept for it: the refresh
+  // token or password in the keyring, the cache file, the bodies directory and
+  // its OAuth client entry. Dropping only the list row left all of it behind —
+  // a working credential for an account the user believes is gone.
+  //
+  // The host is cleaned up before the row goes, while it still is this
+  // account: hosts are kept by position, so afterwards the object at `index`
+  // is the next account's (or is destroyed). The keyring and the cache file go
+  // through detached processes for the same reason.
   function removeAccountAt(index) {
+    var accounts = accountList ? accountList.accounts : []
+    if (index < 0 || index >= accounts.length) return
+    var removed = accounts[index]
+    var host = accountHosts.objectAt(index)
+    if (host && removed.id !== "" && host.accountId === removed.id) {
+      var cachePath = host.cache ? String(host.cache.path || "") : ""
+      if (host.auth && typeof host.auth.forget === "function") host.auth.forget()
+      host.signOut()
+      if (cachePath !== "") Quickshell.execDetached(["rm", "-f", "--", cachePath])
+    }
+    if (root.actionHost === host) root.actionHost = null
+    if (root.sendHost === host) root.sendHost = null
+
     activeIndex = -1
     accountList = Accounts.removeAt(accountList, index)
     saveAccounts()
+    if (removed.id !== "" && Provider.usesOAuth(removed.provider))
+      forgetCredentials(removed.id, oauthAccountIds())
     refreshCurrent()
+  }
+
+  // The mailboxes still here that sign in with an OAuth client, which are the
+  // ones that may be borrowing the removed one's.
+  function oauthAccountIds() {
+    var accounts = accountList ? accountList.accounts : []
+    var out = []
+    for (var i = 0; i < accounts.length; i++) {
+      if (accounts[i].id !== "" && Provider.usesOAuth(accounts[i].provider)) out.push(accounts[i].id)
+    }
+    return out
+  }
+
+  // Written here rather than by the account's own manager, which may be
+  // destroyed before its write runs. Queued rather than dropped, like the
+  // account list's own saves.
+  property var credentialsForgetQueue: []
+  property string credentialsWritePayload: ""
+
+  function forgetCredentials(id, remaining) {
+    var next = credentialsForgetQueue.slice()
+    next.push(({ id: String(id), remaining: remaining }))
+    credentialsForgetQueue = next
+    drainCredentialsForget()
+  }
+
+  function drainCredentialsForget() {
+    if (credentialsWriter.running) return
+    while (credentialsForgetQueue.length > 0) {
+      var job = credentialsForgetQueue[0]
+      credentialsForgetQueue = credentialsForgetQueue.slice(1)
+      var store = Credentials.withoutAccount(
+        Credentials.loadStore(credentialsFile.text()), job.id, job.remaining)
+      if (!store) continue
+      credentialsWritePayload = Credentials.serialize(store)
+      credentialsWriter.command = [pluginDir + "/scripts/config-store.sh", "credentials.json"]
+      credentialsWriter.running = true
+      return
+    }
   }
 
   // An account learns its own address on its first profile read; until then the
@@ -332,9 +401,14 @@ Item {
   // provider this row is. Written before the password is tried, so a mailbox
   // that fails to sign in still has its settings to correct rather than an
   // empty form to fill in again.
+  //
+  // Answers whether it saved. An address that is already another row is
+  // refused before anything is written: saving it folded this row into the
+  // working account and replaced its servers with whatever had just been typed,
+  // before the password was ever tried.
   function configureAccount(index, values) {
     var accounts = accountList.accounts
-    if (index < 0 || index >= accounts.length) return
+    if (index < 0 || index >= accounts.length) return false
     var raw = values || ({})
 
     var entry = {}
@@ -343,6 +417,11 @@ Item {
     if (raw.email !== undefined) entry.email = raw.email
     if (raw.imap !== undefined) entry.imap = raw.imap
     if (raw.label !== undefined) entry.label = raw.label
+
+    if (Accounts.duplicateIndex(accountList, index, entry.email, entry.provider) >= 0) {
+      duplicateAccount(String(entry.email || ""))
+      return false
+    }
 
     var updated = Accounts.emptyList()
     updated.activeId = accountList.activeId
@@ -356,6 +435,7 @@ Item {
     accountList = updated
     saveAccounts()
     refreshCurrent()
+    return true
   }
 
   // A save that arrives while one is already running is queued, never dropped.
@@ -375,7 +455,26 @@ Item {
     accountsWriter.running = true
   }
 
+  // Whether this session has already copied an unreadable accounts.json aside.
+  // Once is enough: the copy is of what the user had, and every later read of
+  // the same broken file would only copy it again.
+  property bool accountsBackedUp: false
+
   function applyAccounts(raw) {
+    if (!Accounts.isReadable(raw)) {
+      // Somebody's accounts in a shape this build cannot read — a hand edit, a
+      // newer version's file. The next save would overwrite it for good, so a
+      // copy goes aside first, under a name that says when.
+      if (!accountsBackedUp) {
+        accountsBackedUp = true
+        Quickshell.execDetached(["sh", "-c",
+          "cp -p -- \"$1\" \"$1.unreadable-$(date +%Y%m%d%H%M%S)\"",
+          "sh", accountsFile.path])
+      }
+      // Already running: keep the list in memory rather than replacing it with
+      // an empty one because the file underneath broke.
+      if (accountsLoaded) return
+    }
     var loaded = Accounts.load(raw)
     // First run, or an install that predates several accounts: one nameless
     // row so the existing credentials file still has somewhere to live.
@@ -554,11 +653,17 @@ Item {
   }
 
   // The switcher's model: every mailbox, its count, and why it is not usable.
+  //
+  // Names `accountHosts.count` so it re-evaluates when the hosts are built.
+  // `objectAt` is not a property, so a binding that only calls it never learns
+  // that a host has appeared — and the switcher read 0 for every mailbox until
+  // something else happened to change the list.
   readonly property var accountSummaries: {
     var out = []
     var accounts = accountList ? accountList.accounts : []
+    var built = accountHosts.count
     for (var i = 0; i < accounts.length; i++) {
-      var host = accountHosts.objectAt(i)
+      var host = i < built ? accountHosts.objectAt(i) : null
       out.push({
         id: accounts[i].id,
         email: accounts[i].email,
@@ -624,6 +729,14 @@ Item {
   // The address a draft signs with, and the aliases it may choose from: both
   // the drafting account's, not the one on screen.
   readonly property string composeEmail: composeHost ? composeHost.accountEmail : ""
+  // The account a draft is saved to, named rather than followed: a compose
+  // holds on to it, because `composeHost` falls back to whatever is on screen
+  // once the compose closes, and a save landing after that — or a discard of
+  // its copy — has to reach the mailbox the draft was written in.
+  readonly property string composeAccountId: composeHost ? composeHost.accountId : ""
+  readonly property bool canDraft: !!composeHost && composeHost.canDraft
+  // The drafting account's send, which is not necessarily `current`'s.
+  readonly property bool composeSending: !!composeHost && composeHost.sending
   readonly property var sendAsAliases: composeHost ? composeHost.availableSendAsAliases : []
   readonly property string accountAddress: {
     var accounts = accountList ? accountList.accounts : []
@@ -809,6 +922,7 @@ Item {
   readonly property var selectedInvite: reader ? reader.selectedInvite : null
   readonly property string selectedResponse: reader ? reader.selectedResponse : ""
   readonly property bool canRespondToInvite: !!reader && reader.canRespondToInvite
+  readonly property string inviteMismatch: reader ? reader.inviteMismatch : ""
   readonly property bool rsvpSending: !!reader && reader.rsvpSending
   // Empty when this message offers no way off a list, which is the answer for
   // everything that is not a newsletter.
@@ -817,18 +931,35 @@ Item {
   readonly property bool unsubscribing: !!reader && reader.unsubscribing
   readonly property string savingAttachment: reader ? reader.savingAttachment : ""
   readonly property bool detailLoading: !!reader && reader.detailLoading
-  readonly property bool sending: !!current && current.sending
-  readonly property string lastError: current ? current.lastError : ""
-  readonly property string actionStatus: current ? current.actionStatus : ""
+  // The mailbox the last action went to, and the one the last draft was sent
+  // through. While unified neither is necessarily `current`: archiving a row
+  // from account B put B's "Archived", B's error and B's Undo on B, and a notice
+  // that only ever read `current` showed none of them.
+  property var actionHost: null
+  property var sendHost: null
+  readonly property var noticeHost: root.unified && root.actionHost ? root.actionHost : current
+
+  readonly property bool sending: root.sendHost
+    ? root.sendHost.sending : (!!current && current.sending)
+  // The acting mailbox's error first; otherwise the one on screen, which is
+  // where a sign-in or a sync failure is reported.
+  readonly property string lastError: {
+    var own = noticeHost ? noticeHost.lastError : ""
+    if (own !== "") return own
+    return current ? current.lastError : ""
+  }
+  readonly property string actionStatus: noticeHost ? noticeHost.actionStatus : ""
   // What the status-bar notice offers alongside its sentence, empty when it
   // offers nothing. Read off the same account the sentence came from, so the
   // two cannot describe different mailboxes.
-  readonly property string undoLabel: current ? current.undoLabel : ""
-  readonly property bool undoBusy: !!current && current.undoBusy
+  readonly property string undoLabel: noticeHost ? noticeHost.undoLabel : ""
+  // The notice's one button: Open after a save, otherwise Undo.
+  readonly property string openLabel: noticeHost ? noticeHost.openLabel : ""
+  readonly property bool undoBusy: !!noticeHost && noticeHost.undoBusy
   // The row an undo would bring back, as a row key. The window reads it before
   // undoing, because taking the offer spends it: afterwards there is nothing
   // left to ask where the cursor should go.
-  readonly property string undoKey: current ? current.undoKey : ""
+  readonly property string undoKey: noticeHost ? noticeHost.undoKey : ""
   readonly property string signInProgress: current ? current.signInProgress : ""
   readonly property string syncedLabel: current ? current.syncedLabel : ""
 
@@ -1000,6 +1131,7 @@ Item {
     var host = markOwner !== "" ? findAccount(markOwner) : current
     if (!host) host = current
     clearMarks()
+    root.actionHost = host
     if (host) host.actOnMany(ids, action)
   }
   // The notice's own button, which is the switch: what it turns on is every
@@ -1011,11 +1143,16 @@ Item {
   }
   function saveAttachment(id) {
     var host = root.unified ? reader : current
-    if (host) host.saveAttachment(id)
+    if (!host) return
+    // The Open offer and any failure belong to the mailbox that saved it.
+    root.actionHost = host
+    host.saveAttachment(id)
   }
   function unsubscribe() {
     var host = root.unified ? reader : current
-    if (host) host.unsubscribe()
+    if (!host) return
+    root.actionHost = host
+    host.unsubscribe()
   }
   // The cursor walks the list that is on screen. While unified that is the
   // merged one, and asking the account on screen would have walked only its
@@ -1055,22 +1192,39 @@ Item {
     clearMarks()
     if (current) current.selectLabel(name)
   }
+  // Whether a row stays on screen after `action`, asked of the mailbox that
+  // will act — the row's own, or the one holding the marks when no key is
+  // given — so the window's cursor moves the way that list is about to.
+  function survives(action, key) {
+    var host = String(key || "") !== "" ? hostForMessage(key)
+      : (markOwner !== "" ? findAccount(markOwner) : current)
+    if (!host) host = current
+    return host ? host.survives(action) : Model.survivesAction(mailboxKey, action)
+  }
   // Every action names a message, so every action can find its own mailbox.
+  // The owner is remembered as well as asked, so its notice is the one shown.
   function act(key, action, quiet) {
     var host = hostForMessage(key)
-    if (host) host.act(Model.keyId(key), action, quiet)
+    if (!host) return
+    root.actionHost = host
+    host.act(Model.keyId(key), action, quiet)
   }
 
-  // The account whose notice is on screen, which is `current` for the same
-  // reason `actionStatus` is: the offer and the sentence beside it are one
-  // thing, and taking one from a different mailbox than the other is how an
-  // undo lands somewhere nobody was looking.
+  // The account whose notice is on screen, for the same reason `actionStatus`
+  // reads it: the offer and the sentence beside it are one thing, and taking
+  // one from a different mailbox than the other is how an undo lands somewhere
+  // nobody was looking.
   function undo() {
-    if (current) current.undo()
+    if (noticeHost) noticeHost.undo()
+  }
+  function openSaved() {
+    if (noticeHost) noticeHost.openSaved()
   }
   function toggleStar(key) {
     var host = hostForMessage(key)
-    if (host) host.toggleStar(Model.keyId(key))
+    if (!host) return
+    root.actionHost = host
+    host.toggleStar(Model.keyId(key))
   }
   function markAllRead() {
     if (!root.unified) {
@@ -1085,7 +1239,62 @@ Item {
       if (root.isMergedHost(host)) host.markAllRead()
     }
   }
-  function send(fields) { if (composeHost) composeHost.send(fields) }
+  // The sending account is remembered past the draft: the compose view closes
+  // on send, `composeOwner` empties with it, and `sending` would otherwise go
+  // back to asking the mailbox on screen while the reply is still going out.
+  function send(fields) {
+    if (!composeHost) return
+    root.sendHost = composeHost
+    // And its notices with it: a failed send in the merged view belongs to the
+    // account that sent, not to whichever one the list happens to follow.
+    root.actionHost = composeHost
+    composeHost.send(fields)
+  }
+
+  // ---------------------------------------------------------------- drafts
+
+  function hostForAccount(accountId) {
+    var wanted = String(accountId || "")
+    if (wanted === "") return null
+    for (var i = 0; i < accountHosts.count; i++) {
+      var host = accountHosts.objectAt(i)
+      if (host && host.accountId === wanted) return host
+    }
+    return null
+  }
+
+  // Whether opening this row means editing it rather than reading it.
+  function isDraftKey(key) {
+    var host = hostForMessage(key)
+    return !!host && host.isDraft(Model.keyId(key))
+  }
+  function openDraft(key, callback) {
+    var host = hostForMessage(key)
+    if (!host) {
+      if (typeof callback === "function") callback(null, "")
+      return
+    }
+    // Where its errors and notes show in the merged view; see `noticeHost`.
+    root.actionHost = host
+    host.openDraft(Model.keyId(key), callback)
+  }
+  // Addressed by account, never by "whichever compose is current": see
+  // `composeAccountId`.
+  function saveDraft(accountId, draftId, token, fields, callback) {
+    var host = hostForAccount(accountId)
+    if (!host) {
+      if (typeof callback === "function") callback(null, "That mailbox is no longer set up")
+      return
+    }
+    root.actionHost = host
+    host.saveDraft(draftId, token, fields, callback)
+  }
+  function deleteDraft(accountId, draftId) {
+    var host = hostForAccount(accountId)
+    if (!host) return
+    root.actionHost = host
+    host.deleteDraft(draftId)
+  }
   function preferredSendAs(recipients) {
     return composeHost ? composeHost.preferredSendAs(recipients) : null
   }
@@ -1103,15 +1312,19 @@ Item {
   // one on screen. Addressed by index because that is the only handle on a row
   // that has no address yet — which is exactly the row being filled in.
   function configureCurrentAccount(values) {
-    configureAccount(activeIndex >= 0 ? activeIndex : indexOfActiveAccount(), values)
+    return configureAccount(activeIndex >= 0 ? activeIndex : indexOfActiveAccount(), values)
   }
 
   // Saving a new address rebuilds the account host. Wait for that replacement
   // before asking it to sign in; calling through immediately targets the host
   // that the save has just retired, which made a failed attempt knock the user
   // out of the add flow on the next click.
+  //
+  // A refused save signs nothing in: the host on screen is still the draft,
+  // and trying the password against the other account's servers is not what
+  // was asked.
   function configureCurrentAccountAndSignIn(values, secret) {
-    configureCurrentAccount(values)
+    if (!configureCurrentAccount(values)) return
     Qt.callLater(function() { root.signInWithPassword(secret) })
   }
 
@@ -1231,6 +1444,32 @@ Item {
       root.windowWritePayload = ""
     }
     onExited: root.windowWritePayload = ""
+  }
+
+  // Read only to take a removed mailbox's client out of it; each account's own
+  // manager watches the same file and owns everything else about it.
+  FileView {
+    id: credentialsFile
+    path: Credentials.path(Quickshell.env("HOME") || "")
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+  }
+
+  Process {
+    id: credentialsWriter
+    stdinEnabled: true
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onStarted: {
+      write(root.credentialsWritePayload + "\n")
+      root.credentialsWritePayload = ""
+    }
+    onExited: {
+      root.credentialsWritePayload = ""
+      credentialsFile.reload()
+      Qt.callLater(root.drainCredentialsForget)
+    }
   }
 
   FileView {

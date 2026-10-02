@@ -432,6 +432,18 @@ deepEqual(imap.actionPlan("archive", { "\\archive": "Archive" }),
 assert.strictEqual(imap.actionPlan("archive", {}).move, "")
 assert.strictEqual(imap.actionPlan("trash", {}).move, "")
 assert.strictEqual(imap.actionPlan("nonesuch", {}), null)
+// Untrash goes where the caller says the message came from: INBOX when nobody
+// knows, the server's own Sent for the account's own mail.
+deepEqual(imap.actionPlan("untrash", {}), { add: [], remove: ["\\Deleted"], move: "INBOX" })
+assert.strictEqual(imap.actionPlan("untrash", { "\\sent": "Sent Items" }, "\\Sent").move,
+  "Sent Items")
+assert.strictEqual(imap.actionPlan("untrash", {}, "\\Sent").move, "Sent")
+assert.strictEqual(imap.actionPlan("untrash", {}, "Archive").move, "Archive",
+  "a folder an undo recorded is used as it is")
+// The search for a trashed message runs in the server's Trash, which only the
+// special-use attribute resolves: the bare word came back as itself.
+assert.strictEqual(imap.resolveFolder("\\Trash", { "\\trash": "[Gmail]/Trash" }), "[Gmail]/Trash")
+assert.strictEqual(imap.resolveFolder("Trash", { "\\trash": "[Gmail]/Trash" }), "Trash")
 
 // -------------------------------------------------- label changes -> flags
 //
@@ -621,5 +633,85 @@ assert.strictEqual(
 assert.strictEqual(imap.decodeResponse("", mail.base64ToBytes, mail.bytesToLatin1), "")
 assert.strictEqual(imap.decodeResponse("abc", null, null), "",
   "no decoder is an empty response, not a crash")
+
+// ------------------------------------------------------------------ drafts
+//
+// Saving a draft stores a new copy and removes the earlier ones. curl strips
+// the APPENDUID that would have named the new copy, so it is found again by
+// the token this client put on it.
+
+assert.strictEqual(imap.findDraftCommand("omail-abc"),
+  'UID SEARCH NOT DELETED HEADER X-Omail-Draft "omail-abc"',
+  "a copy flagged \\Deleted on a server without UIDPLUS is not the draft")
+assert.strictEqual(imap.findDraftCommand('omail"x\r\nA1 EXPUNGE'), 'UID SEARCH NOT DELETED HEADER X-Omail-Draft "omailxA1EXPUNGE"',
+  "a token cannot end the quoted string or start a command")
+assert.strictEqual(imap.findDraftCommand(""), "", "no token, nothing to search for")
+
+// The newest copy is the one just stored; every other copy carrying the token
+// is an earlier save.
+deepEqual(imap.draftReplacement([40, 42, 41], "", "Drafts"), { keep: 42, remove: [40, 41] })
+// The copy the draft was opened from goes too, when it is in the same folder.
+deepEqual(imap.draftReplacement([42], "7:Drafts", "Drafts"), { keep: 42, remove: [7] })
+deepEqual(imap.draftReplacement([42], "42:Drafts", "Drafts"), { keep: 42, remove: [] },
+  "the copy just stored is never removed")
+deepEqual(imap.draftReplacement([42], "7:INBOX", "Drafts"), { keep: 42, remove: [] },
+  "an id from another folder names somebody else's message, not this draft")
+deepEqual(imap.draftReplacement([42, 7], "7:Drafts", "Drafts"), { keep: 42, remove: [7] },
+  "a stale copy is named once")
+// Nothing found: the new copy cannot be named, so the one it replaced stays.
+deepEqual(imap.draftReplacement([], "7:Drafts", "Drafts"), { keep: 0, remove: [] },
+  "a save that cannot find its copy keeps the previous one")
+
+// A server that indexes headers lazily finds nothing for a copy stored a
+// moment ago. The UIDNEXT asked for before the APPEND names it instead.
+assert.strictEqual(imap.uidNextCommand("Drafts"), 'STATUS "Drafts" (UIDNEXT)')
+assert.strictEqual(imap.parseUidNext('* STATUS "Drafts" (UIDNEXT 43)\r\nA1 OK done\r\n'), 43)
+assert.strictEqual(imap.parseUidNext('* STATUS "My (old) drafts" (UIDNEXT 9 MESSAGES 2)\r\n'), 9)
+assert.strictEqual(imap.parseUidNext("A1 NO nope\r\n"), 0, "no answer, no UIDNEXT")
+assert.strictEqual(imap.appendedSinceCommand(43), "UID SEARCH UID 43:*")
+assert.strictEqual(imap.appendedSinceCommand(0), "", "nothing known, nothing to search")
+assert.strictEqual(imap.appendedCopy([43], 43), 43)
+assert.strictEqual(imap.appendedCopy([40], 43), 0, "n:* names the last message even below n")
+assert.strictEqual(imap.appendedCopy([43, 44], 43), 0,
+  "two new copies: which is ours cannot be told, so neither is claimed")
+assert.strictEqual(imap.appendedCopy([43], 0), 0)
+deepEqual(imap.draftReplacement([imap.appendedCopy([40, 44], 44)], "7:Drafts", "Drafts"),
+  { keep: 44, remove: [7] }, "the copy found by UIDNEXT replaces the previous one")
+
+deepEqual(imap.draftSettleCommands({ keep: 42, remove: [7, 8] }, ["IMAP4REV1", "UIDPLUS"]), [
+  "UID STORE 42 +FLAGS.SILENT (\\Draft)",
+  "UID STORE 7,8 +FLAGS.SILENT (\\Deleted)",
+  "UID EXPUNGE 7,8"
+])
+// No UIDPLUS: marked deleted and left, never a plain EXPUNGE that would take
+// whatever else another client had marked.
+deepEqual(imap.draftSettleCommands({ keep: 42, remove: [7] }, ["IMAP4REV1"]), [
+  "UID STORE 42 +FLAGS.SILENT (\\Draft)",
+  "UID STORE 7 +FLAGS.SILENT (\\Deleted)"
+])
+deepEqual(imap.draftSettleCommands({ keep: 0, remove: [] }, ["UIDPLUS"]), [])
+deepEqual(imap.removeCommands([3], ["UIDPLUS"]), ["UID STORE 3 +FLAGS.SILENT (\\Deleted)", "UID EXPUNGE 3"])
+deepEqual(imap.removeCommands([], ["UIDPLUS"]), [])
+for (const command of imap.draftSettleCommands({ keep: 1, remove: [2] }, ["UIDPLUS"]))
+  assert.ok(!/^EXPUNGE/.test(command), "never a bare EXPUNGE")
+
+// The drafts folder is a mailbox row now, so it stays out of the folder list
+// beneath — listed once, not twice.
+assert.strictEqual(imap.isSpecialFolder({ name: "Drafts", flags: ["\\Drafts"] }, {}), true)
+assert.strictEqual(imap.labelIdsFor(["\\Seen", "\\Draft"], "Drafts", { "\\drafts": "Drafts" })
+  .indexOf("DRAFT") >= 0, true, "a stored draft reads as one")
+
+// ------------------------------------------------------------- Sent copies
+//
+// Gmail's SMTP files what it relays in Sent Mail by itself; anything else
+// needs this client to store the copy.
+assert.strictEqual(imap.savesSentCopy({ imapHost: "imap.fastmail.com" }), true)
+assert.strictEqual(imap.savesSentCopy({ imapHost: "mail.example.org" }), true)
+assert.strictEqual(imap.savesSentCopy({ imapHost: "imap.gmail.com" }), false)
+assert.strictEqual(imap.savesSentCopy({ imapHost: "IMAP.Gmail.com" }), false, "hosts are compared folded")
+assert.strictEqual(imap.savesSentCopy({ imapHost: "imap.googlemail.com" }), false)
+assert.strictEqual(imap.savesSentCopy({}), false, "no server, nowhere to file it")
+for (const host of ["outlook.office365.com", "imap-mail.outlook.com", "outlook.office.com"])
+  assert.strictEqual(imap.savesSentCopy({ imapHost: host }), false, host + " files its own copy")
 
 console.log("Imap.js ok")

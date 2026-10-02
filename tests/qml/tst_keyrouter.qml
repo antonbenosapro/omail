@@ -160,7 +160,6 @@ Item {
       compare(host.lastId, "reply", "and from the reader")
     }
 
-    // Zoom is not: there is no message body to size until one is open.
     // A row of ten keys, told apart by which one fired. No chord: Qt puts a
     // 400ms deadline on an unfinished sequence, which is what the mailboxes
     // used to be reached through and why half the presses did nothing.
@@ -256,10 +255,12 @@ Item {
     }
 
     // Zoom reaches both mail contexts, because a subject line and a sender are
-    // read too — the list and the reader each keep their own size and the
-    // focused one is what the key changes. It is still not global: on a form
-    // or a settings page there is no reading surface to size, and Ctrl+0 has
-    // to stay dead there rather than firing at whatever is behind them.
+    // read too — the list and the reader each keep their own size, and which
+    // one the key changes is App.qml's to decide (Model.zoomTargetsList: the
+    // open message if there is one), not the context's. It is still not
+    // global: on a form or a settings page there is no reading surface to
+    // size, and Ctrl+0 has to stay dead there rather than firing at whatever
+    // is behind them.
     function test_zoom_reaches_the_list_as_well_as_the_reader() {
       keyClick(Qt.Key_0, Qt.ControlModifier)
       compare(host.lastId, "zoomReset", "the list is read, so it zooms")

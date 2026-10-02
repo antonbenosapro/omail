@@ -337,7 +337,7 @@ Column {
 
     Button {
       visible: root.accountCount > 1
-      text: "Remove account"
+      text: "Remove account..."
       foreground: root.dangerColor
       bordered: false
       fontSize: Style.font.bodySmall

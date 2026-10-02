@@ -258,7 +258,11 @@ function parseAddress(value) {
   return { name: name, email: email, display: name || email }
 }
 
-function parseAddressList(value) {
+// The entries of an address list as they were written, split on the commas
+// that separate addresses rather than the ones inside a quoted name or an
+// angle-bracketed address. Composing needs these undecoded: a name typed with
+// an accent in it has to be encoded on its own, without its neighbours.
+function splitAddressList(value) {
   var raw = String(value || "")
   var entries = []
   var current = ""
@@ -277,11 +281,17 @@ function parseAddressList(value) {
     current += character
   }
   entries.push(current)
-  var result = []
+  var kept = []
   for (var j = 0; j < entries.length; j++) {
-    if (!entries[j].trim()) continue
-    result.push(parseAddress(entries[j]))
+    if (entries[j].trim()) kept.push(entries[j])
   }
+  return kept
+}
+
+function parseAddressList(value) {
+  var entries = splitAddressList(value)
+  var result = []
+  for (var j = 0; j < entries.length; j++) result.push(parseAddress(entries[j]))
   return result
 }
 
@@ -808,6 +818,8 @@ function summarize(message, now) {
     // carries the real values.
     replyTo: parseAddress(headerValue(message, "Reply-To")),
     messageId: headerValue(message, "Message-ID"),
+    // The parent's own chain, which a reply extends: see `referenceChain`.
+    references: headerValue(message, "References"),
     to: parseAddressList(headerValue(message, "To")),
     cc: parseAddressList(headerValue(message, "Cc")),
     subject: subject || "(no subject)",
@@ -837,33 +849,167 @@ function headerSafe(value) {
   return String(value === undefined || value === null ? "" : value).replace(/[\r\n]+/g, " ")
 }
 
+// RFC 5322 asks for lines of 78 characters and forbids any over 998. A header
+// written as one line can pass both on a short reply and break the second on a
+// long Cc, so every header this writes is folded: a line break followed by a
+// space, which a reader removes again and which therefore changes nothing.
+var FOLD_WIDTH = 78
+var HARD_LINE_LIMIT = 998
+
+// An encoded word may run to 75 characters, which leaves 63 for the base64
+// between `=?UTF-8?B?` and `?=` — 45 octets of UTF-8. A character is never
+// split across two words: a decoder that sees half a character in each makes
+// two replacement marks out of one letter.
+var ENCODED_WORD_OCTETS = 45
+
+function isPrintableAscii(text) {
+  return /^[\x20-\x7e]*$/.test(text)
+}
+
+function encodedWords(text) {
+  var value = String(text || "")
+  var words = []
+  var chunk = ""
+  var octets = 0
+  for (var i = 0; i < value.length; i++) {
+    var character = value.charAt(i)
+    var code = value.charCodeAt(i)
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+      character += value.charAt(i + 1)
+      i++
+    }
+    var size = utf8Bytes(character).length
+    if (octets + size > ENCODED_WORD_OCTETS && chunk !== "") {
+      words.push("=?UTF-8?B?" + encodeBase64(chunk) + "?=")
+      chunk = ""
+      octets = 0
+    }
+    chunk += character
+    octets += size
+  }
+  if (chunk !== "") words.push("=?UTF-8?B?" + encodeBase64(chunk) + "?=")
+  return words
+}
+
+// Joins pieces onto one header, breaking between them whenever the line would
+// pass the fold width. `separator` stays at the end of the line it follows, so
+// a list folds after its comma; the piece that starts the next line is led by
+// the single space that marks it as a continuation.
+function foldPieces(name, pieces, separator) {
+  var lines = []
+  var line = name + ":"
+  var started = false
+  for (var i = 0; i < pieces.length; i++) {
+    var piece = pieces[i]
+    var joint = started ? separator : ""
+    if (!started && line.length + 1 + piece.length > FOLD_WIDTH) {
+      // A first piece too long to share a line with the name starts the next
+      // one instead. Folding white space may come before the value as well as
+      // inside it, and this is what keeps a header with one long encoded word
+      // or one long address under the width.
+      lines.push(line)
+      line = " " + piece
+    } else if (started && line.length + joint.length + 1 + piece.length > FOLD_WIDTH) {
+      lines.push(line + joint.replace(/\s+$/, ""))
+      line = " " + piece
+    } else {
+      line += (started ? joint : " ") + piece
+    }
+    started = true
+  }
+  lines.push(started ? line : line + " ")
+  return lines.join("\r\n")
+}
+
 // A display name is a phrase, not a header value: an encoded word may not sit
 // inside quotes, and an ASCII name carrying a comma or a dot is only legal
-// quoted. `foldHeader` cannot do this, because it encodes the whole value as
-// one word — `=?UTF-8?B?...?=` wrapped around `"Name" <a@b>` is not an address.
+// quoted. A long non-ASCII name becomes several words separated by spaces,
+// which a phrase allows and a decoder joins back without the spaces.
 function encodedPhrase(text) {
   var value = headerSafe(text).trim()
   if (value === "") return ""
-  if (!/^[\x20-\x7e]*$/.test(value))
-    return "=?UTF-8?B?" + encodeBase64(value) + "?="
+  if (!isPrintableAscii(value)) return encodedWords(value).join(" ")
   return '"' + value.replace(/([\\"])/g, "\\$1") + '"'
 }
 
-// Written by hand rather than through `foldHeader` for the reason above. The
-// address still loses its line breaks, so a display name cannot smuggle a
-// second header in either.
+// Written by hand rather than through `foldHeader`: a whole header encoded as
+// one word is not an address. The address still loses its line breaks, so a
+// display name cannot smuggle a second header in either.
 function fromHeader(email, displayName) {
   var address = headerSafe(email).trim()
   var phrase = encodedPhrase(displayName)
   return "From: " + (phrase === "" ? address : phrase + " <" + address + ">")
 }
 
+// One entry of a typed address list, back out as a header writes it: the
+// name encoded on its own and the address untouched. Encoding the whole list
+// as one word was what sent `José <a@x>, Bob <b@y>` to Bob alone — a reader
+// decodes it back to one opaque phrase, and the comma inside it no longer
+// separates anything.
+function formatAddress(entry) {
+  var text = headerSafe(entry).trim()
+  var angled = text.match(/^(.*)<([^<>]*)>\s*$/)
+  if (!angled) return text.replace(/^<|>$/g, "")
+  var address = angled[2].trim()
+  var phrase = encodedPhrase(unquote(angled[1]))
+  return phrase === "" ? address : phrase + " <" + address + ">"
+}
+
+// The bare addresses of a typed list, for an SMTP envelope. Read off the
+// same entries the header is written from, so the two cannot disagree about
+// who a message is for.
+function addressesOf(value) {
+  var entries = splitAddressList(headerSafe(value))
+  var emails = []
+  for (var i = 0; i < entries.length; i++) {
+    var text = entries[i].trim()
+    var angled = text.match(/^(.*)<([^<>]*)>\s*$/)
+    emails.push((angled ? angled[2] : text.replace(/^<|>$/g, "")).trim())
+  }
+  return emails
+}
+
+function addressHeader(name, value) {
+  var entries = splitAddressList(headerSafe(value))
+  var pieces = []
+  for (var i = 0; i < entries.length; i++) {
+    var formatted = formatAddress(entries[i])
+    if (formatted !== "") pieces.push(formatted)
+  }
+  return foldPieces(name, pieces, ", ")
+}
+
+// An unstructured header — a subject. ASCII folds at its own spaces, so
+// unfolding gives back exactly what was typed. Text with nothing to fold at
+// that would still pass the hard limit goes out encoded instead, which can be
+// broken anywhere.
 function foldHeader(name, value) {
   var text = headerSafe(value)
-  // Any non-ASCII in a header has to go back out as an encoded word, or Gmail
+  if (isPrintableAscii(text)) {
+    var tokens = text.split(/(?= )/)
+    var lines = []
+    var line = name + ": "
+    for (var i = 0; i < tokens.length; i++) {
+      var token = tokens[i]
+      if (line.length + token.length > FOLD_WIDTH && /\S/.test(token)
+          && /\S/.test(line.substring(name.length + 1))) {
+        lines.push(line)
+        line = token
+      } else {
+        line += token
+      }
+    }
+    lines.push(line)
+    var fits = true
+    for (var j = 0; j < lines.length; j++) {
+      if (lines[j].length > HARD_LINE_LIMIT) fits = false
+    }
+    if (fits) return lines.join("\r\n")
+  }
+  // Any non-ASCII in a header has to go back out as encoded words, or Gmail
   // rejects the raw message.
-  if (/^[\x20-\x7e]*$/.test(text)) return name + ": " + text
-  return name + ": =?UTF-8?B?" + encodeBase64(text) + "?="
+  // Adjacent encoded words need the space between them; a decoder drops it.
+  return foldPieces(name, encodedWords(text), " ")
 }
 
 // In-Reply-To and References carry a Message-ID, and a Message-ID is a string
@@ -873,6 +1019,27 @@ function foldHeader(name, value) {
 // printable ASCII, on one line, no longer than a header may run.
 function referenceValue(value) {
   return headerSafe(value).replace(/[^\x20-\x7e]+/g, "").substring(0, 512).trim()
+}
+
+// A reply's References is the parent's References with the parent appended:
+// a client threading a long conversation looks for any ancestor it holds, and
+// a chain of one breaks the thread as soon as that one message is missing.
+// Trimmed from the middle once it is long, keeping the root — the one id every
+// client agrees the conversation is about — and the most recent ancestors.
+var MAX_REFERENCES = 20
+
+function referenceChain(references, parent) {
+  var found = String(referenceValue(String(references || "").replace(/[\r\n]+/g, " ")))
+    .match(/<[^<>\s]+>/g) || []
+  var ids = []
+  for (var i = 0; i < found.length; i++) {
+    if (ids.indexOf(found[i]) < 0) ids.push(found[i])
+  }
+  var last = referenceValue(parent)
+  if (last !== "" && ids.indexOf(last) < 0) ids.push(last)
+  if (ids.length > MAX_REFERENCES)
+    ids = [ids[0]].concat(ids.slice(ids.length - (MAX_REFERENCES - 1)))
+  return ids
 }
 
 function quoteBody(summary, body) {
@@ -889,6 +1056,52 @@ function replySubject(subject) {
   var text = String(subject || "").trim()
   if (/^re:/i.test(text)) return text
   return "Re: " + (text || "(no subject)")
+}
+
+// What is sent of the body the form holds. Only the blank lines above the
+// text and the whitespace after it go: a full trim also took the indentation
+// off the first line, which is code or a quoted table as often as a slip.
+function outgoingBody(text) {
+  var body = String(text === undefined || text === null ? "" : text)
+    .replace(/^(?:[ \t]*\r?\n)+/, "").replace(/\s+$/, "")
+  return body.trim() === "" ? "" : body
+}
+
+// "Fw:" is Outlook's spelling of the same prefix, and stacking either is the
+// "Fwd: Fwd: x" a thread forwarded twice used to collect.
+function forwardSubject(subject) {
+  var text = String(subject || "").trim()
+  if (/^(fwd?|fw):/i.test(text)) return text
+  return "Fwd: " + (text || "(no subject)")
+}
+
+// Reply-all's Cc: everyone the original went to or copied, once each, minus
+// whoever the reply already goes To and minus this mailbox in any of its
+// names. Every send-as alias counts as this mailbox — a thread that reached
+// you at an alias otherwise copies the reply back to you.
+function replyAllCc(summary, ownAddresses) {
+  if (!summary) return []
+  var skip = []
+  var own = Array.isArray(ownAddresses) ? ownAddresses : []
+  for (var i = 0; i < own.length; i++) {
+    var mine = own[i] && typeof own[i] === "object"
+      ? String(own[i].email || own[i].sendAsEmail || "") : String(own[i] || "")
+    if (mine.trim() !== "") skip.push(mine.trim().toLowerCase())
+  }
+  if (summary.from && summary.from.email) skip.push(String(summary.from.email).toLowerCase())
+  if (summary.replyTo && summary.replyTo.email)
+    skip.push(String(summary.replyTo.email).toLowerCase())
+  var list = (Array.isArray(summary.to) ? summary.to : [])
+    .concat(Array.isArray(summary.cc) ? summary.cc : [])
+  var kept = []
+  for (var j = 0; j < list.length; j++) {
+    var email = String(list[j] && list[j].email ? list[j].email : "").trim()
+    var key = email.toLowerCase()
+    if (email === "" || skip.indexOf(key) >= 0) continue
+    skip.push(key)
+    kept.push(email)
+  }
+  return kept
 }
 
 // A minimal RFC 5322 message. Gmail wants the whole thing base64url encoded in
@@ -923,14 +1136,16 @@ function calendarMethod(value) {
 function buildRawMessage(fields) {
   var values = fields || {}
   var lines = []
+  if (values.date) lines.push("Date: " + messageDateHeader(values.date))
+  if (values.messageId) lines.push("Message-ID: " + referenceValue(values.messageId))
   if (values.from) lines.push(fromHeader(values.from, values.fromName))
-  lines.push(foldHeader("To", values.to || ""))
-  if (values.cc) lines.push(foldHeader("Cc", values.cc))
+  lines.push(addressHeader("To", values.to || ""))
+  if (values.cc) lines.push(addressHeader("Cc", values.cc))
   lines.push(foldHeader("Subject", values.subject || ""))
   var inReplyTo = referenceValue(values.inReplyTo)
   if (inReplyTo) {
     lines.push("In-Reply-To: " + inReplyTo)
-    lines.push("References: " + (referenceValue(values.references) || inReplyTo))
+    lines.push(foldPieces("References", referenceChain(values.references, inReplyTo), " "))
   }
   lines.push("MIME-Version: 1.0")
 
@@ -965,8 +1180,80 @@ function buildRawMessage(fields) {
   return lines.join("\r\n") + "\r\n"
 }
 
+// Gmail reads the envelope off the message itself; SMTP is told it apart.
+// It is built here from the same typed fields the headers were, rather than
+// by reading the finished message back: that is how a header that encoded
+// wrongly once became a recipient silently dropped.
+function sendEnvelope(fields) {
+  var values = fields || {}
+  var recipients = []
+  var invalid = []
+  var lists = [values.to, values.cc, values.bcc]
+  for (var i = 0; i < lists.length; i++) {
+    var emails = addressesOf(lists[i] || "")
+    for (var j = 0; j < emails.length; j++) {
+      var email = emails[j]
+      if (!/^[^\s@<>,;"]+@[^\s@<>,;"]+$/.test(email)) {
+        invalid.push(email)
+        continue
+      }
+      var known = false
+      for (var k = 0; k < recipients.length; k++) {
+        if (recipients[k].toLowerCase() === email.toLowerCase()) known = true
+      }
+      if (!known) recipients.push(email)
+    }
+  }
+  return { from: headerSafe(values.from).trim(), recipients: recipients, invalid: invalid }
+}
+
 function buildSendPayload(fields) {
   var payload = { raw: encodeBase64Url(buildRawMessage(fields)) }
   if (fields && fields.threadId) payload.threadId = String(fields.threadId)
+  payload.envelope = sendEnvelope(fields)
   return payload
+}
+
+// ------------------------------------------------------- transport headers
+//
+// Gmail stamps Date and Message-ID onto whatever it is given. An SMTP server
+// is not obliged to, and a message without them is filed under 1970 by some
+// clients, threaded under nothing by all of them, and scored as spam by most
+// filters. The client that speaks SMTP adds them; the message stays one shape
+// for both providers until then.
+
+function messageDateHeader(date) {
+  var when = date instanceof Date ? date : new Date(Number(date) || date)
+  if (isNaN(when.getTime())) when = new Date()
+  var offset = -when.getTimezoneOffset()
+  var sign = offset < 0 ? "-" : "+"
+  var minutes = Math.abs(offset)
+  return WEEKDAYS[when.getDay()] + ", " + pad(when.getDate()) + " " + MONTHS[when.getMonth()]
+    + " " + when.getFullYear() + " " + pad(when.getHours()) + ":" + pad(when.getMinutes())
+    + ":" + pad(when.getSeconds()) + " " + sign + pad(Math.floor(minutes / 60)) + pad(minutes % 60)
+}
+
+// The right-hand side is the sender's own domain: unique enough with the
+// time and a random part on the left, and it says where the message came from
+// in the way every other client's ids do.
+function newMessageId(fromAddress, date) {
+  var address = String(fromAddress || "")
+  var at = address.lastIndexOf("@")
+  var domain = at >= 0 ? address.substring(at + 1).replace(/[^A-Za-z0-9.\-]/g, "") : ""
+  if (domain === "") domain = "omail.invalid"
+  var when = date instanceof Date ? date.getTime() : Number(date) || (new Date()).getTime()
+  var random = Math.floor(Math.random() * 0x100000000).toString(36)
+    + Math.floor(Math.random() * 0x100000000).toString(36)
+  return "<" + when.toString(36) + "." + random + "@" + domain + ">"
+}
+
+// Adds whichever of the two the header block is missing, in front of it.
+function withTransportHeaders(message, fromAddress, date) {
+  var text = String(message || "")
+  var end = text.indexOf("\r\n\r\n")
+  var head = "\r\n" + (end >= 0 ? text.substring(0, end) : text)
+  var added = []
+  if (!/\r\nDate:/i.test(head)) added.push("Date: " + messageDateHeader(date))
+  if (!/\r\nMessage-ID:/i.test(head)) added.push("Message-ID: " + newMessageId(fromAddress, date))
+  return added.length === 0 ? text : added.join("\r\n") + "\r\n" + text
 }

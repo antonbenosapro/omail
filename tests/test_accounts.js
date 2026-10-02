@@ -639,4 +639,43 @@ assert.strictEqual(accounts.count(accounts.discardDraftAt(pendingList, 0)), 3)
   assert.strictEqual(accounts.active(legacy).clientId, "abc")
 }
 
+// ------------------------------------------------ duplicates and identity
+{
+  let list = accounts.emptyList()
+  list = accounts.add(list, { email: "me@example.com", provider: "imap", imap: { imapHost: "mail.example.com" } })
+  list = accounts.add(list, { email: "me@gmail.com" })
+  list = accounts.add(list, { email: "", provider: "imap" })
+  const before = JSON.stringify(list)
+
+  // The draft typing an address that is already an IMAP row is that row.
+  assert.strictEqual(accounts.duplicateIndex(list, 2, "Me@Example.com", "imap"), 0)
+  // The same address over Gmail is a different mailbox, and so not a duplicate.
+  assert.strictEqual(accounts.duplicateIndex(list, 2, "me@example.com", "gmail"), -1)
+  // A row keeping its own address is not its own duplicate.
+  assert.strictEqual(accounts.duplicateIndex(list, 0, "me@example.com", "imap"), -1)
+  // Blank and half-typed addresses match nothing.
+  assert.strictEqual(accounts.duplicateIndex(list, 2, "", "imap"), -1)
+  assert.strictEqual(accounts.duplicateIndex(list, 2, "me@", "imap"), -1)
+  assert.strictEqual(accounts.duplicateIndex(null, 0, "me@gmail.com", "gmail"), -1)
+  assert.strictEqual(JSON.stringify(list), before, "asking changes nothing")
+
+  assert.strictEqual(accounts.isSameMailbox("me@gmail.com", "ME@gmail.com", "gmail"), true)
+  assert.strictEqual(accounts.isSameMailbox("me@gmail.com", "other@gmail.com", "gmail"), false)
+  assert.strictEqual(accounts.isSameMailbox("imap:me@example.com", "me@example.com", "imap"), true)
+  assert.strictEqual(accounts.isSameMailbox("me@example.com", "me@example.com", "imap"), false,
+    "the provider is part of the identity")
+  assert.strictEqual(accounts.isSameMailbox("", "", "gmail"), false)
+}
+
+// ------------------------------------------------- an unreadable list on disk
+{
+  assert.strictEqual(accounts.isReadable(""), true, "a first run has nothing to lose")
+  assert.strictEqual(accounts.isReadable("   "), true)
+  assert.strictEqual(accounts.isReadable(accounts.serialize(accounts.emptyList())), true)
+  assert.strictEqual(accounts.isReadable("{\"version\":1,\"accounts\":[{\"email\":"), false, "truncated")
+  assert.strictEqual(accounts.isReadable(JSON.stringify({ version: 2, accounts: [] })), false,
+    "a newer build's file is somebody's accounts, not nothing")
+  assert.strictEqual(accounts.isReadable("[]"), false)
+}
+
 console.log("test_accounts.js ok")

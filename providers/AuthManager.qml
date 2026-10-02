@@ -80,6 +80,11 @@ Item {
   property string pkceChallenge: ""
   property string oauthState: ""
   property bool callbackHandled: false
+  // The listener answers one connection and exits, so ignoring a request that
+  // is not ours means starting it again: `pending` until it has exited, and
+  // `restarted` for the rest of the attempt so the page is not opened twice.
+  property bool listenerRestartPending: false
+  property bool listenerRestarted: false
   property bool exchangingCode: false
   property var tokenRequest: null
   property int tokenRequestSerial: 0
@@ -164,11 +169,46 @@ Item {
     }
     if (credentialsWriteBusy) return false
     lastError = ""
+    // Merged into what is on disk rather than written alone. The file holds
+    // every account's client, and serialising just this one replaced it with a
+    // single entry — signing every other mailbox on another client out.
+    writeCredentialsStore(Credentials.withAccount(
+      Credentials.loadStore(credentialsFile.text()), accountId, result.credentials), true)
+    return true
+  }
+
+  // `announce` is false for the bookkeeping writes below, which change which
+  // name an entry is filed under and nothing the user did.
+  property bool credentialsWriteAnnounce: false
+
+  function writeCredentialsStore(store, announce) {
     credentialsWriteBusy = true
-    credentialsWritePayload = Credentials.serialize(result.credentials)
+    credentialsWriteAnnounce = announce === true
+    credentialsWritePayload = Credentials.serialize(store)
     credentialsWriter.command = [pluginDir + "/scripts/config-store.sh", "credentials.json"]
     credentialsWriter.running = true
-    return true
+  }
+
+  // Makes the nameless entry this mailbox's own, when it is the client this
+  // mailbox is actually using. The client check is what stops a stale entry
+  // left by an abandoned add from being claimed by a mailbox that signed in on
+  // a different one — claiming it would switch clients under a live session.
+  // See Credentials.adoptUnnamed for why the entry has to be claimed at all.
+  property bool adoptQueued: false
+
+  function adoptCredentials() {
+    if (Credentials.isUnnamedAccount(accountId)) return
+    if (credentialsWriteBusy) {
+      adoptQueued = true
+      return
+    }
+    adoptQueued = false
+    var claimed = Credentials.adoptUnnamed(
+      Credentials.loadStore(credentialsFile.text()), accountId)
+    if (!claimed) return
+    var own = Credentials.forAccount(claimed, accountId)
+    if (String(own.clientId) !== String(clientId)) return
+    writeCredentialsStore(claimed, false)
   }
 
   // The user's own client file wins; a client shipped with the plugin is the
@@ -180,6 +220,11 @@ Item {
     var changed = String(loaded.clientId) !== String(credentials.clientId)
     credentials = loaded
     credentialsChecked = true
+    // A named mailbox reading the pre-accounts file names its lone entry, so
+    // that entry cannot later be mistaken for a draft's and replaced by one.
+    if (!Credentials.isUnnamedAccount(accountId)
+        && Credentials.isLegacyStore(Credentials.loadStore(raw)))
+      Qt.callLater(root.adoptCredentials)
     if (changed) {
       // A different client means a different keyring entry and a different
       // grant; whatever is in memory belongs to the old one.
@@ -309,6 +354,20 @@ Item {
     refreshWithToken(token, purpose)
   }
 
+  // The keyring could not be asked at all. That is not "no saved session":
+  // nothing is cleared, a session already running keeps running, and the walk
+  // through older entries stops, because every one of them would fail the same
+  // way. The sentence says what to do about it.
+  function keyringUnavailable(message) {
+    lookupHandled = true
+    var purpose = lookupPurpose
+    lookupPurpose = ""
+    sessionChecked = true
+    lastError = message
+    if (purpose === "request") finishWaiters("", message)
+    else sessionUnavailable(message)
+  }
+
   // Held only until this mailbox learns its own address, which the profile
   // fetch settles a second or two after signing in.
   //
@@ -319,11 +378,99 @@ Item {
   // keyring with nothing ambiguous in it.
   property string unnamedRefreshToken: ""
 
+  // A new id is either this mailbox learning its own address, or the object
+  // being handed a different mailbox entirely — the hosts are kept by position,
+  // so removing a row moves every account below it up one host. Only the first
+  // may write what is held under the new name. The decision is the account's
+  // (`MailAccount` knows which address the sign-in reported) and arrives as a
+  // `switchAccount()` in this same change, so the write waits a tick for it:
+  // storing at once would file a draft's token under whichever account slid
+  // into its place.
+  property bool namingPending: false
+
   onAccountIdChanged: {
-    if (Credentials.isUnnamedAccount(accountId) || unnamedRefreshToken === "") return
-    var held = unnamedRefreshToken
+    if (Credentials.isUnnamedAccount(accountId)) return
+    namingPending = true
+    Qt.callLater(root.settleName)
+  }
+
+  function settleName() {
+    if (!namingPending) return
+    namingPending = false
+    if (unnamedRefreshToken !== "") {
+      var held = unnamedRefreshToken
+      unnamedRefreshToken = ""
+      storeRefreshToken(held)
+    }
+    adoptCredentials()
+  }
+
+  // The object now speaks for a different mailbox. Everything held in memory —
+  // the access token, a token waiting for a name, a lookup or refresh still in
+  // flight — belongs to the previous one, and handing any of it on is how one
+  // account's mail ended up under another's name.
+  function switchAccount() {
+    namingPending = false
     unnamedRefreshToken = ""
-    storeRefreshToken(held)
+    keyringQueuedToken = ""
+    cancelLogin()
+    if (secretLookup.running) {
+      lookupHandled = true
+      secretLookup.running = false
+    }
+    lookupPurpose = ""
+    resetMemorySession()
+    grantedScope = ""
+    lastError = ""
+    finishWaiters("", "Switched to a different account")
+    sessionChecked = false
+    // The client is per account too. Set directly rather than through
+    // `applyCredentials`, which would start a lookup in this same tick on the
+    // process just stopped above.
+    var raw = credentialsFile.text()
+    credentials = Credentials.effective(raw, accountId)
+    usingBuiltinClient = Credentials.usingBuiltin(raw, accountId)
+    // Asked a tick later so a lookup stopped above has let go of the process.
+    Qt.callLater(root.restoreAfterSwitch)
+  }
+
+  // A stopped lookup can still be winding down a tick later. Its exit is then
+  // what asks, so the new account is never left without a restore at all.
+  property bool restorePending: false
+
+  function restoreAfterSwitch() {
+    if (secretLookup.running) {
+      restorePending = true
+      return
+    }
+    restorePending = false
+    restoreSession()
+  }
+
+  // Removing the mailbox. The keyring entry is cleared by a detached process,
+  // because the object asking may be destroyed in the same tick — a `Process`
+  // child dies with it, and the token it was clearing would stay behind.
+  function forget() {
+    var attributes = Credentials.keyringAttributes(clientId, accountId)
+    namingPending = false
+    unnamedRefreshToken = ""
+    keyringQueuedToken = ""
+    cancelLogin()
+    resetMemorySession()
+    if (attributes.length > 0)
+      Quickshell.execDetached(["secret-tool", "clear"].concat(attributes))
+  }
+
+  // A token that arrives while the previous one is still being written waits
+  // for it, rather than being dropped. Dropped, the keyring kept the older
+  // token, and a rotated grant would then fail at the next restart.
+  property string keyringQueuedToken: ""
+
+  function flushQueuedToken() {
+    if (keyringQueuedToken === "" || keyringStore.running) return
+    var next = keyringQueuedToken
+    keyringQueuedToken = ""
+    storeRefreshToken(next)
   }
 
   function storeRefreshToken(refreshToken) {
@@ -334,7 +481,10 @@ Item {
       unnamedRefreshToken = String(refreshToken)
       return
     }
-    if (keyringStore.running) return
+    if (keyringStore.running) {
+      keyringQueuedToken = String(refreshToken)
+      return
+    }
     var attributes = Credentials.keyringAttributes(clientId, accountId)
     if (attributes.length === 0) return
     keyringWriteToken = String(refreshToken)
@@ -383,11 +533,24 @@ Item {
       root.refreshBusy = false
       root.sessionChecked = true
       if (!result.ok) {
-        root.resetMemorySession()
-        root.lastError = root.safeError(result.error)
-        // A revoked or expired grant is never coming back. Dropping it here
-        // means the panel offers "Sign in" instead of retrying forever.
-        if (result.invalidGrant) root.clearStoredToken()
+        if (OAuth.refreshOutcome(result) === OAuth.REFRESH_SIGNED_OUT) {
+          // A revoked or expired grant is never coming back. Dropping it here
+          // means the panel offers "Sign in" instead of retrying forever.
+          root.resetMemorySession()
+          root.lastError = root.safeError(result.error)
+          root.clearStoredToken()
+        } else {
+          // Anything else — offline, a 5xx, a rate limit — leaves the grant
+          // exactly as good as it was. The session stays, only the access
+          // token goes, and the next request (the poll, at the latest) asks
+          // again. A stored grant is a signed-in mailbox even while Google
+          // cannot be reached, which is why a restore that hits this still
+          // counts as signed in rather than offering a sign-in that cannot
+          // help.
+          root.invalidateAccessToken()
+          root.loggedIn = true
+          root.lastError = root.safeError(OAuth.refreshRetryMessage(result))
+        }
         if (purpose === "request") root.finishWaiters("", root.lastError)
         else root.sessionUnavailable(root.lastError)
         return
@@ -424,6 +587,8 @@ Item {
     lastError = ""
     loginBusy = true
     callbackHandled = false
+    listenerRestartPending = false
+    listenerRestarted = false
     exchangingCode = false
     pkceGenerator.command = [pluginDir + "/scripts/pkce.sh"]
     pkceGenerator.running = true
@@ -466,12 +631,22 @@ Item {
     if (!loginBusy || callbackHandled) return
     var line = String(rawLine || "").replace(/\r$/, "")
     if (line.indexOf("GET ") !== 0) return
+    var verdict = OAuth.callbackVerdict(line, OAuth.CALLBACK_PATH, oauthState)
+    var callback = verdict.callback
+    // A request that does not carry this sign-in's state did not come from the
+    // request this process started. It is answered and ignored, and listening
+    // goes on until the sign-in times out: anything on the machine can reach
+    // this port, and one stray request must not be able to end the sign-in.
+    if (verdict.action === "ignore") {
+      callbackListener.write(OAuth.failureResponse(callbackTheme,
+        "Unexpected sign-in request"))
+      listenerRestartPending = true
+      callbackStopTimer.restart()
+      return
+    }
     callbackHandled = true
     authTimeout.stop()
-    var callback = OAuth.parseCallbackRequestLine(line, OAuth.CALLBACK_PATH)
-    // A mismatched state means this response did not come from the request
-    // this process started, so the code in it is not exchanged.
-    if (!callback.ok || callback.state !== oauthState) {
+    if (verdict.action === "fail") {
       callbackListener.write(OAuth.failureResponse(callbackTheme, callback.error))
       callbackStopTimer.restart()
       failLogin(callback.ok
@@ -560,6 +735,8 @@ Item {
     grantedScope = ""
     lastError = ""
     finishWaiters("", "Signed out")
+    unnamedRefreshToken = ""
+    keyringQueuedToken = ""
     if (keyringStore.running) logoutPendingClear = true
     else clearStoredToken()
     loggedOut()
@@ -624,7 +801,8 @@ Item {
       // The FileView is watching the same path, but reload explicitly so the
       // panel advances the moment the write lands rather than on a file event.
       credentialsFile.reload()
-      root.credentialsSaved()
+      if (root.credentialsWriteAnnounce) root.credentialsSaved()
+      if (root.adoptQueued) Qt.callLater(root.adoptCredentials)
     }
   }
 
@@ -668,8 +846,15 @@ Item {
     stderr: StdioCollector { waitForEnd: true }
     // The browser only opens once the listener is actually accepting, or the
     // redirect races it and lands on a closed port.
-    onStarted: authOpenDelay.restart()
+    onStarted: if (!root.listenerRestarted) authOpenDelay.restart()
     onExited: function(exitCode) {
+      if (root.listenerRestartPending && root.loginBusy && !root.callbackHandled
+        && !root.exchangingCode) {
+        root.listenerRestartPending = false
+        root.listenerRestarted = true
+        callbackListener.running = true
+        return
+      }
       if (root.loginBusy && !root.callbackHandled && !root.exchangingCode)
         root.failLogin(exitCode === 0
           ? "The Google sign-in window closed before it finished"
@@ -684,9 +869,21 @@ Item {
       splitMarker: "\n"
       onRead: function(line) { root.handleSecretLookup(line) }
     }
-    stderr: StdioCollector { waitForEnd: true }
+    // Held until the stream ends, like every other collector here, so the
+    // sentence `keyringLookupFailure` reads is the whole of it rather than
+    // whatever had arrived by the time the exit was handled.
+    stderr: StdioCollector {
+      id: secretLookupErrors
+      waitForEnd: true
+    }
     onExited: function(exitCode) {
-      if (!root.lookupHandled) root.handleSecretLookup("")
+      // Queued before any branch below, the failure one included: a keyring
+      // that cannot be asked still owes the new account its own attempt.
+      if (root.restorePending) Qt.callLater(root.restoreAfterSwitch)
+      if (root.lookupHandled) return
+      var failure = Credentials.keyringLookupFailure(exitCode, secretLookupErrors.text)
+      if (failure !== "") root.keyringUnavailable(failure)
+      else root.handleSecretLookup("")
     }
   }
 
@@ -712,6 +909,7 @@ Item {
         root.logoutPendingClear = false
         root.clearStoredToken()
       }
+      if (root.keyringQueuedToken !== "") Qt.callLater(root.flushQueuedToken)
     }
   }
 

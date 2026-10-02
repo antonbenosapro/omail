@@ -26,6 +26,16 @@ Item {
   required property string panelFontFamily
   property bool forcePlainText: false
   property real zoom: 1.0
+  // The zoom the scrolled content is laid out at. It trails `zoom` by one
+  // handler so the reading position can be taken before anything relayouts:
+  // bound straight to `zoom`, the order in which the document and the handler
+  // heard of the change was the engine's to pick, and half the time the
+  // position was measured against the new height.
+  property real layoutZoom: 1.0
+  // Where in the message the top of the view was, as a fraction of its height.
+  // A zoom keeps that fraction rather than the pixel offset, which at 2x is
+  // halfway up from where the reader was.
+  property real readingFraction: 0
   // A way back only means something when something is behind it. At desktop
   // width the list is on screen and clicking another row is the navigation;
   // in a single column the reader has replaced the list, so it needs one.
@@ -42,6 +52,21 @@ Item {
   signal actionRequested(string action)
 
   readonly property var summary: service ? service.selectedMessage : null
+
+  onZoomChanged: {
+    readingFraction = bodyFlick.contentHeight > 0
+      ? bodyFlick.contentY / bodyFlick.contentHeight : 0
+    layoutZoom = zoom
+    // Once the relayout has landed, not during it: the document and the card
+    // each change the height, and the position is right only after both.
+    Qt.callLater(root.restoreReadingPosition)
+  }
+  Component.onCompleted: root.layoutZoom = root.zoom
+
+  function restoreReadingPosition() {
+    var limit = Math.max(0, bodyFlick.contentHeight - bodyFlick.height)
+    bodyFlick.contentY = Math.max(0, Math.min(limit, readingFraction * bodyFlick.contentHeight))
+  }
   // Already sanitised by the service, remote images and all removed. Qt's rich
   // text engine fetches an <img src="https://..."> for real, so leaving them in
   // would fire every tracking pixel in the message the instant it opened, and
@@ -252,6 +277,7 @@ Item {
       dimColor: root.dimColor
       accentColor: root.accentColor
       panelFontFamily: root.panelFontFamily
+      zoom: root.zoom
       onActivated: root.forceRichAnyway = true
     }
 
@@ -272,6 +298,7 @@ Item {
       dimColor: root.dimColor
       accentColor: root.accentColor
       panelFontFamily: root.panelFontFamily
+      zoom: root.zoom
       onActivated: if (root.service) root.service.showRemoteImages()
     }
 
@@ -288,11 +315,12 @@ Item {
       text: root.unsubscribeDetail
       actionLabel: root.unsubscribeLabel
       busy: root.unsubscribing
-      busyLabel: "Unsubscribing..."
+      busyLabel: "Unsubscribing…"
       textColor: root.textColor
       dimColor: root.dimColor
       accentColor: root.accentColor
       panelFontFamily: root.panelFontFamily
+      zoom: root.zoom
       onActivated: if (root.service) root.service.unsubscribe()
     }
   }
@@ -324,12 +352,14 @@ Item {
       invite: root.service ? root.service.selectedInvite : null
       response: root.service ? root.service.selectedResponse : ""
       canRespond: !!root.service && root.service.canRespondToInvite
+      mismatch: root.service ? root.service.inviteMismatch : ""
       sending: !!root.service && root.service.rsvpSending
       textColor: root.textColor
       accentColor: root.accentColor
       dimColor: root.dimColor
       dimmerColor: root.dimmerColor
       panelFontFamily: root.panelFontFamily
+      zoom: root.layoutZoom
       onRespondRequested: function(answer) {
         if (root.service) root.service.rsvp(answer)
       }
@@ -361,7 +391,10 @@ Item {
             quote: root.dimColor,
             padding: 0,
             maxImageWidth: root.imageWidth,
-            compact: root.narrowBody
+            compact: root.narrowBody,
+            // The body's default size is zoomed below; this reaches the sizes
+            // the sender fixed in px and pt, which ignore the default.
+            zoom: root.layoutZoom
           }))
         : Html.plainTextDocument(root.service ? root.service.selectedBody.text : "",
             ({
@@ -378,7 +411,7 @@ Item {
       // scanned. At bodySmall it was 11px against the 9pt — twelve — of the
       // terminal beside it, so the message was the smallest text on a screen
       // whose owner had already said what size they read at.
-      font.pixelSize: Model.zoomedFontSize(Style.font.body, root.zoom)
+      font.pixelSize: Model.zoomedFontSize(Style.font.body, root.layoutZoom)
       onLinkActivated: function(link) {
         var image = Html.imageLinkIndex(link)
         if (image > 0) {
@@ -398,14 +431,6 @@ Item {
         anchors.fill: parent
         acceptedButtons: Qt.NoButton
         cursorShape: bodyText.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.IBeamCursor
-        onWheel: function(wheel) {
-          if (!(wheel.modifiers & Qt.ControlModifier)) {
-            wheel.accepted = false
-            return
-          }
-          root.zoomRequested(wheel.angleDelta.y > 0 ? 0.1 : -0.1)
-          wheel.accepted = true
-        }
       }
     }
   }
@@ -490,7 +515,7 @@ Item {
           ActionIcon {
             anchors.verticalCenter: parent.verticalCenter
             name: "attachment"
-            iconSize: Style.font.iconSmall
+            iconSize: Model.zoomedFontSize(Style.font.iconSmall, root.zoom)
             color: attachmentEntry.hot ? root.textColor : root.dimColor
           }
 
@@ -503,7 +528,9 @@ Item {
             font.underline: attachmentEntry.hot
             color: attachmentEntry.hot ? root.textColor : root.dimColor
             font.family: root.panelFontFamily
-            font.pixelSize: Style.font.caption
+            // The strip is the message's, not the toolbar's: what is attached
+            // is read at the size the rest of the message is.
+            font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
             elide: Text.ElideRight
           }
 
@@ -516,7 +543,7 @@ Item {
               : Mail.formatSize(attachmentEntry.modelData.size)
             color: root.dimmerColor
             font.family: root.panelFontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
           }
         }
 
@@ -629,6 +656,32 @@ Item {
         onClicked: if (root.service && root.summary) root.service.openInBrowser(root.service.selectedKey)
       }
     }
+    }
+  }
+
+  // Ctrl+wheel anywhere over the reader — header, notices, the empty space
+  // under a short message — sizes the message. On an item of its own above
+  // everything else, because a handler on the root is asked only after the
+  // flickable underneath has already taken the wheel to scroll with. Without
+  // Ctrl the handler does not want the event, and it goes on down to the
+  // flickable as before; the item takes no buttons, so clicks pass through.
+  Item {
+    anchors.fill: parent
+    z: 1
+
+    WheelHandler {
+      target: null
+      acceptedModifiers: Qt.ControlModifier
+      // What a touchpad has scrolled towards the next step. Model.js adds the
+      // small deltas up into steps, because each one taken as a step went from
+      // 1.0 to 2.5 in a single swipe.
+      property real pending: 0
+      onWheel: function(event) {
+        var next = Model.wheelZoomSteps(pending, event.angleDelta.y)
+        pending = next.pending
+        if (next.steps !== 0) root.zoomRequested(next.steps * 0.1)
+        event.accepted = true
+      }
     }
   }
 

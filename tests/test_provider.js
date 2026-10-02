@@ -60,6 +60,26 @@ assert.strictEqual(provider.can("hey", "fetchMarksRead"), false,
   "a provider that declares nothing gets the no")
 assert.strictEqual(provider.can("hey", "send"), false, "HEY has nothing behind it")
 
+// Drafts kept on the server. HEY declares nothing, so it has none — and a
+// compose there would ask before throwing a message away rather than offer a
+// save that cannot happen.
+assert.strictEqual(provider.can("gmail", "drafts"), true)
+assert.strictEqual(provider.can("imap", "drafts"), true)
+assert.strictEqual(provider.can("hey", "drafts"), false)
+assert.strictEqual(provider.hasMailbox("gmail", "drafts"), true)
+assert.strictEqual(provider.hasMailbox("imap", "drafts"), true)
+assert.strictEqual(provider.query("gmail", "drafts", "", ""), "in:drafts")
+assert.strictEqual(provider.query("imap", "drafts", "", ""), "folder:\\Drafts",
+  "resolved to the server's own Drafts by SPECIAL-USE, like Sent")
+// Drafts sits right after Sent, the order Gmail's own rail uses, and that order
+// is what numbers the Alt+digit keys: Sent is Alt+4, Drafts Alt+5.
+for (const id of ["gmail", "imap"]) {
+  const keys = provider.mailboxes(id).map(function(box) { return box.key })
+  assert.deepStrictEqual(Array.from(keys.slice(0, 5)), ["inbox", "unread", "starred", "sent", "drafts"],
+    id + " lists Drafts right after Sent")
+  assert.strictEqual(provider.mailboxIndex(id, "drafts"), provider.mailboxIndex(id, "sent") + 1)
+}
+
 // HEY is present as a future integration, but cannot connect until its client
 // exists.
 assert.strictEqual(provider.isConnectable("gmail"), true)
@@ -73,7 +93,7 @@ assert.strictEqual(provider.unavailableReason("imap"), "")
 
 // The glyphs ActionIcon actually draws. A mailbox naming anything else renders
 // as nothing at all.
-const DRAWN = ["inbox", "unread", "star", "send", "archive", "trash"]
+const DRAWN = ["inbox", "unread", "star", "send", "archive", "trash", "compose"]
 
 // Every provider's first mailbox is its inbox: `mailboxFor` falls back to it,
 // which is what a key belonging to another provider lands on mid-switch.

@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../account/Model.js" as Model
 import "../message/Calendar.js" as Calendar
 
 // The meeting inside the message, drawn as the thing it is.
@@ -25,7 +26,19 @@ Rectangle {
   // one who said no.
   property string response: ""
   property bool canRespond: false
+  // The organiser's address when it is not the sender's domain, which makes
+  // `Calendar.respondStep` "confirm": the first click asks, naming who the
+  // answer goes to, and only Send sends it.
+  property string mismatch: ""
+  // The answer waiting on that question, or empty when none is. Dropped when
+  // the card moves to another invitation, so a question asked about one
+  // meeting is never answered for the next.
+  property string pendingAnswer: ""
   property bool sending: false
+  // The reader's. The card is part of the message it sits in, so it is read at
+  // the size the message is — a meeting left at 1.0 above a body at 2x is the
+  // one part of the message the zoom was for and did not reach.
+  property real zoom: 1.0
 
   required property color textColor
   required property color accentColor
@@ -38,6 +51,9 @@ Rectangle {
 
   readonly property bool cancelled: !!invite
     && (invite.method === "CANCEL" || String(invite.status || "") === "CANCELLED")
+
+  onInviteChanged: pendingAnswer = ""
+  onCanRespondChanged: if (!canRespond) pendingAnswer = ""
 
   visible: !!invite
   implicitHeight: visible ? column.implicitHeight + Style.space(24) : 0
@@ -62,7 +78,7 @@ Rectangle {
       ActionIcon {
         anchors.verticalCenter: parent.verticalCenter
         name: "calendar"
-        iconSize: Style.font.iconSmall
+        iconSize: Model.zoomedFontSize(Style.font.iconSmall, root.zoom)
         color: root.dimColor
       }
 
@@ -71,7 +87,7 @@ Rectangle {
         text: root.invite ? Calendar.headline(root.invite) : ""
         color: root.dimColor
         font.family: root.panelFontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
       }
     }
 
@@ -83,7 +99,7 @@ Rectangle {
       text: root.invite ? String(root.invite.summary || "(no title)") : ""
       color: root.textColor
       font.family: root.panelFontFamily
-      font.pixelSize: Style.font.body
+      font.pixelSize: Model.zoomedFontSize(Style.font.body, root.zoom)
       font.bold: true
       // A cancelled meeting keeps its name legible rather than striking it
       // through: the heading above already says what happened, and struck text
@@ -103,7 +119,7 @@ Rectangle {
       visible: text !== ""
       color: root.textColor
       font.family: root.panelFontFamily
-      font.pixelSize: Style.font.bodySmall
+      font.pixelSize: Model.zoomedFontSize(Style.font.bodySmall, root.zoom)
       wrapMode: Text.WordWrap
     }
 
@@ -114,7 +130,7 @@ Rectangle {
       visible: text !== ""
       color: root.dimColor
       font.family: root.panelFontFamily
-      font.pixelSize: Style.font.caption
+      font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
       wrapMode: Text.WordWrap
     }
 
@@ -131,18 +147,18 @@ Rectangle {
       ActionIcon {
         anchors.verticalCenter: parent.verticalCenter
         name: "pin"
-        iconSize: Style.font.iconSmall
+        iconSize: Model.zoomedFontSize(Style.font.iconSmall, root.zoom)
         color: root.dimmerColor
       }
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        width: parent.width - Style.font.iconSmall - Style.space(6)
+        width: parent.width - Model.zoomedFontSize(Style.font.iconSmall, root.zoom) - Style.space(6)
         textFormat: Text.PlainText
         text: root.invite ? String(root.invite.location || "") : ""
         color: root.dimColor
         font.family: root.panelFontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
         elide: Text.ElideRight
       }
     }
@@ -158,13 +174,13 @@ Rectangle {
       ActionIcon {
         anchors.verticalCenter: parent.verticalCenter
         name: "people"
-        iconSize: Style.font.iconSmall
+        iconSize: Model.zoomedFontSize(Style.font.iconSmall, root.zoom)
         color: root.dimmerColor
       }
 
       Text {
         anchors.verticalCenter: parent.verticalCenter
-        width: parent.width - Style.font.iconSmall - Style.space(6)
+        width: parent.width - Model.zoomedFontSize(Style.font.iconSmall, root.zoom) - Style.space(6)
         textFormat: Text.PlainText
         text: {
           if (!root.invite || !root.invite.organizer) return ""
@@ -174,7 +190,7 @@ Rectangle {
         }
         color: root.dimColor
         font.family: root.panelFontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
         elide: Text.ElideRight
       }
     }
@@ -197,14 +213,14 @@ Rectangle {
         Text {
           required property var modelData
           width: parent.width
-          leftPadding: Style.font.iconSmall + Style.space(6)
+          leftPadding: Model.zoomedFontSize(Style.font.iconSmall, root.zoom) + Style.space(6)
           textFormat: Text.PlainText
           text: String(modelData.name || modelData.email) + " — "
             + Calendar.partstatLabel(modelData.partstat)
             + (modelData.optional ? " (optional)" : "")
           color: root.dimmerColor
           font.family: root.panelFontFamily
-          font.pixelSize: Style.font.caption
+          font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
           elide: Text.ElideRight
         }
       }
@@ -212,14 +228,14 @@ Rectangle {
 
     Text {
       width: parent.width
-      leftPadding: Style.font.iconSmall + Style.space(6)
+      leftPadding: Model.zoomedFontSize(Style.font.iconSmall, root.zoom) + Style.space(6)
       visible: !!root.invite && (root.invite.attendees || []).length > 6
       text: root.invite
         ? "and " + ((root.invite.attendees || []).length - 6) + " more"
         : ""
       color: root.dimmerColor
       font.family: root.panelFontFamily
-      font.pixelSize: Style.font.caption
+      font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
     }
 
     // --------------------------------------------------------------- join
@@ -237,7 +253,7 @@ Rectangle {
       foreground: root.textColor
       accent: root.accentColor
       fontFamily: root.panelFontFamily
-      fontSize: Style.font.caption
+      fontSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
       onClicked: if (root.invite) root.openRequested(String(root.invite.meetLink || ""))
     }
 
@@ -253,7 +269,7 @@ Rectangle {
         text: "Going?"
         color: root.dimColor
         font.family: root.panelFontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
       }
 
       Repeater {
@@ -275,8 +291,57 @@ Rectangle {
           foreground: root.textColor
           accent: root.accentColor
           fontFamily: root.panelFontFamily
-          fontSize: Style.font.caption
-          onClicked: root.respondRequested(modelData.answer)
+          fontSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
+          onClicked: {
+            if (root.mismatch !== "") root.pendingAnswer = modelData.answer
+            else root.respondRequested(modelData.answer)
+          }
+        }
+      }
+    }
+
+    // The question a mismatched organiser earns, in the card rather than a
+    // dialog: it is about this meeting, and the reader is looking at it.
+    Column {
+      width: parent.width
+      spacing: Style.space(4)
+      visible: root.canRespond && root.pendingAnswer !== ""
+
+      Text {
+        width: parent.width
+        wrapMode: Text.Wrap
+        textFormat: Text.PlainText
+        text: Calendar.confirmPrompt(root.mismatch)
+        color: root.textColor
+        font.family: root.panelFontFamily
+        font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
+      }
+
+      Row {
+        spacing: Style.space(6)
+
+        IconTextButton {
+          enabled: !root.sending
+          iconName: "send"
+          text: "Send"
+          foreground: root.textColor
+          accent: root.accentColor
+          fontFamily: root.panelFontFamily
+          fontSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
+          onClicked: {
+            var answer = root.pendingAnswer
+            root.pendingAnswer = ""
+            if (answer !== "") root.respondRequested(answer)
+          }
+        }
+
+        IconTextButton {
+          text: "Cancel"
+          foreground: root.textColor
+          accent: root.accentColor
+          fontFamily: root.panelFontFamily
+          fontSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
+          onClicked: root.pendingAnswer = ""
         }
       }
     }
@@ -292,7 +357,7 @@ Rectangle {
         : (root.response === "declined" ? "You are not going" : "You might be going")
       color: root.dimColor
       font.family: root.panelFontFamily
-      font.pixelSize: Style.font.caption
+      font.pixelSize: Model.zoomedFontSize(Style.font.caption, root.zoom)
     }
   }
 }

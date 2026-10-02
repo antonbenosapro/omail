@@ -121,11 +121,16 @@ Item {
   // is what the eye sees. Indices stay account indices, so the extra row is
   // the one before the first: -1 with the unified row present, and simply
   // absent without it.
+  //
+  // The two footer rows come after the last account, as they are drawn. They
+  // were left out once, which made "Add a mailbox..." and "Manage accounts..."
+  // the only rows in the window a keyboard could not reach.
+  readonly property int addIndex: root.accounts ? root.accounts.length : 0
+  readonly property int manageIndex: addIndex + 1
+
   function moveCursor(delta) {
-    var count = root.accounts ? root.accounts.length : 0
-    if (count === 0) return
     var first = root.offersUnified ? root.unifiedIndex : 0
-    var span = count - first
+    var span = root.manageIndex + 1 - first
     var at = Model.wrappedIndex(cursorIndex - first, delta, span)
     cursorIndex = at + first
   }
@@ -135,6 +140,16 @@ Item {
     if (root.offersUnified && cursorIndex === root.unifiedIndex) {
       menu.close()
       root.unifiedChosen()
+      return
+    }
+    if (cursorIndex === root.addIndex) {
+      menu.close()
+      root.addAccountRequested()
+      return
+    }
+    if (cursorIndex === root.manageIndex) {
+      menu.close()
+      root.manageRequested()
       return
     }
     if (cursorIndex < 0 || cursorIndex >= count) return
@@ -420,6 +435,7 @@ Item {
 
       MenuRow {
         text: "Add a mailbox..."
+        slot: root.addIndex
         onActivated: {
           menu.close()
           root.addAccountRequested()
@@ -428,6 +444,7 @@ Item {
 
       MenuRow {
         text: "Manage accounts..."
+        slot: root.manageIndex
         onActivated: {
           menu.close()
           root.manageRequested()
@@ -439,14 +456,21 @@ Item {
   component MenuRow: Rectangle {
     id: plainRow
     required property string text
+    // Its place in the keyboard's walk, after the accounts.
+    required property int slot
+    readonly property bool hasCursor: root.cursorIndex === slot
     signal activated()
 
     width: menu.width - menu.leftPadding - menu.rightPadding
     implicitHeight: Style.spacing.popupRowHeight
     radius: Style.cornerRadius
-    color: plainHover.hovered
-      ? Qt.rgba(root.textColor.r, root.textColor.g, root.textColor.b, 0.08)
+    color: plainHover.hovered || hasCursor
+      ? Style.hoverFillFor(root.textColor, root.accentColor)
       : "transparent"
+    // The same keyboard border the account rows carry, so the cursor reads the
+    // same on every row it can stand on.
+    border.width: hasCursor ? Style.normalBorderWidth : 0
+    border.color: Style.hoverBorderFor(root.textColor, root.accentColor)
 
     Text {
       anchors.left: parent.left

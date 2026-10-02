@@ -62,7 +62,12 @@ function capabilities(values) {
     // the id on a move cannot be asked to. Off is the honest answer there —
     // an Undo button that failed after the user had committed to it would be
     // worse than no button at all, because they would have stopped looking.
-    undo: raw.undo === true
+    undo: raw.undo === true,
+    // Unsent mail kept on the server: a Drafts mailbox to list, a draft to
+    // open back into compose, and a compose that saves itself there while it
+    // is being written. Without it, leaving a compose that has something in it
+    // asks before it throws the message away.
+    drafts: raw.drafts === true
   }
 }
 

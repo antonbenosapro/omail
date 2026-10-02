@@ -53,12 +53,13 @@ guided by an in-app four-step walkthrough.
 
 **Ship in v1**
 
-- Mailboxes: Inbox, Unread, Starred, Sent, All mail, Trash, plus user labels
+- Mailboxes: Inbox, Unread, Starred, Sent, Drafts, All mail, Trash, plus user labels
 - Message list: sender, subject, snippet, time, unread dot, star; paging
-- Reader: headers, HTML or plain body, attachments saved to Downloads and
-  opened, open in browser
+- Reader: headers, HTML or plain body, attachments saved to Downloads with an
+  explicit Open offer, open in browser
 - Actions: read/unread, star, archive, trash, untrash, report spam, mark all read
 - Compose, reply, reply-all, forward
+- Drafts kept on the server (Gmail's drafts endpoints, IMAP's `\Drafts` folder): saved while typing pauses and when Escape leaves a compose with something in it, reopened from the Drafts mailbox, and sent as themselves. Discarding asks first, in the window. IMAP sends are filed in `\Sent`, except on Gmail's IMAP, which files them itself.
 - Calendar invitations: full meeting detail, RSVP, and one-click Meet join
 - One-click unsubscribe from mailing lists that support it
 - Search using Gmail's own operator syntax

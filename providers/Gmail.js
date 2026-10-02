@@ -29,7 +29,11 @@ var CAPABILITIES = {
   send: true,
   // A message id is stable across a trash, so untrash addresses the same
   // message the trash did and restores the labels it carried.
-  undo: true
+  undo: true,
+  // The drafts endpoints, under the gmail.modify scope already granted: a
+  // draft keeps one id however many times it is updated, and sending one
+  // removes it.
+  drafts: true
 }
 
 // Search queries rather than label ids: `is:unread` and `in:anywhere` have no
@@ -43,6 +47,9 @@ var MAILBOXES = [
   { key: "unread", label: "Unread", icon: "unread", query: "in:inbox is:unread category:primary" },
   { key: "starred", label: "Starred", icon: "star", query: "is:starred" },
   { key: "sent", label: "Sent", icon: "send", query: "in:sent" },
+  // A row of messages carrying DRAFT, which is what the list already knows how
+  // to fetch. Opening one asks the drafts endpoint which draft it belongs to.
+  { key: "drafts", label: "Drafts", icon: "compose", query: "in:drafts" },
   // Optional: the first to go when the row cannot hold every mailbox. Neither
   // is somewhere anyone works from — they are places you go looking for
   // something specific, and search reaches both.

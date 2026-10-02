@@ -71,14 +71,19 @@ Item {
   // connection across the sections the script emits, so a search followed by a
   // fetch of what it found costs one TLS handshake and one LOGIN rather than
   // two of each.
-  function run(folder, commands, callback, existingHandle) {
+  //
+  // `upload`, when given, is a message to APPEND to `folder` before the
+  // commands run — the same connection, so whatever follows can find the copy
+  // just stored.
+  function run(folder, commands, callback, existingHandle, upload) {
     var handle = existingHandle || newHandle()
     var list = Array.isArray(commands) ? commands : [commands]
+    var appending = typeof upload === "string" && upload !== ""
     var wanted = []
     for (var i = 0; i < list.length; i++) {
       if (String(list[i] || "") !== "") wanted.push(String(list[i]))
     }
-    if (wanted.length === 0) {
+    if (wanted.length === 0 && !appending) {
       if (typeof callback === "function") callback("", "")
       return handle
     }
@@ -108,11 +113,12 @@ Item {
       // a space or a backslash needs no escaping anywhere along the way — and
       // none of it reaches the process table.
       var fields = [Mail.encodeBase64(url), Mail.encodeBase64(credentials)]
+      if (appending) fields.push(Mail.encodeBase64(upload))
       for (var j = 0; j < wanted.length; j++) fields.push(Mail.encodeBase64(wanted[j]))
 
       var process = transportComponent.createObject(root, {
         command: [root.transport],
-        requestLine: "imap " + fields.join(" ")
+        requestLine: (appending ? "append " : "imap ") + fields.join(" ")
       })
       if (!process) {
         root.inFlight = Math.max(0, root.inFlight - 1)
@@ -630,8 +636,12 @@ Item {
         if (typeof callback === "function") callback(null, folderError)
         return
       }
-      var destination = wanted === "" ? "INBOX" : Imap.resolveFolder(wanted, root.special)
-      var trash = Imap.resolveFolder("Trash", root.special)
+      var destination = Imap.actionPlan("untrash", root.special, wanted).move
+      // The special-use attribute, not the word. `resolveFolder` only maps a
+      // name that starts with a backslash, so "Trash" came back as "Trash" and
+      // the search ran in a folder that does not exist on a server whose
+      // Trash is "[Gmail]/Trash" or "Deleted Items".
+      var trash = Imap.resolveFolder("\\Trash", root.special)
 
       // Nothing to search with — a message reached by browsing Trash, whose id
       // already names where it is. The plan applies to it directly.
@@ -680,9 +690,14 @@ Item {
 
   // `MailAccount` builds the same payload for either provider: a base64url
   // `raw` field, because that is what Gmail's send endpoint takes. SMTP wants
-  // the message itself and the envelope separately, so it is decoded back and
-  // the addresses are read off the headers it was built from.
-  function sendMessage(payload, callback) {
+  // the message itself and the envelope separately. The envelope comes with
+  // the payload, built from the fields the headers were — reading it back off
+  // the finished headers is what once sent `José <a@x>, Bob <b@y>` to Bob
+  // alone, without a word.
+  //
+  // `filed`, when given, hears separately how filing the copy in Sent went —
+  // after `callback` has already been told the message went.
+  function sendMessage(payload, callback, filed) {
     var handle = newHandle()
     var raw = payload && payload.raw ? String(payload.raw) : ""
     if (raw === "") {
@@ -690,7 +705,6 @@ Item {
       return handle
     }
 
-    var message = Mail.decodeBase64Url(raw)
     var settings = auth ? auth.settings : null
     var smtp = Imap.smtpUrl(settings)
     if (smtp === "") {
@@ -699,22 +713,25 @@ Item {
       return handle
     }
 
-    // The envelope is read from the message this client just built, so it can
-    // never name a recipient the headers do not.
-    var parsed = Mail.parseRfc822(message)
-    var recipients = []
-    var headerNames = ["To", "Cc", "Bcc"]
-    for (var i = 0; i < headerNames.length; i++) {
-      var addresses = Mail.parseAddressList(Mail.headerFrom(parsed.headers, headerNames[i]))
-      for (var j = 0; j < addresses.length; j++) {
-        if (addresses[j].email !== "" && recipients.indexOf(addresses[j].email) < 0)
-          recipients.push(addresses[j].email)
-      }
+    var envelope = payload.envelope || ({})
+    var invalid = Array.isArray(envelope.invalid) ? envelope.invalid : []
+    if (invalid.length > 0) {
+      if (typeof callback === "function")
+        callback(null, "\"" + invalid[0] + "\" is not an email address")
+      return handle
     }
+    var recipients = Array.isArray(envelope.recipients) ? envelope.recipients : []
     if (recipients.length === 0) {
       if (typeof callback === "function") callback(null, "Add a recipient first")
       return handle
     }
+    // MAIL FROM is the address the message is from, not the login: SPF and
+    // DMARC judge the envelope sender, and a login that differs from the From
+    // header fails alignment on every alias.
+    var sender = String(envelope.from || "")
+    if (sender === "") sender = settings ? String(settings.username || "") : ""
+    // Gmail stamps these itself; an SMTP server need not.
+    var message = Mail.withTransportHeaders(Mail.decodeBase64Url(raw), sender, new Date())
 
     root.inFlight++
     auth.withCredentials(function(credentials, credentialError) {
@@ -724,7 +741,6 @@ Item {
         if (typeof callback === "function") callback(null, credentialError || "Not signed in")
         return
       }
-      var sender = settings ? String(settings.username || "") : ""
       var fields = [Mail.encodeBase64(smtp), Mail.encodeBase64(credentials),
         Mail.encodeBase64(sender), Mail.encodeBase64(message)]
       for (var k = 0; k < recipients.length; k++) fields.push(Mail.encodeBase64(recipients[k]))
@@ -744,17 +760,218 @@ Item {
         handle.process = null
         process.destroy()
         root.inFlight = Math.max(0, root.inFlight - 1)
-        if (typeof callback !== "function") return
         if (status !== 0) {
           var detail = Imap.decodeResponse(err, Mail.base64ToBytes, Mail.bytesToLatin1)
-          callback(null, Imap.responseError(status, detail, "The message could not be sent"))
+          if (typeof callback === "function")
+            callback(null, Imap.responseError(status, detail, "The message could not be sent"))
           return
         }
-        callback({}, "")
+        // Sent is said as soon as it is true. The copy is a second connection
+        // that can take as long again, and a window held on "Sending" for it
+        // reads as a send that has not happened.
+        if (typeof callback === "function") callback(({}), "")
+        // Only now filed: a copy stored before the send landed would sit in
+        // Sent for a message that never left.
+        root.fileSentCopy(message, function(copyError) {
+          if (typeof filed === "function") filed(copyError || "")
+        })
       })
       process.running = true
     })
     return handle
+  }
+
+  // SMTP delivers a message and keeps nothing, so Sent stays empty unless the
+  // client files a copy itself — which every desktop client does, and which
+  // Gmail's SMTP does on its own, so a Gmail host is skipped rather than given
+  // every message twice. The exact bytes that were sent, stored \Seen: curl's
+  // APPEND sets that flag itself.
+  //
+  // A failure here is not a failed send. The message has gone; what the
+  // caller is told is that its copy did not land, in a sentence of its own.
+  function fileSentCopy(message, done) {
+    var settings = auth ? auth.settings : null
+    if (!Imap.savesSentCopy(settings)) {
+      done("")
+      return
+    }
+    ensureFolders(function(folderError) {
+      if (!root) return
+      if (folderError) {
+        done(folderError)
+        return
+      }
+      // Only a folder the server named. A guessed "Sent" that does not exist
+      // is refused with TRYCREATE, and creating one would be inventing a
+      // folder nobody else's client looks in.
+      var sent = root.special["\\sent"] || ""
+      if (sent === "") {
+        done("This server has no Sent folder to keep a copy in")
+        return
+      }
+      root.run(sent, [], function(text, error) { done(error) }, null, String(message || ""))
+    })
+  }
+
+  // ---------------------------------------------------------------- drafts
+
+  // The message id the list showed is already the draft's address here: there
+  // is no draft object apart from the message. The same call Gmail answers by
+  // walking its drafts list, so `MailAccount` asks both the same way.
+  function draftIdFor(messageId, callback) {
+    var id = String(messageId || "")
+    Qt.callLater(function() {
+      if (root && typeof callback === "function")
+        callback(id, id === "" ? "That draft is no longer in the mailbox" : "")
+    })
+    return newHandle()
+  }
+
+  // A save is a new copy and the removal of the old ones, because a message on
+  // an IMAP server cannot be changed. Two connections: the first stores the
+  // copy and searches for everything carrying this draft's token; the second
+  // flags the newest \Draft and removes the rest, which depends on what the
+  // search found and so cannot be folded into the first.
+  //
+  // Removal comes after the store, never before: a save that failed partway
+  // leaves an extra copy, which the next save's search finds and removes, and
+  // never leaves no copy at all.
+  function saveDraft(draftId, payload, callback) {
+    var handle = newHandle()
+    var raw = payload && payload.raw ? Mail.decodeBase64Url(String(payload.raw)) : ""
+    var token = payload ? String(payload.token || "") : ""
+    if (raw === "") {
+      if (typeof callback === "function") callback(null, "There is nothing to save")
+      return handle
+    }
+    ensureFolders(function(folderError) {
+      if (handle.aborted) return
+      if (folderError) {
+        if (typeof callback === "function") callback(null, folderError)
+        return
+      }
+      var drafts = root.special["\\drafts"] || ""
+      if (drafts === "") {
+        if (typeof callback === "function")
+          callback(null, "This server has no Drafts folder to keep a draft in")
+        return
+      }
+      // Before the copy is stored: where it will land, in case the token
+      // search cannot find it afterwards. Asked of the server rather than of
+      // the folder, so curl does not SELECT it first. A server answer that
+      // never listed its capabilities is asked for them here too, because
+      // whether stale copies are expunged or only flagged depends on UIDPLUS.
+      var before = [Imap.uidNextCommand(drafts)]
+      if (root.serverCapabilities.length === 0) before.unshift(Imap.capabilityCommand())
+      root.run("", before, function(statusText, statusError) {
+        if (handle.aborted) return
+        // Not knowing UIDNEXT is not a reason to refuse the save: the token
+        // search is still how the copy is found, and this is its fallback.
+        var uidNext = statusError ? 0 : Imap.parseUidNext(statusText)
+        if (!statusError) {
+          var learned = Imap.parseCapabilities(statusText)
+          if (learned.length > 0) root.serverCapabilities = learned
+        }
+        var find = Imap.findDraftCommand(token)
+        root.run(drafts, find === "" ? [] : [find], function(text, error) {
+          if (handle.aborted) return
+          if (error) {
+            if (typeof callback === "function") callback(null, error)
+            return
+          }
+          var found = Imap.parseSearch(text)
+          if (found.length > 0 || uidNext < 1) {
+            root.settleDraft(handle, drafts, found, draftId, callback)
+            return
+          }
+          root.run(drafts, [Imap.appendedSinceCommand(uidNext)], function(since, sinceError) {
+            if (handle.aborted) return
+            var copy = sinceError ? 0 : Imap.appendedCopy(Imap.parseSearch(since), uidNext)
+            root.settleDraft(handle, drafts, copy > 0 ? [copy] : [], draftId, callback)
+          }, handle)
+        }, handle, raw)
+      }, handle)
+    })
+    return handle
+  }
+
+  // Flags the copy just stored as the draft and removes the earlier ones. A
+  // copy that could not be found is a failed save, and the earlier copy is
+  // left exactly where it was: it is the only one this draft can still name.
+  function settleDraft(handle, drafts, found, draftId, callback) {
+    var plan = Imap.draftReplacement(found, draftId, drafts)
+    if (plan.keep < 1) {
+      if (typeof callback === "function")
+        callback(null, "The server stored the draft but could not find it again")
+      return
+    }
+    var saved = { id: Imap.messageId(plan.keep, drafts) }
+    var settle = Imap.draftSettleCommands(plan, root.serverCapabilities)
+    // The draft is stored whatever this answers. A stale copy left behind
+    // is found and removed by the next save, so it is not reported as the
+    // save having failed.
+    root.run(drafts, settle, function() {
+      if (handle.aborted) return
+      if (typeof callback === "function") callback(saved, "")
+    }, handle)
+  }
+
+  // Removes the one copy named. Nothing else in Drafts is touched: the token is
+  // not searched here, because a discard names the copy it means.
+  function deleteDraft(draftId, callback) {
+    var handle = newHandle()
+    var parsed = Imap.parseMessageId(draftId)
+    if (parsed.uid < 1) {
+      if (typeof callback === "function") callback(null, "")
+      return handle
+    }
+    ensureFolders(function(folderError) {
+      if (handle.aborted) return
+      if (folderError) {
+        if (typeof callback === "function") callback(null, folderError)
+        return
+      }
+      root.run(parsed.folder, Imap.removeCommands([parsed.uid], root.serverCapabilities),
+        function(text, error) {
+          if (typeof callback === "function") callback(null, error)
+        }, handle)
+    })
+    return handle
+  }
+
+  // Sending a draft is sending the message and then removing the draft, in
+  // that order. A draft whose removal failed is still a sent message, so the
+  // send is reported as a success and the leftover copy as a note beside it.
+  //
+  // How the Sent copy went is passed on only after the send itself has been
+  // answered, so a copy failure that lands first is not then covered by the
+  // "Sent" that follows it.
+  function sendDraft(draftId, payload, callback, filed) {
+    var answered = false
+    var copied = false
+    var copyError = ""
+    function passOnCopy() {
+      if (answered && copied && typeof filed === "function") filed(copyError)
+    }
+    return sendMessage(payload, function(result, error) {
+      if (error || String(draftId || "") === "") {
+        answered = true
+        if (typeof callback === "function") callback(result, error)
+        passOnCopy()
+        return
+      }
+      root.deleteDraft(draftId, function(ignored, draftError) {
+        var answer = result || ({})
+        answer.draftError = draftError || ""
+        answered = true
+        if (typeof callback === "function") callback(answer, "")
+        passOnCopy()
+      })
+    }, function(error) {
+      copied = true
+      copyError = error || ""
+      passOnCopy()
+    })
   }
 
   // Verifies a password by using it: a mailbox that answers a folder listing is
@@ -814,6 +1031,7 @@ Item {
       root.foldersLoaded = false
       root.folders = []
       root.special = ({})
+      root.serverCapabilities = []
     }
   }
 

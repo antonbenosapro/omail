@@ -164,12 +164,21 @@ Item {
       startNextSecretLookup()
       return
     }
+    // A sign-in from the form can land while this lookup is still out — the
+    // restore that follows a draft being named runs alongside the password the
+    // user has just typed. What they typed is newer than anything on disk.
+    if (password !== "") {
+      passwordChecked = true
+      finishWaiters(settings.username + ":" + password, "")
+      return
+    }
     passwordChecked = true
     if (value === "") {
       finishWaiters("", "No password saved for this mailbox. Sign in again")
       // Only a mailbox that is otherwise ready to go is worth complaining
-      // about: an account still being typed into has no password by design.
-      if (configured) sessionUnavailable("Sign in to this mailbox")
+      // about: an account still being typed into has no password by design,
+      // and one being signed in to right now is about to have one.
+      if (configured && !loginBusy) sessionUnavailable("Sign in to this mailbox")
       return
     }
     password = value
@@ -273,10 +282,12 @@ Item {
     // password in memory belongs to *this* mailbox rather than the previous
     // one: a new account is added with an empty address, and only learns its
     // id from the first profile read — which cannot happen until it is signed
-    // in. Now that there is a name, the write that was waiting for one runs.
+    // in. Now that there is a name, the write that was waiting for one runs —
+    // a tick later, because the hosts are kept by position and the new id may
+    // instead be a different mailbox sliding into this one's place. That case
+    // arrives as `switchAccount()` in this same change and cancels the write.
     if (storeWhenNamed && password !== "") {
-      storeWhenNamed = false
-      storePassword()
+      Qt.callLater(root.storeHeldPassword)
       return
     }
     storeWhenNamed = false
@@ -286,6 +297,63 @@ Item {
     password = ""
     passwordChecked = false
     lookupHandled = false
+  }
+
+  function storeHeldPassword() {
+    if (!storeWhenNamed || password === "") return
+    storeWhenNamed = false
+    storePassword()
+  }
+
+  // The object now speaks for a different mailbox: nothing in memory is its
+  // password, and the keyring is asked again under the new name.
+  function switchAccount() {
+    storeWhenNamed = false
+    password = ""
+    pendingPassword = ""
+    passwordChecked = false
+    loginBusy = false
+    lastError = ""
+    if (secretLookup.running) {
+      lookupHandled = true
+      secretLookup.running = false
+    }
+    finishWaiters("", "Switched to a different account")
+    Qt.callLater(root.restoreAfterSwitch)
+  }
+
+  property bool restorePending: false
+
+  function restoreAfterSwitch() {
+    if (secretLookup.running) {
+      restorePending = true
+      return
+    }
+    restorePending = false
+    lookupHandled = false
+    restoreSession()
+  }
+
+  // Removing the mailbox. Detached, because the object asking may be destroyed
+  // in the same tick and a `Process` child would die with it.
+  function forget() {
+    var attributes = Credentials.imapKeyringAttributes(accountId)
+    storeWhenNamed = false
+    password = ""
+    pendingPassword = ""
+    passwordChecked = true
+    if (attributes.length > 0)
+      Quickshell.execDetached(["secret-tool", "clear"].concat(attributes))
+  }
+
+  // The keyring could not be asked at all — locked, prompt dismissed, or no
+  // Secret Service running. Not "no password saved": `passwordChecked` stays
+  // false so the next request asks again, and the sentence says why.
+  function keyringUnavailable(message) {
+    lookupHandled = true
+    lastError = message
+    finishWaiters("", message)
+    if (configured) sessionUnavailable(message)
   }
 
   // Set when a sign-in succeeded before the account had an address, and read
@@ -322,11 +390,19 @@ Item {
       splitMarker: "\n"
       onRead: function(line) { root.handleSecretLookup(line) }
     }
-    stderr: StdioCollector { waitForEnd: true }
+    // Collected as it arrives, so it is there to read when the exit lands.
+    stderr: StdioCollector {
+      id: secretLookupErrors
+      waitForEnd: false
+    }
     onExited: function(exitCode) {
+      if (root.restorePending) Qt.callLater(root.restoreAfterSwitch)
+      if (root.lookupHandled) return
       // No entry is not an error: it is what a mailbox that has never been
-      // signed in to looks like.
-      if (!root.lookupHandled) root.handleSecretLookup("")
+      // signed in to looks like. A keyring that could not be asked is.
+      var failure = Credentials.keyringLookupFailure(exitCode, secretLookupErrors.text)
+      if (failure !== "") root.keyringUnavailable(failure)
+      else root.handleSecretLookup("")
     }
   }
 

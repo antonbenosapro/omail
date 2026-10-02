@@ -235,6 +235,42 @@ function add(list, account) {
   return next
 }
 
+// Which other row already is the mailbox that row `index` is about to become.
+// The setup form saves an address before the password is tried, and `add`
+// replaces an entry with the same id where it sits — so typing an address that
+// is already here folded the draft into the working account and overwrote its
+// servers with whatever had just been typed, before anything had been checked.
+// The caller refuses instead. -1 when the address is new, blank, or this row's
+// own.
+function duplicateIndex(list, index, email, provider) {
+  var values = Array.isArray((list || {}).accounts) ? list.accounts : []
+  var id = accountId(email, provider)
+  if (id === "") return -1
+  for (var i = 0; i < values.length; i++) {
+    if (i === index) continue
+    if (values[i] && values[i].id === id) return i
+  }
+  return -1
+}
+
+// Whether `id` is the mailbox a sign-in just reported as `email`. A draft that
+// learns its address changes id from "" to that address and is still the same
+// mailbox; any other change of id is a different mailbox in the same object.
+function isSameMailbox(id, email, provider) {
+  var wanted = accountId(email, provider)
+  return wanted !== "" && wanted === trimmed(id)
+}
+
+// Whether the text on disk is a list this build can read. Empty is fine — it
+// is a first run, with nothing to lose — but anything else that `load` would
+// turn into an empty list is somebody's accounts in a shape it cannot read, and
+// the first save after it would overwrite them for good.
+function isReadable(text) {
+  if (trimmed(text) === "") return true
+  var raw = parseJson(text, null)
+  return isObject(raw) && Number(raw.version) === VERSION
+}
+
 // The neighbour that slides into the removed row is the least surprising
 // replacement, and the scan wraps so removing the last row falls back up the
 // list. Pending accounts are skipped: the window cannot show one.

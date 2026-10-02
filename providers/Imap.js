@@ -49,7 +49,11 @@ var CAPABILITIES = {
   // for the Message-ID the sender wrote, which a move does not rewrite. That
   // is one extra round trip on the undo path only — nothing pays for it until
   // somebody presses the key.
-  undo: true
+  undo: true,
+  // A copy stored in the SPECIAL-USE \Drafts folder with \Draft set, which is
+  // where every other client looks for one. Saving again stores a new copy and
+  // removes the old: an IMAP message cannot be changed in place.
+  drafts: true
 }
 
 // Folders, not queries. The `folder:` DSL is read by `ImapProtocol.parseQuery`
@@ -64,6 +68,7 @@ var MAILBOXES = [
   { key: "unread", label: "Unread", icon: "unread", query: "folder:INBOX UNSEEN" },
   { key: "starred", label: "Flagged", icon: "star", query: "folder:INBOX FLAGGED" },
   { key: "sent", label: "Sent", icon: "send", query: "folder:\\Sent" },
+  { key: "drafts", label: "Drafts", icon: "compose", query: "folder:\\Drafts" },
   { key: "archive", label: "Archive", icon: "archive", query: "folder:\\Archive", optional: true },
   { key: "trash", label: "Trash", icon: "trash", query: "folder:\\Trash", optional: true }
 ]

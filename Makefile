@@ -58,6 +58,7 @@ test-js:
 	node tests/test_menu.js
 	node tests/test_provider.js
 	node tests/test_imap.js
+	node tests/test_draft.js
 
 test-shell:
 	python3 tests/test_qml_names.py

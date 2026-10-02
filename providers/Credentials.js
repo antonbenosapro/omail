@@ -220,6 +220,69 @@ function withAccount(store, accountId, credentials) {
   return next
 }
 
+// A mailbox is added before it has an address, and its client is saved during
+// that add — so it is saved under the nameless id. Once the mailbox learns its
+// name the entry has to become its own, or `forAccount` misses it and the
+// mailbox borrows whichever client happens to be first in the file: a second
+// Cloud project's client, saved and then silently ignored.
+//
+// Also how a file written before accounts existed becomes an ordinary one: the
+// first named mailbox to read the lone nameless entry claims it, so a later
+// draft saving under the nameless id cannot replace a client somebody is
+// already signed in with.
+//
+// Returns the store to write, or null when there is nothing to change: the
+// account already has an entry, has no name yet, or there is no nameless entry
+// to claim.
+function adoptUnnamed(store, accountId) {
+  if (isUnnamedAccount(accountId)) return null
+  var next = asStore(store)
+  if (indexOfAccount(next.accounts, accountId) >= 0) return null
+  var unnamed = indexOfAccount(next.accounts, "")
+  if (unnamed < 0) return null
+  next.accounts[unnamed] = accountEntry(accountId, next.accounts[unnamed])
+  return next
+}
+
+// Whether the file is the pre-accounts single nameless entry, which is the one
+// case where a mailbox reading it may claim it without having just been named.
+function isLegacyStore(store) {
+  var accounts = asStore(store).accounts
+  return accounts.length === 1 && !accounts[0].id
+}
+
+// What removing a mailbox does to the file. Its own entry goes — unless that
+// entry is the client other mailboxes are quietly borrowing through
+// `sharedClient`, in which case it is handed to one of them instead. Deleting
+// it would move every borrower onto the next client in the file, and their
+// refresh tokens are keyed by the client they signed in with, so removing one
+// account would sign the others out.
+//
+// `remainingIds` names the Gmail mailboxes that stay. Returns the store to
+// write, or null when the file does not mention this account.
+function withoutAccount(store, accountId, remainingIds) {
+  if (isUnnamedAccount(accountId)) return null
+  var next = asStore(store)
+  var at = indexOfAccount(next.accounts, accountId)
+  if (at < 0) return null
+  var removed = next.accounts[at]
+  var shared = sharedClient(next)
+  var lent = isConfigured(removed) && trimmed(shared.clientId) === removed.clientId
+  var ids = remainingIds && typeof remainingIds.length === "number" ? remainingIds : []
+  if (lent) {
+    for (var i = 0; i < ids.length; i++) {
+      if (isUnnamedAccount(ids[i]) || accountKey(ids[i]) === accountKey(accountId)) continue
+      if (indexOfAccount(next.accounts, ids[i]) >= 0) continue
+      // Renamed in place, so it stays first and every other borrower still
+      // finds the same client.
+      next.accounts[at] = accountEntry(ids[i], removed)
+      return next
+    }
+  }
+  next.accounts.splice(at, 1)
+  return next
+}
+
 function installedBlock(value) {
   return {
     client_id: trimmed(value.clientId),
@@ -427,6 +490,20 @@ function renamedLegacyKeyringAttributes(clientId, which) {
 // re-entering it is the cost of the rename.
 function renamedImapKeyringAttributes(accountId, which) {
   return underRenamedService(imapKeyringAttributes(accountId), which)
+}
+
+// What a `secret-tool lookup` that found nothing actually means. Not finding an
+// entry is a silent exit 1; a keyring that is locked, whose unlock prompt was
+// dismissed, or that has no Secret Service running at all says so on stderr.
+// Read as "no entry", either of the latter looked exactly like being signed
+// out, and the panel asked for a sign-in that would only fail to save again.
+//
+// Returns "" for an ordinary miss, or the sentence to show.
+var KEYRING_UNAVAILABLE = "The keyring is locked or not running. Unlock it, then try again"
+
+function keyringLookupFailure(exitCode, stderrText) {
+  if (Number(exitCode) === 0) return ""
+  return trimmed(stderrText) === "" ? "" : KEYRING_UNAVAILABLE
 }
 
 // Shown under the client id in the panel so a user with several Cloud projects
