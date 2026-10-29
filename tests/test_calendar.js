@@ -548,4 +548,16 @@ assert.strictEqual(calendar.parseDateValue("20261321T100000"), null, "month 13")
 assert.strictEqual(calendar.parseDateValue("20260821T250000"), null, "hour 25")
 assert.ok(calendar.parseDateValue("20260821T100000Z").utc)
 
+// The organiser is the sender's text, and an answer is mail from the user's own
+// account. One plain address or no answer at all: a list fanned the reply out.
+{
+  const organized = (email) => ({ method: "REQUEST", organizer: { name: "Your Manager", email: email } })
+  assert.strictEqual(calendar.replyRecipient(organized("boss@example.com")), "boss@example.com")
+  assert.strictEqual(calendar.replyRecipient(organized("a@x.com,b@y.com")), "")
+  assert.strictEqual(calendar.replyRecipient(organized("a@x.com;b@y.com")), "")
+  assert.strictEqual(calendar.replyRecipient(organized("a@x.com b@y.com")), "")
+  assert.strictEqual(calendar.replyRecipient(organized("Boss <a@x.com>")), "")
+  assert.strictEqual(calendar.canRespond(organized("a@x.com,b@y.com"), "me@example.com"), false)
+}
+
 console.log("test_calendar.js ok")
