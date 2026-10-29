@@ -164,14 +164,17 @@ assert.strictEqual(unsub.postContentType(), "application/x-www-form-urlencoded")
 
 // The one-click POST is curl with redirects and other schemes refused.
 {
-  const command = unsub.postCommand("https://list.example/u/1")
-  assert.strictEqual(command[0], "curl")
+  const command = unsub.postCommand()
+  assert.strictEqual(command[0], "sh")
   assert.ok(command.indexOf("--max-redirs") >= 0 && command[command.indexOf("--max-redirs") + 1] === "0")
   assert.ok(command.indexOf("--proto") >= 0 && command[command.indexOf("--proto") + 1] === "=https")
   assert.ok(command.indexOf("-L") < 0 && command.indexOf("--location") < 0)
-  assert.strictEqual(command[command.indexOf("--url") + 1], "https://list.example/u/1",
-    "the address is one argument, after --url")
+  assert.ok(command.indexOf("--url") < 0, "the address is never an argument: /proc shows those to everyone")
   assert.strictEqual(command[command.indexOf("--data") + 1], "List-Unsubscribe=One-Click")
+  assert.strictEqual(unsub.postInput("https://list.example/u/1"), "https://list.example/u/1\n")
+  assert.strictEqual(unsub.postInput('https://x.example/a"b\\c'), 'https://x.example/a\\"b\\\\c\n')
+  assert.strictEqual(unsub.postInput("https://x.example/a\nproxy = evil"), "https://x.example/aproxy = evil\n",
+    "a line break cannot start a config directive")
   assert.strictEqual(unsub.postStatus("200"), 200)
   assert.strictEqual(unsub.postStatus(""), 0)
   assert.strictEqual(unsub.postStatus("000"), 0)

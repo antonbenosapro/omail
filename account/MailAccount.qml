@@ -1813,7 +1813,8 @@ Item {
     if (unsubscribePoster.running) return
     unsubscribePoster.about = String(about || "")
     unsubscribing = true
-    unsubscribePoster.command = Unsub.postCommand(url)
+    unsubscribePoster.command = Unsub.postCommand()
+    unsubscribePoster.input = Unsub.postInput(url)
     unsubscribePoster.running = true
   }
 
@@ -1824,8 +1825,16 @@ Item {
 
     // The message open when the request went out; see postUnsubscribe.
     property string about: ""
+    // The address, which goes in on stdin rather than in the command.
+    property string input: ""
 
+    stdinEnabled: true
     stdout: StdioCollector { id: posterOutput; waitForEnd: true }
+
+    onStarted: {
+      write(input)
+      input = ""
+    }
 
     onExited: function(code) {
       root.unsubscribing = false
