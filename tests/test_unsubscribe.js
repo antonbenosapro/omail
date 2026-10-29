@@ -127,7 +127,7 @@ assert.strictEqual(unsub.explanation(nothing, true), "")
 assert.strictEqual(unsub.explanation(oneClick, true),
   "This sender accepts a one-click unsubscribe")
 assert.strictEqual(unsub.explanation(mailOnly, true),
-  "Unsubscribing sends a message to this list")
+  "Unsubscribing sends a message to bye@example.com")
 assert.strictEqual(unsub.explanation(linkOnly, true),
   "Unsubscribing opens this sender's page in a browser")
 
@@ -161,5 +161,27 @@ assert.strictEqual(unsub.fromMessage(null).available, false)
 
 assert.strictEqual(unsub.postBody(), "List-Unsubscribe=One-Click")
 assert.strictEqual(unsub.postContentType(), "application/x-www-form-urlencoded")
+
+// The POST is curl's, because QML's XMLHttpRequest follows a redirect on its own
+// — to any host, over http — and a public https address answering 307 sent the
+// request to whatever listens on the user's own machine.
+{
+  const command = unsub.postCommand()
+  assert.strictEqual(command[0], "sh")
+  assert.ok(command.indexOf("--max-redirs") >= 0 && command[command.indexOf("--max-redirs") + 1] === "0")
+  assert.ok(command.indexOf("--proto") >= 0 && command[command.indexOf("--proto") + 1] === "=https")
+  assert.ok(command.indexOf("-L") < 0 && command.indexOf("--location") < 0)
+  assert.ok(command.indexOf("--url") < 0, "the address is never an argument: /proc shows those to everyone")
+  assert.strictEqual(command[command.indexOf("--data") + 1], "List-Unsubscribe=One-Click")
+  assert.strictEqual(unsub.postInput("https://list.example/u/1"), "https://list.example/u/1\n")
+  assert.strictEqual(unsub.postInput('https://x.example/a"b\\c'), 'https://x.example/a\\"b\\\\c\n')
+  assert.strictEqual(unsub.postInput("https://x.example/a\nproxy = evil"), "https://x.example/aproxy = evil\n",
+    "a line break cannot start a config directive")
+  assert.strictEqual(unsub.postStatus("200"), 200)
+  assert.strictEqual(unsub.postStatus(""), 0)
+  assert.strictEqual(unsub.postStatus("000"), 0)
+  assert.strictEqual(unsub.postSucceeded(204), true)
+  assert.strictEqual(unsub.postSucceeded(302), false, "a redirect is never followed, so it is not success")
+}
 
 console.log("test_unsubscribe.js ok")

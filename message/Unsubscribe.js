@@ -206,7 +206,9 @@ function label(info, canSend) {
 function explanation(info, canSend) {
   var how = plan(info, canSend)
   if (how === "post") return "This sender accepts a one-click unsubscribe"
-  if (how === "mail") return "Unsubscribing sends a message to this list"
+  // Named, because the button sends mail from the user's own account to an
+  // address the sender wrote, and "this list" is the sender's word for it.
+  if (how === "mail") return "Unsubscribing sends a message to " + info.mail.to
   if (how === "browser") return "Unsubscribing opens this sender's page in a browser"
   return ""
 }
@@ -218,4 +220,45 @@ function postBody() {
 
 function postContentType() {
   return "application/x-www-form-urlencoded"
+}
+
+// The POST as a curl command. curl rather than XMLHttpRequest because the
+// engine follows a redirect on its own, and a sender's address that answers 302
+// would turn one request to a URL the sender named into one to wherever it
+// points next. Nothing here follows one (no -L, and --max-redirs 0 as well),
+// and --proto keeps it to https. The body is printed as a status code and
+// nothing else is read.
+//
+// The address is not in this array. A process's arguments are readable by
+// every local account in /proc, and an unsubscribe address names the list and
+// usually carries a token for the subscriber. It arrives on stdin as one line,
+// from `postInput`, and `printf` — a shell builtin, so no process of its own —
+// hands it to curl's config on curl's stdin.
+function postCommand() {
+  return ["sh", "-c",
+    "IFS= read -r line || exit 2; printf 'url = \"%s\"\\n' \"$line\" | curl --config - \"$@\"",
+    "sh", "--silent", "--show-error", "--output", "/dev/null",
+    "--write-out", "%{http_code}", "--max-time", "20",
+    "--max-redirs", "0", "--proto", "=https",
+    "--request", "POST", "--header", "Content-Type: " + postContentType(),
+    "--data", postBody()]
+}
+
+// The line `postCommand` reads: the address quoted for curl's config, which
+// escapes with a backslash. A line break would end the line early and start a
+// config directive of the sender's choosing, so it never gets that far.
+function postInput(url) {
+  return String(url || "").replace(/[\r\n]/g, "")
+    .replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\n"
+}
+
+// The status curl printed, or 0 when it printed nothing usable. Only a 2xx
+// counts as removed: a redirect is not followed, so it is not an answer.
+function postStatus(output) {
+  var match = String(output || "").trim().match(/(\d{3})$/)
+  return match ? Number(match[1]) : 0
+}
+
+function postSucceeded(status) {
+  return status >= 200 && status < 300
 }

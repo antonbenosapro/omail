@@ -1529,14 +1529,34 @@ Item {
   // sent the mail, and the only question being asked of it is whether the
   // address is off the list.
   function postUnsubscribe(url) {
+    if (unsubscribePoster.running) return
     unsubscribing = true
-    var request = new XMLHttpRequest()
-    request.onreadystatechange = function() {
-      if (request.readyState !== XMLHttpRequest.DONE) return
-      if (!root) return
+    unsubscribePoster.command = Unsub.postCommand()
+    unsubscribePoster.input = Unsub.postInput(url)
+    unsubscribePoster.running = true
+  }
+
+  // curl, not XMLHttpRequest: QML's request follows a redirect by itself, to
+  // any host and over plain http, so a public https address that answered 307
+  // sent this POST to a service on the user's own machine or network.
+  Process {
+    id: unsubscribePoster
+
+    // The address, which goes in on stdin rather than in the command.
+    property string input: ""
+
+    stdinEnabled: true
+    stdout: StdioCollector { id: posterOutput; waitForEnd: true }
+
+    onStarted: {
+      write(input)
+      input = ""
+    }
+
+    onExited: function(code) {
       root.unsubscribing = false
-      var status = Number(request.status) || 0
-      if (status >= 200 && status < 400) {
+      var status = code === 0 ? Unsub.postStatus(posterOutput.text) : 0
+      if (Unsub.postSucceeded(status)) {
         root.unsubscribeDone = "Unsubscribed from this list"
         return
       }
@@ -1544,9 +1564,6 @@ Item {
         ? "The unsubscribe request could not be sent"
         : "This list refused the unsubscribe request (" + status + ")")
     }
-    request.open("POST", url)
-    request.setRequestHeader("Content-Type", Unsub.postContentType())
-    request.send(Unsub.postBody())
   }
 
   // -------------------------------------------------------- notifications
