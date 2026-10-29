@@ -348,6 +348,23 @@ check "the first recipient is set" "$config" 'mail-rcpt = "friend@example.com"'
 check "every recipient is set" "$config" 'mail-rcpt = "other@example.com"'
 check "the body is uploaded from a file, not passed as an argument" "$config" 'upload-file = "'
 check_absent "SMTP does not emit --next sections" "$config" 'next'
+check_absent "TLS on connect needs no upgrade" "$config" 'ssl-reqd'
+
+# A plain scheme to anywhere but loopback is STARTTLS, and it is required:
+# curl gives up rather than send the password in clear when the upgrade is not
+# offered or is stripped. Loopback alone may stay plain, for a local bridge.
+starttls="smtp $(b64 'smtp://smtp.mail.me.com:587') $(b64 'jane:pw') $(b64 'jane@example.org') $(b64 'Subject: hi
+
+x') $(b64 'friend@example.com')"
+config=$(config_for "$starttls")
+check "STARTTLS on 587 is required, not opportunistic" "$config" 'ssl-reqd'
+config=$(config_for "smtp $(b64 'smtp://127.0.0.1:1025') $(b64 'jane:pw') $(b64 'jane@example.org') $(b64 'Subject: hi
+
+x') $(b64 'friend@example.com')")
+check_absent "a loopback bridge may stay plaintext" "$config" 'ssl-reqd'
+config=$(config_for "imap $(b64 'imap://imap.example.org:143/INBOX') $(b64 'jane:pw') $(b64 'NOOP') $(b64 'NOOP')")
+sections=$(printf '%s' "$config" | grep -c '^ssl-reqd' || true)
+check "plain IMAP to a remote host requires TLS in every section" "$sections" '2'
 
 # The message itself is legitimately multi-line — a header block, a blank line,
 # then a body — and it is the one value that does not go through the config at

@@ -127,6 +127,24 @@ escaped_credentials=$(escape "$credentials")
 # last, and it only ever narrows what curl would have chosen from.
 imap_probe='CAPABILITY'
 
+# A plain-scheme URL to anything but this machine is STARTTLS, and required:
+# `ssl-reqd` makes curl give up rather than carry on in clear when the server
+# does not offer the upgrade, which is the stripping attack TLS-on-connect is
+# chosen to avoid. Loopback alone may be plaintext, for a local bridge. This is
+# the second gate: Imap.js only builds a plain URL for one of those two cases,
+# and this keeps a password off the wire in clear even if it ever built another.
+tls_directive() {
+  case "$1" in
+    imaps://*|smtps://*) return 0 ;;
+  esac
+  authority=${1#*://}
+  authority=${authority%%/*}
+  case "$authority" in
+    127.0.0.1|127.0.0.1:*|localhost|localhost:*|'[::1]'|'[::1]:'*) return 0 ;;
+  esac
+  printf 'ssl-reqd\n'
+}
+
 # The server root for $url, with any mailbox path removed. Everything through
 # the host and port is kept; what follows the first "/" after it is not.
 probe_root() {
@@ -159,12 +177,14 @@ run_probe() {
     curl --config - --silent --show-error --max-time 20 --connect-timeout 20 <<PROBE 2>&1
 url = "$1"
 noproxy = "*"
+$(tls_directive "$1")
 request = "$imap_probe"
 PROBE
   else
     curl --config - --silent --show-error --verbose --max-time 20 --connect-timeout 20 <<PROBE 2>&1
 url = "$1"
 noproxy = "*"
+$(tls_directive "$1")
 PROBE
   fi
 }
@@ -303,6 +323,7 @@ if [ "$mode" = "smtp" ]; then
 
   printf 'url = "%s"\n' "$escaped_url"
   printf 'noproxy = "*"\n'
+  tls_directive "$url"
   printf 'user = "%s"\n' "$escaped_credentials"
   [ -z "$mechanism" ] || printf 'login-options = "AUTH=%s"\n' "$mechanism"
   printf 'mail-from = "%s"\n' "$(escape "$sender")"
@@ -325,6 +346,7 @@ else
     [ "$first" = "1" ] || printf 'next\n'
     first=0
     printf 'url = "%s"\n' "$escaped_url"
+    tls_directive "$url"
     # Desktop HTTP/SOCKS proxy settings are for web traffic. In particular,
     # Omarchy's local SOCKS proxy accepts the IMAPS socket and then drops its
     # TLS handshake, which curl reports as error 35. Direct mail transport also

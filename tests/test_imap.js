@@ -98,6 +98,10 @@ assert.strictEqual(imap.smtpUrl({ imapHost: "127.0.0.1", smtpHost: "smtp.example
   "smtps://smtp.example.com:25")
 assert.strictEqual(imap.smtpUrl({ imapHost: "127.0.0.1", smtpHost: "127.0.0.1", smtpPort: 1025, insecure: true }),
   "smtp://127.0.0.1:1025")
+// 587 is submission over STARTTLS, which is how iCloud and Outlook take mail.
+// smtps:// there waited for a TLS handshake the server never starts.
+assert.strictEqual(imap.smtpUrl({ smtpHost: "smtp.mail.me.com", smtpPort: 587 }), "smtp://smtp.mail.me.com:587")
+assert.strictEqual(imap.smtpUrl(imap.presetFor("jane@icloud.com")), "smtp://smtp.mail.me.com:587")
 
 // -------------------------------------------------------------- the query DSL
 
