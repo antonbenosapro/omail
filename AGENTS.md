@@ -232,6 +232,10 @@ key. What matters while working:
   is world-readable.
 - Anything that could carry a credential passes through `OAuth.redact` before
   it can reach a label.
+- Nothing from a message goes on a command line. Every local account can read
+  a process's arguments in `/proc`, so the new-mail notification says how many
+  arrived and never who from or about what: `Model.notificationCommand` takes
+  a count and nothing else. A marketplace reviewer blocked the listing on this.
 - Remote images in a message body are blocked until the reader asks for them.
   Qt's rich text engine really does fetch them, so rendering one fires every
   tracking pixel in the message, and the fetch tells the host that this address
