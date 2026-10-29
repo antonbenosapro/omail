@@ -913,7 +913,8 @@ Item {
     return Quickshell.env("HOME") + "/Downloads"
   }
 
-  // Save one attachment and let the desktop open it.
+  // Save one attachment. Only save it: what would open it is chosen by the
+  // file's type, and the sender chose that.
   //
   // For IMAP this costs no request: the whole message was fetched to read it,
   // so `getAttachment` walks the MIME tree it already holds. Gmail describes a
@@ -940,8 +941,8 @@ Item {
     var messageId = selectedId
 
     api.getAttachment(messageId, wanted, function(data, error) {
-      // The reader moved on. The file would still be correct, but opening a
-      // viewer for a message the user has left is not what the click asked
+      // The reader moved on. The file would still be correct, but a save
+      // landing for a message the user has left is not what the click asked
       // for.
       if (messageId !== root.selectedId) {
         root.savingAttachment = ""
@@ -952,10 +953,13 @@ Item {
         root.fail(error || "That attachment is no longer in the message")
         return
       }
+      // The name goes in on stdin beside the octets, not as an argument: the
+      // sender wrote it, and every local account can read a process's
+      // arguments in /proc.
       attachmentWriter.filename = record.filename
-      attachmentWriter.payload = data
+      attachmentWriter.payload = Mail.encodeBase64(record.filename) + " " + data
       attachmentWriter.command = [root.pluginDir + "/scripts/save-attachment.sh",
-        root.downloadDirectory, record.filename]
+        root.downloadDirectory]
       attachmentWriter.running = true
     })
   }

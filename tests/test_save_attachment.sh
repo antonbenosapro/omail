@@ -11,19 +11,23 @@ script="$root/scripts/save-attachment.sh"
 work=$(mktemp -d "${TMPDIR:-/tmp}/omail-attachment-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM HUP
 
-# xdg-open must not actually run: these tests would open a viewer per case.
+# Saving never opens: the file's type is the sender's choice. This xdg-open
+# leaves a mark if anything runs it, and the end of the file looks for one.
 mkdir -p "$work/bin"
-printf '#!/bin/sh\nexit 0\n' > "$work/bin/xdg-open"
+printf '#!/bin/sh\ntouch "%s/opened"\n' "$work" > "$work/bin/xdg-open"
 chmod +x "$work/bin/xdg-open"
-printf '#!/bin/sh\nexec "$@"\n' > "$work/bin/setsid"
-chmod +x "$work/bin/setsid"
+
+# The filename as it crosses stdin.
+named() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
 
 failures=0
 
 # Saves $2 under the name $1 and prints the name it actually used.
 save() {
-  printf '%s\n' "$(printf '%s' "$2" | base64 | tr -d '\n')" \
-    | PATH="$work/bin:$PATH" sh "$script" "$3" "$1" 2>/dev/null
+  printf '%s %s\n' "$(printf '%s' "$1" | base64 | tr -d '\n')" "$(printf '%s' "$2" | base64 | tr -d '\n')" \
+    | PATH="$work/bin:$PATH" sh "$script" "$3" 2>/dev/null
 }
 
 check() {
@@ -102,21 +106,21 @@ check 'a name with no extension is numbered too' "$name" 'README (1)'
 dir="$work/encoding"
 standard='+/+/ABCD'
 urlsafe='-_-_ABCD'
-printf '%s\n' "$standard" | PATH="$work/bin:$PATH" sh "$script" "$dir" 'std.bin' >/dev/null 2>&1
-printf '%s\n' "$urlsafe" | PATH="$work/bin:$PATH" sh "$script" "$dir" 'url.bin' >/dev/null 2>&1
+printf '%s %s\n' "$(named std.bin)" "$standard" | PATH="$work/bin:$PATH" sh "$script" "$dir" >/dev/null 2>&1
+printf '%s %s\n' "$(named url.bin)" "$urlsafe" | PATH="$work/bin:$PATH" sh "$script" "$dir" >/dev/null 2>&1
 check 'base64url decodes to the same bytes as base64' \
   "$(od -An -tx1 < "$dir/url.bin" | tr -d ' \n')" \
   "$(od -An -tx1 < "$dir/std.bin" | tr -d ' \n')"
 
 # Unpadded is also part of the url-safe form.
-printf '%s\n' 'aGk' | PATH="$work/bin:$PATH" sh "$script" "$dir" 'nopad.txt' >/dev/null 2>&1
+printf '%s %s\n' "$(named nopad.txt)" 'aGk' | PATH="$work/bin:$PATH" sh "$script" "$dir" >/dev/null 2>&1
 check 'a stripped pad is restored' "$(cat "$dir/nopad.txt")" 'hi'
 
 # A decode that fails must leave nothing behind, not a truncated file with the
 # right name that something else will later try to open.
 dir="$work/corrupt"
-if printf '%s\n' 'not!valid!base64!' \
-  | PATH="$work/bin:$PATH" sh "$script" "$dir" 'bad.bin' >/dev/null 2>&1; then
+if printf '%s %s\n' "$(named bad.bin)" 'not!valid!base64!' \
+  | PATH="$work/bin:$PATH" sh "$script" "$dir" >/dev/null 2>&1; then
   printf '  FAIL corrupt base64 was accepted\n'
   failures=$(( failures + 1 ))
 else
@@ -126,21 +130,29 @@ check 'and leaves no file behind' "$(ls "$dir" 2>/dev/null | wc -l | tr -d ' ')"
 
 # An empty request is a bug in the caller, not an empty file on disk.
 dir="$work/empty"
-if printf '\n' | PATH="$work/bin:$PATH" sh "$script" "$dir" 'x.bin' >/dev/null 2>&1; then
+if printf '%s \n' "$(named x.bin)" | PATH="$work/bin:$PATH" sh "$script" "$dir" >/dev/null 2>&1; then
   printf '  FAIL an empty payload was accepted\n'
   failures=$(( failures + 1 ))
 else
   printf '  ok   an empty payload fails\n'
 fi
+if printf ' aGk\n' | PATH="$work/bin:$PATH" sh "$script" "$dir" >/dev/null 2>&1; then
+  printf '  FAIL an empty filename was accepted\n'
+  failures=$(( failures + 1 ))
+else
+  printf '  ok   an empty filename fails\n'
+fi
 
 # ------------------------------------------------------------------- usage
 
-if printf 'aGk\n' | sh "$script" >/dev/null 2>&1; then
+if printf '%s aGk\n' "$(named x.txt)" | sh "$script" >/dev/null 2>&1; then
   printf '  FAIL missing arguments were accepted\n'
   failures=$(( failures + 1 ))
 else
   printf '  ok   missing arguments are refused\n'
 fi
+
+check 'nothing was opened' "$([ -e "$work/opened" ] && echo opened || echo none)" 'none'
 
 if [ "$failures" -ne 0 ]; then
   printf '\n%s check(s) failed\n' "$failures"
