@@ -1548,23 +1548,10 @@ Item {
   // -------------------------------------------------------- notifications
 
   function notify(arrivals) {
-    var list = Array.isArray(arrivals) ? arrivals : []
-    if (list.length === 0) return
-    // "--" before the summary and body: both are written by whoever sent the
-    // mail, and a display name of "-u" would otherwise be read by notify-send
-    // as an option rather than as a name.
-    if (list.length === 1) {
-      Quickshell.execDetached(["notify-send", "-a", "Omail", "-i",
-        root.pluginDir + "/assets/omail.svg",
-        "--", Model.notificationTitle(list[0]), Model.notificationBody(list[0])])
-      return
-    }
-    // One notification per message turns a batch sync into a wall of popups.
-    var names = []
-    for (var i = 0; i < list.length && i < 3; i++) names.push(Model.notificationTitle(list[i]))
-    Quickshell.execDetached(["notify-send", "-a", "Omail", "-i",
-      root.pluginDir + "/assets/omail.svg",
-      "--", Model.pluralize(list.length, "new message"), names.join(", ")])
+    var count = Array.isArray(arrivals) ? arrivals.length : 0
+    if (count === 0) return
+    Quickshell.execDetached(Model.notificationCommand(count,
+      root.pluginDir + "/assets/omail.svg"))
   }
 
   // ------------------------------------------------------------ navigation
