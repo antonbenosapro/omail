@@ -184,7 +184,12 @@ Rectangle {
         textFormat: Text.PlainText
         text: {
           if (!root.invite || !root.invite.organizer) return ""
-          var host = String(root.invite.organizer.name || root.invite.organizer.email)
+          // The address as well as the name, when an answer would go to it: the
+          // name is the sender's to choose, and the button sends mail there.
+          var organizer = root.invite.organizer
+          var host = String(organizer.name || organizer.email)
+          var to = Calendar.replyRecipient(root.invite)
+          if (to !== "" && !Calendar.sameAddress(host, to)) host += " <" + to + ">"
           var guests = Calendar.attendeeSummary(root.invite)
           return guests === "" ? host : host + " · " + guests
         }

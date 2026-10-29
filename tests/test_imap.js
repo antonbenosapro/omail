@@ -93,6 +93,11 @@ assert.strictEqual(imap.imapUrl({ imapHost: "a b" }, "INBOX"), "",
 assert.strictEqual(
   imap.smtpUrl({ smtpHost: "smtp.fastmail.com", smtpPort: 465 }),
   "smtps://smtp.fastmail.com:465")
+// Plaintext SMTP only to a loopback SMTP host, whatever the IMAP host is.
+assert.strictEqual(imap.smtpUrl({ imapHost: "127.0.0.1", smtpHost: "smtp.example.com", smtpPort: 25, insecure: true }),
+  "smtps://smtp.example.com:25")
+assert.strictEqual(imap.smtpUrl({ imapHost: "127.0.0.1", smtpHost: "127.0.0.1", smtpPort: 1025, insecure: true }),
+  "smtp://127.0.0.1:1025")
 
 // -------------------------------------------------------------- the query DSL
 

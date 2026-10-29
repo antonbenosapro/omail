@@ -32,10 +32,11 @@ server — including one you run yourself.
   chosen per account on the settings page from a fixed set, so two mailboxes
   are never told apart by shades nobody can distinguish. Replying answers from
   the account that received the message, not the one on screen.
-- **Attachments you can open.** Click an attachment to save it to your
-  downloads directory and hand it to the desktop. The filename comes from the
-  sender, so it is reduced to a single path component before anything touches
-  the disk, and an existing file is never overwritten.
+- **Attachments you can save.** Click an attachment to save it to your
+  downloads directory. It is not opened for you: its type is the sender's
+  choice, and so would be the program that opened it. The filename comes from
+  the sender too, so it is reduced to a single path component before anything
+  touches the disk, and an existing file is never overwritten.
 - **Keyboard-first.** `j`/`k` to move, `e` to archive, `s` to star, `r` to
   reply, `c` to compose, `Alt+1`…`0` for the mailboxes — hold Alt and the rail says
   which is which — `Alt+A` to switch account, `/` to search, `?` for the rest.
@@ -234,8 +235,8 @@ trash, spam, star and read/unread without leaving the keyboard cursor behind.
   written in. A browser engine cannot be embedded in a plugin at all:
   `QtWebEngineQuick::initialize()` has to run before the host process builds
   its `QGuiApplication`, and a plugin loads long after that.
-- **No attachment previews.** An attachment is saved and handed to the desktop
-  to open; nothing is rendered inside the window.
+- **No attachment previews.** An attachment is saved to your downloads
+  directory; nothing is rendered inside the window.
 
 Remote images in a message body are blocked until you ask for them, and asking
 covers that one message. Qt really does fetch an `<img src="https://…">`, so

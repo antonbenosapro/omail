@@ -1035,10 +1035,13 @@ Item {
         root.fail(error || "That attachment is no longer in the message")
         return
       }
+      // The name goes in on stdin beside the octets, not as an argument: the
+      // sender wrote it, and every local account can read a process's
+      // arguments in /proc.
       attachmentWriter.filename = record.filename
-      attachmentWriter.payload = data
+      attachmentWriter.payload = Mail.encodeBase64(record.filename) + " " + data
       attachmentWriter.command = [root.pluginDir + "/scripts/save-attachment.sh",
-        root.downloadDirectory, record.filename]
+        root.downloadDirectory]
       attachmentWriter.running = true
     })
   }
@@ -1818,8 +1821,9 @@ Item {
     unsubscribePoster.running = true
   }
 
-  // curl, not XMLHttpRequest: the engine follows a redirect by itself, and the
-  // sender's address must not be able to send this request anywhere else.
+  // curl, not XMLHttpRequest: QML's request follows a redirect by itself, to
+  // any host and over plain http, so a public https address that answered 307
+  // sent this POST to a service on the user's own machine or network.
   Process {
     id: unsubscribePoster
 

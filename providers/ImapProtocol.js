@@ -230,7 +230,10 @@ function imapUrl(settings, folder) {
 function smtpUrl(settings) {
   var values = normalizeSettings(settings)
   if (!isValidHost(values.smtpHost)) return ""
-  var scheme = values.insecure ? "smtp" : "smtps"
+  // `insecure` was judged against the IMAP host, and SMTP may be elsewhere: a
+  // local IMAP bridge beside a remote SMTP server would otherwise send the
+  // password to it in plain text.
+  var scheme = values.insecure && isLoopback(values.smtpHost) ? "smtp" : "smtps"
   return scheme + "://" + values.smtpHost + ":" + values.smtpPort
 }
 

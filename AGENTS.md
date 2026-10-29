@@ -263,6 +263,7 @@ key. What matters while working:
   become one. A browser's parser inserts `<tbody>`, hoists content out of a
   `<table>` and reopens formatting across a block; every one of those is a change
   to mail nobody asked for. This one only closes what the sender left open.
+- The checks are only as good as their agreement with **Qt's** parser, which is not a browser's: it skips whitespace after `<`, decodes references in tag and attribute names, takes the last of a repeated attribute, reads `source` as an `<img>`'s `src`, fetches `background` on body/table/row/cell, and decodes CSS `\hex` escapes. So what this file hands over leaves Qt nothing to reinterpret: a text `<` goes out as `&lt;`, an attribute name is plain and appears once, `background` and `source` never survive, and a style is decoded before it is split and checked (`declarationsOf`, `fetchesResource`). `tests/test_html.js` reads the output the way Qt does; a new fetch path belongs there first. A marketplace reviewer blocked the listing on an entity-encoded `url()`.
 - Everything downstream walks the tree by recursion, so `MAX_TREE_DEPTH` is
   load-bearing: without it a deeply nested message is a stack overflow inside
   the process that draws the whole desktop.

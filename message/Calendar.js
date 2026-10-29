@@ -993,8 +993,16 @@ function quoteParam(value) {
 
 // Who the answer goes to. The organiser, and nobody else: a reply copied to
 // every attendee is how one accepted meeting becomes forty mails.
+//
+// The organiser is whatever the invitation says, and the invitation is the
+// sender's: "mailto:a@x.com,b@y.com" would have had one click send the answer,
+// from the user's own account, to every address in it. One plain address or
+// none, and none means the card offers no answer at all.
+var SINGLE_ADDRESS = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/
+
 function replyRecipient(invite) {
-  return invite && invite.organizer ? String(invite.organizer.email || "") : ""
+  var email = invite && invite.organizer ? String(invite.organizer.email || "").trim() : ""
+  return SINGLE_ADDRESS.test(email) ? email : ""
 }
 
 function replySubject(invite, response) {

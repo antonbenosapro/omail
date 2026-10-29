@@ -3,14 +3,16 @@
 # the sender chose is not something to hand to a desktop handler unasked, so the
 # window offers an explicit Open once the save has been reported.
 #
-# The octets arrive base64 on stdin, which is what both providers already hand
+# One line on stdin, the filename and the octets, both base64 and separated by
+# a space. The octets are base64 already, which is what both providers hand
 # back: Gmail sends base64url in the attachment resource and `parseRfc822`
-# leaves an IMAP part encoded, so neither side has to decode before it can
-# save. One line, read with `read` rather than `cat`, because Quickshell's
-# Process.write() never closes stdin and anything waiting for EOF would hang
-# forever.
+# leaves an IMAP part encoded. The filename is the sender's too, and it is not
+# an argument because every local account can read a process's arguments in
+# /proc — "Biopsy results J Doe.pdf" is not something to show them. `read`
+# rather than `cat`, because Quickshell's Process.write() never closes stdin
+# and anything waiting for EOF would hang forever.
 #
-#   save-attachment.sh <directory> <filename>
+#   printf '%s %s\n' "$name_b64" "$octets_b64" | save-attachment.sh <directory>
 #
 # The filename is printed on success, because it is not necessarily the one
 # asked for: a name already taken gets a counter, so saving the same invoice
@@ -23,8 +25,15 @@ fail() {
 }
 
 directory=${1:-}
-requested=${2:-}
-[ -n "$directory" ] && [ -n "$requested" ] || fail 'usage: save-attachment.sh <directory> <filename>'
+[ -n "$directory" ] || fail 'usage: save-attachment.sh <directory>'
+
+IFS=' ' read -r encoded payload || fail 'save-attachment.sh: no attachment on stdin'
+[ -n "$payload" ] || fail 'save-attachment.sh: empty attachment'
+# `printf` is a builtin, so the name reaches base64 through a pipe and is never
+# an argument either.
+requested=$(printf '%s' "$encoded" | base64 -d 2>/dev/null) \
+  || fail 'save-attachment.sh: filename is not valid base64'
+[ -n "$requested" ] || fail 'save-attachment.sh: empty filename'
 
 # The sender chose this string. It reaches a path, so every part of it that
 # could leave the directory is removed rather than escaped: a separator, the
@@ -82,9 +91,6 @@ if [ -e "$target" ]; then
   name="$stem ($counter)$suffix"
   target="$directory/$name"
 fi
-
-IFS= read -r payload || fail 'save-attachment.sh: no attachment on stdin'
-[ -n "$payload" ] || fail 'save-attachment.sh: empty attachment'
 
 umask 077
 

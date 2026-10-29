@@ -206,7 +206,9 @@ function label(info, canSend) {
 function explanation(info, canSend) {
   var how = plan(info, canSend)
   if (how === "post") return "This sender accepts a one-click unsubscribe"
-  if (how === "mail") return "Unsubscribing sends a message to this list"
+  // Named, because the button sends mail from the user's own account to an
+  // address the sender wrote, and "this list" is the sender's word for it.
+  if (how === "mail") return "Unsubscribing sends a message to " + info.mail.to
   if (how === "browser") return "Unsubscribing opens this sender's page in a browser"
   return ""
 }

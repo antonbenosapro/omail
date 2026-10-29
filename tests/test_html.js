@@ -58,8 +58,10 @@ const html = load("message/Html.js")
   assert.strictEqual(html.sanitize("<P STYLE=\"DISPLAY:NONE\">secret</P><p>real</p>").html, "<p>real</p>")
   assert.strictEqual(html.sanitize("<A HREF=\"JAVASCRIPT:x()\">t</A>").html, "<a>t</a>")
 
-  // A "<" that starts no tag is a "<" the sender typed.
-  assert.strictEqual(html.stripColors("a < b and 3<4"), "a < b and 3<4")
+  // A "<" that starts no tag is a "<" the sender typed, and it goes out as one
+  // Qt can only read as the character: its parser skips whitespace after a "<"
+  // and would take "< b" for a tag.
+  assert.strictEqual(html.stripColors("a < b and 3<4"), "a &lt; b and 3&lt;4")
 
   // A raw-text element ends at its own closing tag and at nothing else, so a
   // stylesheet cannot hide markup from the walk that follows it.
@@ -386,6 +388,72 @@ const mixed = "<img src=\"https://cdn.example.com/a.png\" width=\"90\">"
   + "<img src=\"https://cdn.example.com/pixel.gif\" width=\"1\">"
 assert.strictEqual(html.sanitize(mixed).remoteImages, 1)
 assert.strictEqual(html.sanitize(mixed, { allowRemoteImages: true }).images, 1)
+
+// Every way Qt's own parser can be made to fetch, read off the document the way
+// Qt reads it (qtexthtmlparser.cpp, qcssparser.cpp, 6.8): a "<" opens a tag
+// after any whitespace; names and values are entity-decoded once; an <img>
+// takes the last of `src` and `source`; `background` is an image on body,
+// table, tr, td and th; and a style is CSS after "\hex" escapes are decoded.
+// The image policy is only as good as the agreement between that reading and
+// this file's, so the test is that reading, not this file's own.
+{
+  const T = "https://t.example.com/p.gif"
+  const qtFetches = function(out) {
+    if (/<(?![a-z\/])/i.test(out)) return "a < Qt would read as a tag"
+    for (const tag of out.match(/<[a-z][^>]*>/gi) || []) {
+      const name = tag.match(/^<([a-z0-9]+)/i)[1].toLowerCase()
+      for (const m of tag.matchAll(/\s([^\s=>]+)(?:="([^"]*)")?/g)) {
+        const key = html.decodeReferences(m[1]).toLowerCase()
+        const value = html.decodeReferences(m[2] || "")
+        if (name === "img" && (key === "src" || key === "source") && /^\s*(https?:)?\/\//i.test(value)) return tag
+        if (key === "background" && value !== "") return tag
+        if (key === "style" && /url\(/i.test(value.replace(/\\([0-9a-f]{1,6})/gi,
+          (x, h) => String.fromCharCode(parseInt(h, 16))))) return tag
+      }
+    }
+    return ""
+  }
+  const grid = (cell) => "<table><tr>" + cell + "<td>b</td></tr><tr><td>c</td><td>d</td></tr></table>"
+  const cases = [
+    // The one the marketplace review found: the reference is decoded by Qt.
+    ["<div style=\"background-image:u&#114;l(" + T + ")\">x</div>"],
+    ["<div style=\"background:u&#x72;l(" + T + ")\">x</div>"],
+    // A reference's own ";" split the declaration here and not in Qt.
+    ["<div style=\"font-weight:bold&#59;background-image:u&#114;l(" + T + ")\">x</div>"],
+    ["<div style=\"background-image&#58;url(" + T + "):x\">x</div>"],
+    // CSS escapes, which Qt's scanner decodes before it reads a token.
+    ["<div style=\"background-image:\\75rl(" + T + ")\">x</div>"],
+    ["<div style=\"background-image:u\\72 l(" + T + ")\">x</div>"],
+    // Two of one attribute: this file reads the first, Qt applies the last.
+    ["<p style=\"font-weight:bold\" style=\"background-image:url(" + T + ")\">x</p>"],
+    ["<img src=\"cid:a\" src=\"" + T + "\" width=\"90\">"],
+    // `source` is src to Qt; a quoted or encoded name is a name to Qt.
+    ["<img source=\"" + T + "\" width=\"90\">"],
+    ["<img &#115;rc=\"" + T + "\" width=\"90\">"],
+    ["<img \"src\"=\"" + T + "\" width=\"90\">"],
+    // A "<" this file read as text and Qt reads as a tag.
+    ["< img src=\"" + T + "\" width=\"90\">"],
+    ["<&#105;mg src=\"" + T + "\" width=\"90\">"],
+    ["<&#115;tyle>@import url(https://t.example.com/x.css);</b><div>x</div>"],
+    // `background` is an image to Qt whether or not the sender's colours stay.
+    [grid("<td background=\"" + T + "\">a</td>"), { keepColors: true }],
+    ["<body background=\"" + T + "\">x</body>", { keepColors: true }],
+  ]
+  for (const [source, options] of cases) {
+    const ready = html.sanitize(source, options)
+    const page = html.documentFor(ready.document, { foreground: "#000", background: "#fff" })
+    assert.strictEqual(qtFetches(page), "", "fetched from " + JSON.stringify(source))
+    assert.strictEqual(qtFetches(html.documentFor(ready.html, {})), "", "after a round trip: " + JSON.stringify(source))
+  }
+
+  // What is checked is what Qt is handed: a style comes back decoded once and
+  // encoded once, so "&amp;" and a quoted font name both survive the trip.
+  assert.strictEqual(html.sanitize("<p style=\"font-family:&quot;A&amp;B&quot;\">x</p>").html,
+    "<p style=\"font-family:&quot;A&amp;B&quot;\">x</p>")
+  // A declaration that only looks like a function stays.
+  assert.strictEqual(html.sanitize("<p style=\"color:rgb(1,2,3)\">x</p>", { keepColors: true }).html,
+    "<p style=\"color:rgb(1,2,3)\">x</p>")
+}
 
 // A url() in an inline style is a fetch too, wherever the engine honours one.
 assert.ok(html.sanitize("<div style=\"background-image:url(https://track.example.com/p.gif);padding:4px\">x</div>")

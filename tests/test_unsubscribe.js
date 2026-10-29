@@ -127,7 +127,7 @@ assert.strictEqual(unsub.explanation(nothing, true), "")
 assert.strictEqual(unsub.explanation(oneClick, true),
   "This sender accepts a one-click unsubscribe")
 assert.strictEqual(unsub.explanation(mailOnly, true),
-  "Unsubscribing sends a message to this list")
+  "Unsubscribing sends a message to bye@example.com")
 assert.strictEqual(unsub.explanation(linkOnly, true),
   "Unsubscribing opens this sender's page in a browser")
 
@@ -162,7 +162,9 @@ assert.strictEqual(unsub.fromMessage(null).available, false)
 assert.strictEqual(unsub.postBody(), "List-Unsubscribe=One-Click")
 assert.strictEqual(unsub.postContentType(), "application/x-www-form-urlencoded")
 
-// The one-click POST is curl with redirects and other schemes refused.
+// The POST is curl's, because QML's XMLHttpRequest follows a redirect on its own
+// — to any host, over http — and a public https address answering 307 sent the
+// request to whatever listens on the user's own machine.
 {
   const command = unsub.postCommand()
   assert.strictEqual(command[0], "sh")
