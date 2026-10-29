@@ -76,6 +76,15 @@ function matchesIgnoreCase(text, at, needle) {
   return text.substr(at, needle.length).toLowerCase() === needle
 }
 
+var PLAIN_ATTRIBUTE_NAME = /^[a-z_][a-z0-9_.:-]*$/
+
+function hasAttributeNamed(attributes, name) {
+  for (var i = 0; i < attributes.length; i++) {
+    if (attributes[i].name === name) return true
+  }
+  return false
+}
+
 // Reads "<name attr=value ...>" from `from`, which must be its "<".
 //
 // Returns the tag and where it ends. `terminated` is false when the source ran
@@ -148,6 +157,14 @@ function readTag(text, from, out) {
     }
     var attributeName = text.substring(attrStart, at)
     if (attrUpper) attributeName = attributeName.toLowerCase()
+    // Qt reads an attribute's name the way it reads its value: a quoted one
+    // loses its quotes and a reference in one is decoded, so `"src"` and
+    // `&#115;rc` are both `src` to the engine and neither is to anything here.
+    // Only a plain name is kept. A repeated name keeps its first, which is what
+    // HTML does — and Qt takes the last, so `<img src="cid:a" src="https://...">`
+    // passed the image policy with one source and was fetched with the other.
+    var plainName = PLAIN_ATTRIBUTE_NAME.test(attributeName)
+      && !hasAttributeNamed(attributes, attributeName)
 
     while (at < length && isSpaceCode(text.charCodeAt(at))) at++
     var value = null
@@ -172,7 +189,7 @@ function readTag(text, from, out) {
         value = text.substring(valueStart, at)
       }
     }
-    attributes.push({ name: attributeName, value: value })
+    if (plainName) attributes.push({ name: attributeName, value: value })
   }
 
   out.end = length
@@ -368,7 +385,8 @@ function parse(html) {
 // Back into the subset Qt renders. Attribute values keep whatever character
 // references the sender wrote — they are the value, and re-escaping them would
 // turn "&amp;" into "&amp;amp;" on every round trip — so only the quote that
-// delimits them has to go.
+// delimits them has to go. The style attribute is the exception, and
+// `joinDeclarations` says why.
 
 function serializeAttributes(attrs) {
   var out = ""
@@ -386,7 +404,12 @@ function serializeAttributes(attrs) {
 // hundred elements deep is most of the time this file spends.
 function serializeInto(node, out, fit) {
   if (node.type === "text") {
-    out.push(node.text)
+    // A "<" that started no tag here is still a tag to Qt, whose parser skips
+    // the whitespace after one and decodes references in the name: "< img" and
+    // "<&#105;mg" are both an <img> it will fetch, written by a sender as text
+    // this file never looked at. Escaped, it can only be the character.
+    var text = node.text
+    out.push(text.indexOf("<") < 0 ? text : text.replace(/</g, "&lt;"))
     return
   }
   if (node.type !== "root") {
@@ -673,13 +696,46 @@ function splitDeclarations(style) {
   return declarations
 }
 
+// A style attribute is read the way Qt reads one: references decoded first,
+// then the CSS. Split on the raw text, "u&#x72;l(" is two declarations here —
+// the ";" of the reference ends the first — and one url() to the engine, so
+// what was checked and what was fetched were different strings.
+function declarationsOf(style) {
+  var text = String(style === undefined || style === null ? "" : style)
+  return splitDeclarations(text.indexOf("&") < 0 ? text : decodeReferences(text))
+}
+
+// Declarations hold decoded text, so the "&"s go back as references on the way
+// out. What Qt decodes is then exactly what every check here was shown.
 function joinDeclarations(declarations) {
   var parts = []
   for (var i = 0; i < declarations.length; i++) {
     if (declarations[i].value === "") continue
     parts.push(declarations[i].name + ":" + declarations[i].value)
   }
-  return parts.join(";")
+  var style = parts.join(";")
+  return style.indexOf("&") < 0 ? style : style.replace(/&/g, "&amp;")
+}
+
+// Whether a declaration can make Qt fetch something. Its CSS scanner decodes a
+// backslash escape before it reads a token, so "\75rl(" is url( to it; a
+// comment, a backslash and whitespace are dropped too, which can only make a
+// declaration look like a fetch when it is not one. The name is read along
+// with the value, because a reference can carry a ":" across from one to the
+// other. Nothing in mail needs a url() in a style: pictures arrive as <img>,
+// which is where the image policy lives.
+function fetchesResource(declaration) {
+  var text = declaration.name + ":" + declaration.value
+  // Every declaration of every element comes through here. A url( needs a
+  // "(", and one written any other way needs a "\" or a "&" to write it.
+  if (text.indexOf("(") < 0 && text.indexOf("\\") < 0 && text.indexOf("&") < 0) return false
+  text = decodeReferences(text)
+  text = text.replace(/\\([0-9a-fA-F]{1,6})/g, function(match, hex) {
+    var code = parseInt(hex, 16)
+    return code > 0xffff ? match : String.fromCharCode(code)
+  })
+  text = text.replace(/\/\*[\s\S]*?(\*\/|$)/g, "").replace(/[\\\s]/g, "")
+  return /url\(/i.test(text)
 }
 
 // Rewrites an element's style attribute through `decide`, which is handed each
@@ -687,7 +743,7 @@ function joinDeclarations(declarations) {
 function rewriteStyle(node, decide) {
   var attr = attributeOf(node, "style")
   if (!attr || attr.value === null || attr.value === undefined) return
-  var declarations = splitDeclarations(attr.value)
+  var declarations = declarationsOf(attr.value)
   var kept = []
   for (var i = 0; i < declarations.length; i++) {
     var verdict = decide(declarations[i])
@@ -734,12 +790,10 @@ function stripColorsFrom(node) {
 }
 
 // A url() in an inline style is a fetch wherever the engine honours it, and
-// which declarations Qt honours is not worth having to be right about: nothing
-// in mail needs one, because pictures arrive as <img>, which is where the image
-// policy lives.
+// which declarations Qt honours is not worth having to be right about.
 function stripStyleUrlsFrom(node) {
   rewriteStyle(node, function(declaration) {
-    return /url\s*\(/i.test(decodeReferences(declaration.value)) ? null : declaration
+    return fetchesResource(declaration) ? null : declaration
   })
 }
 
@@ -761,7 +815,7 @@ function isHidden(node) {
   if (VOID_ELEMENTS[node.name] === true) return false
   var style = attributeValue(node, "style")
   if (style === "") return false
-  return isHiddenBy(splitDeclarations(style))
+  return isHiddenBy(declarationsOf(style))
 }
 
 // A 1x1 image is a tracking pixel, never something to look at. Dropping them
@@ -771,7 +825,7 @@ function isTrackingPixel(node) {
   var height = Number(attributeValue(node, "height"))
   if (isFinite(width) && attributeValue(node, "width") !== "" && width <= 2) return true
   if (isFinite(height) && attributeValue(node, "height") !== "" && height <= 2) return true
-  var declarations = splitDeclarations(attributeValue(node, "style"))
+  var declarations = declarationsOf(attributeValue(node, "style"))
   for (var i = 0; i < declarations.length; i++) {
     if (declarations[i].name !== "width" && declarations[i].name !== "height") continue
     if (/^[012](\.\d+)?px/i.test(declarations[i].value)) return true
@@ -911,6 +965,10 @@ function cleanAttributes(node, keepColors, declarations) {
     // trip through a mail client.
     else if (name.charCodeAt(0) === 111 && HANDLER_ATTRIBUTE.test(name)) drop = true
     else if (name === "href" && !safeHref(attr.value)) drop = true
+    // Both are fetches Qt makes on its own: `background` on a body, table, row
+    // or cell is an image, and `source` is an <img>'s src under another name.
+    // Neither goes through the image policy, so neither survives at all.
+    else if (name === "background" || name === "source") drop = true
     else if (uncentre && name === "align" && CENTRED.test(String(attr.value))) drop = true
 
     if (drop && !dropped) {
@@ -928,8 +986,7 @@ function cleanAttributes(node, keepColors, declarations) {
     var declaration = declarations[j]
     if (!keepColors && COLOUR_DECLARATIONS[declaration.name] === true) continue
     if (uncentre && declaration.name === "text-align" && CENTRED.test(declaration.value)) continue
-    if (/url\s*\(/i.test(declaration.value)
-      && /url\s*\(/i.test(decodeReferences(declaration.value))) continue
+    if (fetchesResource(declaration)) continue
     survivors.push(declaration)
   }
   setStyle(node, survivors)
@@ -1067,7 +1124,7 @@ function sanitize(html, options) {
       // second pass over the document.
       var style = attributeOf(child, "style")
       var declarations = style !== null && style.value !== null && style.value !== undefined
-        ? splitDeclarations(style.value)
+        ? declarationsOf(style.value)
         : null
       if (declarations !== null && VOID_ELEMENTS[child.name] !== true
         && isHiddenBy(declarations)) continue
@@ -1307,7 +1364,7 @@ function fitAttributes(node, fit) {
       && Number(attr.value) > fit.limit) replacement = null
     else if (attr.name === "style" && attr.value !== null && attr.value !== undefined
       && (fit.sides || FITTABLE_DECLARATION.test(String(attr.value)))) {
-      var declarations = splitDeclarations(attr.value)
+      var declarations = declarationsOf(attr.value)
       var kept = []
       var changed = false
       for (var j = 0; j < declarations.length; j++) {
