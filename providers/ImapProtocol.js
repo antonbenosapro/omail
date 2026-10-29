@@ -28,14 +28,17 @@
 
 var DEFAULT_IMAP_PORT = 993
 var DEFAULT_SMTP_PORT = 465
+var STARTTLS_SMTP_PORT = 587
 
 // Known services, so the common case is an address and a password rather than
 // four hostnames. The key is the mail domain; `presetFor` also matches the
 // aliases, which is what makes hotmail.com find the Outlook entry.
 //
-// Every one of these is TLS on connect (imaps/smtps) rather than STARTTLS: the
-// providers below all offer it, and a client that negotiates upward can be
-// stripped back down by whatever is between it and the server.
+// TLS on connect (imaps/smtps) wherever a provider offers it: a client that
+// negotiates upward can be stripped back down by whatever is between it and the
+// server. iCloud and Outlook take mail submission on 587 only, which is
+// STARTTLS — and there the transport requires the upgrade (`ssl-reqd`), so a
+// stripped session fails instead of sending the password in clear.
 var PRESETS = [
   {
     id: "gmail",
@@ -233,7 +236,11 @@ function smtpUrl(settings) {
   // `insecure` was judged against the IMAP host, and SMTP may be elsewhere: a
   // local IMAP bridge beside a remote SMTP server would otherwise send the
   // password to it in plain text.
-  var scheme = values.insecure && isLoopback(values.smtpHost) ? "smtp" : "smtps"
+  var plain = values.insecure && isLoopback(values.smtpHost)
+  // 587 is submission with STARTTLS: smtps:// there expects TLS before the
+  // greeting and the server is waiting for EHLO, so every send failed. smtp://
+  // is the upgrade, and mail-transport.sh makes it mandatory.
+  var scheme = plain || values.smtpPort === STARTTLS_SMTP_PORT ? "smtp" : "smtps"
   return scheme + "://" + values.smtpHost + ":" + values.smtpPort
 }
 
