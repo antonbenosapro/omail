@@ -173,6 +173,9 @@ Item {
   // offer, so the reader says nothing.
   property int selectedRemoteImages: 0
   property bool selectedTooHeavy: false
+  // Only the beginning of the sender's markup was read: past Html.js's parse
+  // budget the rest is not looked at, and the reader says so.
+  property bool selectedTruncated: false
   property var selectedAttachments: []
   // The meeting this message carries, if it carries one. Null for nearly every
   // message, which is what makes the card cost nothing to have.
@@ -901,6 +904,7 @@ Item {
     selectedBlockedImages = ready.blockedImages
     selectedRemoteImages = ready.remoteImages
     selectedTooHeavy = ready.tooHeavy
+    selectedTruncated = ready.truncated
     return ready
   }
 
@@ -1031,6 +1035,7 @@ Item {
     selectedBlockedImages = 0
     selectedRemoteImages = 0
     selectedTooHeavy = false
+    selectedTruncated = false
     selectedAttachments = []
     selectedInvite = null
     selectedUnsubscribe = null

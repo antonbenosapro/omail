@@ -61,6 +61,12 @@ Item {
   readonly property bool tooHeavy: !!service && service.selectedTooHeavy
     && !root.forceRichAnyway
   readonly property bool htmlAvailable: rawHtml !== "" && !root.forcePlainText && !root.tooHeavy
+  // Less than the whole message is on screen: the markup ran past what one
+  // parse reads, or the text past what one layout draws. A message that ships
+  // its own text/plain part is not cut by its markup's budget.
+  readonly property bool bodyCut: !!service
+    && ((service.selectedTruncated && (root.htmlAvailable || root.bodySource === "html"))
+      || (!root.htmlAvailable && Html.isTextCut(service.selectedBody.text)))
 
   // Empty for everything that is not a mailing list. The label carries its own
   // trailing "..." when the only way off this list is a page in a browser,
@@ -272,6 +278,16 @@ Item {
       accentColor: root.accentColor
       panelFontFamily: root.panelFontFamily
       onActivated: root.forceRichAnyway = true
+    }
+
+    ReaderNotice {
+      width: parent.width
+      visible: !!root.summary && root.bodyCut
+      text: "Showing the beginning: this message is too long to show in full"
+      textColor: root.textColor
+      dimColor: root.dimColor
+      accentColor: root.accentColor
+      panelFontFamily: root.panelFontFamily
     }
 
     // Under the heavy-document notice when both are up: one says why the

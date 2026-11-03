@@ -88,7 +88,7 @@ const html = load("message/Html.js")
 // draws the whole desktop. Past the ceiling an element keeps its content, it
 // just stops adding a level to hold it.
 {
-  const deepest = "<div>".repeat(20000) + "<img src=\"http://127.0.0.1/x.png\">text"
+  const deepest = "<div>".repeat(10000) + "<img src=\"http://127.0.0.1/x.png\">text"
   const out = html.sanitize(deepest, { allowRemoteImages: true })
   assert.ok(out.html.indexOf("127.0.0.1") < 0, "the ceiling is not a way past the image policy")
   assert.ok(out.html.indexOf("text") > 0, "the content is still there")
@@ -792,6 +792,63 @@ assert.strictEqual(html.imageSourceKind("data:image/png;base64," + "A".repeat(3 
   within("a style value of spaces", () => html.sanitize("<p style=\"color:red" + " ".repeat(size) + "x\">y</p>"))
   within("a paragraph of no-break spaces", () => html.readPlainText("<p>" + "\u00a0".repeat(size) + "x</p>"))
   within("a source padded with spaces", () => html.imageSourceKind(" ".repeat(size) + "x "))
+}
+
+// The parse is bounded before anything measures it. Each of these is far past
+// any real message and took seconds to be read in full on the thread that
+// draws the desktop, only for the reader to then decide not to draw it. Now
+// the beginning is read, and the result says it is only the beginning.
+{
+  const quick = (label, source) => {
+    const started = Date.now()
+    const out = html.sanitize(source, { withPlainText: true })
+    const spent = Date.now() - started
+    assert.ok(spent < 1000, label + " took " + spent + "ms")
+    return out
+  }
+  const mb = 8 * 1024 * 1024
+  assert.ok(quick("a million elements", "<b>x</b>".repeat(mb / 8)).truncated)
+  assert.ok(quick("megabytes of one paragraph", "<p>" + "word ".repeat(mb / 5) + "</p>").truncated)
+  assert.ok(quick("one tag of attributes", "<p " + "a=1 ".repeat(mb / 4) + ">x</p>").truncated)
+  assert.ok(quick("one tag name", "<p" + "x".repeat(mb) + ">").truncated)
+  const distinct = []
+  for (let i = 0; i < 500000; i++) distinct.push("a" + i + "=1")
+  assert.ok(quick("distinct attribute names", "<p " + distinct.join(" ") + ">x</p>").truncated)
+
+  const cut = html.sanitize("<p>first</p>" + "<b>x</b>".repeat(html.MAX_PARSE_TAGS))
+  assert.ok(cut.html.indexOf("first") >= 0, "the beginning is what is kept")
+  assert.strictEqual(html.sanitize("<p>an ordinary message</p>").truncated, false)
+
+  // A quoted value is passed in one step and is not markup to be stepped over,
+  // which is what lets an inline image through the budget.
+  const inline = html.sanitize("<img src=\"data:image/png;base64," + "A".repeat(1536 * 1024) + "\"><p>after</p>")
+  assert.strictEqual(inline.truncated, false)
+  assert.ok(inline.html.indexOf("after") > 0)
+}
+
+// Past the attribute ceiling an attribute is dropped, and dropped means Qt
+// never sees it: a source hidden behind enough padding is not a way past the
+// image policy.
+{
+  const padding = []
+  for (let i = 0; i < html.MAX_ATTRIBUTES; i++) padding.push("data-" + i + "=x")
+  const out = html.sanitize("<img " + padding.join(" ") + " src=\"http://127.0.0.1/x.png\">",
+    { allowRemoteImages: true })
+  assert.ok(out.html.indexOf("127.0.0.1") < 0)
+  assert.ok(out.html.indexOf("data-" + (html.MAX_ATTRIBUTES - 1)) > 0, "the ones before it are kept")
+}
+
+// What the reader lays out as text stops at MAX_PLAIN_TEXT, and never on half
+// of a character.
+{
+  const long = "a".repeat(html.MAX_PLAIN_TEXT - 1) + "😀" + "b"
+  assert.strictEqual(html.isTextCut(long), true)
+  assert.strictEqual(html.displayedText(long).length, html.MAX_PLAIN_TEXT - 1)
+  assert.strictEqual(html.isTextCut("short"), false)
+  assert.strictEqual(html.displayedText("short"), "short")
+  const started = Date.now()
+  html.plainTextDocument("line\n".repeat(2 * 1024 * 1024), {}, false)
+  assert.ok(Date.now() - started < 1000, "a 10 MB text body is not laid out in full")
 }
 
 console.log("test_html.js ok")
