@@ -325,108 +325,96 @@ function path(home) {
 // The refresh token is keyed by account as well as by client, because two
 // accounts may share one client: keyed by client alone, the second sign-in
 // would overwrite the first account's token and silently sign it out.
-// The service name has been renamed twice, so the fallback is a list rather
-// than one name: an entry written under any of them is still this plugin's.
-// Newest first, so the most likely old layout is asked about first, and a
-// machine that skipped a release is still found by the one after it.
+//
+// The account is named by its `keyId` (see Accounts.makeAccount), never by its
+// address. These attributes are arguments to secret-tool, and every local
+// account can read a process's arguments in /proc — so an attribute is never
+// anything about the user. Entries written before this, keyed by the address
+// and under any of the plugin's old service names, are re-keyed in place by
+// scripts/keyring-migrate.sh, which takes the address on stdin.
 var KEYRING_SERVICE = "omail"
-var RENAMED_KEYRING_SERVICES = ["omamail", "omarchy-gmail"]
 var KEYRING_KIND = "refresh-token"
+var IMAP_KEYRING_KIND = "imap-password"
+var KEY_ID = /^[0-9a-f]{32}$/
 
-// An account that has not learned its address yet has no name to key on, and
-// there is no honest substitute for one. secret-tool reads an empty attribute
-// value as "match anything", so a blank name is a wildcard over every entry
-// this plugin ever wrote; a literal stand-in is worse, because every unnamed
-// account shares it and each one can then read and overwrite what the last
-// one left there. So an unnamed account is not addressable in the keyring at
-// all, and every function below hands back an empty attribute list for one.
-// The caller's answer is to wait for the name, not to invent one.
+function isKeyId(value) {
+  return KEY_ID.test(String(value || ""))
+}
+
+// An account that has not learned its address yet still waits for it before
+// a secret is written — a sign-in that turns out to be a mailbox already
+// configured is then caught before anything is stored twice.
 function isUnnamedAccount(accountId) {
   return accountKey(accountId) === ""
 }
 
 // Alternating name, value — the form secret-tool takes on its command line.
-// An entry with no client id is not addressable either, and asking for one
-// would be a wildcard lookup over every token this plugin ever stored.
-function keyringAttributes(clientId, accountId) {
+// Empty when there is no client or no key: secret-tool reads a missing
+// attribute as "anything", so a lookup without one would match every token
+// this plugin ever stored.
+function keyringAttributes(clientId, keyId) {
   var id = trimmed(clientId)
-  var account = accountKey(accountId)
-  if (!id || !account) return []
+  if (!id || !isKeyId(keyId)) return []
   return [
     "service", KEYRING_SERVICE,
     "kind", KEYRING_KIND,
     "client-id", id,
-    "account", account
+    "account", String(keyId)
   ]
-}
-
-// What a single-account install stored before accounts existed. Such an entry
-// has no "account" attribute, so the lookup above never matches it: it is read
-// once with these and written back with the ones above, rather than leaving
-// the user staring at a sign-in button that used to say they were signed in.
-function legacyKeyringAttributes(clientId) {
-  var id = trimmed(clientId)
-  if (!id) return []
-  return ["service", KEYRING_SERVICE, "kind", KEYRING_KIND, "client-id", id]
 }
 
 // An IMAP account has no OAuth client to key on — it has a server and a
 // password. The attributes therefore key on the account alone, under a kind of
 // their own so an IMAP password and a Gmail refresh token for the same address
 // are two entries rather than one overwriting the other.
-var IMAP_KEYRING_KIND = "imap-password"
+function imapKeyringAttributes(keyId) {
+  if (!isKeyId(keyId)) return []
+  return ["service", KEYRING_SERVICE, "kind", IMAP_KEYRING_KIND, "account", String(keyId)]
+}
 
-function imapKeyringAttributes(accountId) {
-  var id = accountKey(accountId)
-  if (!id) return []
-  return ["service", KEYRING_SERVICE, "kind", IMAP_KEYRING_KIND, "account", id]
+// The one line keyring-migrate.sh reads on stdin. The address is a field here
+// and never an argument, which is the point of the script.
+//
+// `adopt` lets this account claim an entry from before accounts existed — keyed
+// by client alone — which only the first Gmail mailbox may do: anyone else
+// adopting it would restore the first mailbox's session as their own.
+//
+// A field that is empty, or that holds anything the line format or GVariant
+// quoting could trip on, goes as "-": an address with a quote in it simply
+// finds no old entry, and the user signs in once more.
+var PLAIN_FIELD = /^[^\s'"\\]+$/
+
+function lineField(value) {
+  var text = trimmed(value)
+  return PLAIN_FIELD.test(text) ? text : "-"
+}
+
+function migrationRequest(kind, keyId, accountId, clientId, adopt) {
+  if (!isKeyId(keyId)) return ""
+  if (kind !== KEYRING_KIND && kind !== IMAP_KEYRING_KIND) return ""
+  return ["adopt", kind, keyId, lineField(accountKey(accountId)),
+    lineField(clientId), adopt === true ? "1" : "0"].join(" ") + "\n"
+}
+
+// Removes whatever old-format entries are still keyed by this address — on
+// sign-out and on removing the account, so nothing named after the user is
+// left behind in the keyring either.
+function forgetRequest(kind, accountId, clientId) {
+  var address = lineField(accountKey(accountId))
+  if (address === "-") return ""
+  if (kind !== KEYRING_KIND && kind !== IMAP_KEYRING_KIND) return ""
+  return ["forget", kind, address, lineField(clientId)].join(" ") + "\n"
 }
 
 // What a sign-in does with the secret it has just proved good. An account that
 // already has a name stores it; one that does not holds it in memory and waits
-// for the name, because there is no key to write it under yet and inventing
-// one is what this design refuses. Returned as a word rather than a boolean so
-// the two callers read the same at the call site as they do here.
+// for the name. Returned as a word rather than a boolean so the two callers
+// read the same at the call site as they do here.
 var STORE_NOW = "store"
 var STORE_WHEN_NAMED = "wait"
 
 function secretDisposition(accountId) {
   return isUnnamedAccount(accountId) ? STORE_WHEN_NAMED : STORE_NOW
-}
-
-// Entries from before a rename are read once and rewritten under the current
-// service name, so an upgrade keeps the user signed in instead of presenting a
-// sign-in button to somebody who never signed out.
-//
-// `which` selects the old name, newest first, and is out of range for anything
-// past the end of the list — so a caller can walk it by counting up and stop
-// when it gets nothing back, without knowing how many names there have been.
-function renamedServiceCount() {
-  return RENAMED_KEYRING_SERVICES.length
-}
-
-function underRenamedService(attributes, which) {
-  var index = which === undefined ? 0 : which
-  if (!attributes.length) return []
-  if (index < 0 || index >= RENAMED_KEYRING_SERVICES.length) return []
-  attributes[1] = RENAMED_KEYRING_SERVICES[index]
-  return attributes
-}
-
-function renamedKeyringAttributes(clientId, accountId, which) {
-  return underRenamedService(keyringAttributes(clientId, accountId), which)
-}
-
-function renamedLegacyKeyringAttributes(clientId, which) {
-  return underRenamedService(legacyKeyringAttributes(clientId), which)
-}
-
-// The same fallback for an IMAP password. It was missing, and an IMAP account
-// is exactly the one with nothing to fall back on: a refresh token can be
-// obtained again from a browser, while the password is the user's own and
-// re-entering it is the cost of the rename.
-function renamedImapKeyringAttributes(accountId, which) {
-  return underRenamedService(imapKeyringAttributes(accountId), which)
 }
 
 // Shown under the client id in the panel so a user with several Cloud projects

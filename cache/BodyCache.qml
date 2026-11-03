@@ -27,11 +27,12 @@ Item {
   readonly property string cacheHome: Quickshell.env("XDG_CACHE_HOME")
     || (Quickshell.env("HOME") + "/.cache")
 
-  // One directory per account, named the way the account's store file is, so
-  // the two can be matched by eye and neither can leave the cache directory.
-  property string accountId: ""
+  // The account's opaque name. The directory and file names below are
+  // arguments to the cache script and to mv and touch, where the address must
+  // not be, so both are derived from this and never from the address.
+  property string keyId: ""
   readonly property string directory: cacheHome + "/omail/bodies/"
-    + Cache.bodyDirName(accountId)
+    + Cache.bodyDirName(keyId)
 
   readonly property string script: pluginDir + "/scripts/body-cache.sh"
 
@@ -42,7 +43,7 @@ Item {
   property string pendingId: ""
 
   function read(id, callback) {
-    var name = Cache.bodyFileName(id)
+    var name = Cache.bodyFileName(keyId, id)
     if (name === "") {
       if (typeof callback === "function") callback(null)
       return
@@ -65,7 +66,7 @@ Item {
   // A hit is a use, and mtime is what eviction sorts on, so the file has to be
   // stamped. Detached because nothing waits on the result.
   function touch(id) {
-    var name = Cache.bodyFileName(id)
+    var name = Cache.bodyFileName(keyId, id)
     if (name === "") return
     Quickshell.execDetached([script, "touch", directory, name])
   }
@@ -99,7 +100,7 @@ Item {
   // Named "put" rather than "write" so it cannot be confused — by a reader or
   // by QML's scope resolution — with the Process.write() below.
   function put(id, body) {
-    var name = Cache.bodyFileName(id)
+    var name = Cache.bodyFileName(keyId, id)
     if (name === "") return
     var payload = Cache.serializeBody(body, String(id || "").trim())
     if (lastWritten[name] === payload) return
@@ -128,12 +129,15 @@ Item {
   function clear() {
     writeQueue = []
     lastWritten = ({})
+    // Without a key there is no directory of this account's, and the path
+    // would be the parent of every account's: that is never what to clear.
+    if (Cache.bodyDirName(keyId) === "") return
     Quickshell.execDetached([script, "clear", directory])
   }
 
   // The account this cache belongs to changed, so the directory did: what was
   // written under the old one says nothing about what is on disk under the new.
-  onAccountIdChanged: lastWritten = ({})
+  onKeyIdChanged: lastWritten = ({})
 
   Process {
     id: writer

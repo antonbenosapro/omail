@@ -84,8 +84,11 @@ function authorizationUrl(options) {
     // Without this Google returns a refresh token only on the very first
     // consent, so a user who reinstalls the plugin would be stuck with an
     // access token that expires in an hour and never comes back.
-    prompt: "consent",
-    login_hint: settings.loginHint
+    prompt: "consent"
+    // No login_hint. This URL is an argument to xdg-open and then to the
+    // browser, which keeps it on its command line for as long as it runs, and
+    // every local account can read that in /proc. The hint would have put the
+    // address there; without it Google shows its account chooser.
   })
 }
 

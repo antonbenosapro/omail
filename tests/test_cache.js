@@ -253,18 +253,25 @@ assert.strictEqual(reloaded.version, cache.VERSION)
 // Bodies are files now: one per message, under one directory per account. The
 // name has to survive a hostile message id without leaving that directory.
 {
-  // Hashes: these names are arguments to body-cache.sh, mv, touch and rm, which
-  // every local account can read in /proc, so they carry neither the address
-  // nor the folder a message is in.
-  assert.ok(/^account-[0-9a-f]{32}$/.test(cache.bodyDirName("huacnlee@gmail.com")))
-  assert.ok(cache.bodyDirName("huacnlee@gmail.com").indexOf("huacnlee") < 0)
-  assert.ok(/^[0-9a-f]{32}\.json$/.test(cache.bodyFileName("17:Clients/Acme")))
-  assert.notStrictEqual(cache.bodyFileName("17:Clients/Acme"), cache.bodyFileName("17:INBOX"))
+  // These names are arguments to body-cache.sh, mv, touch and rm, which every
+  // local account can read in /proc, so they carry neither the address nor
+  // the folder a message is in. The directory is the account's random keyId,
+  // and a file is a hash keyed by it — a plain hash of "17:INBOX" would be a
+  // guess away from its input.
+  var key = "0123456789abcdef0123456789abcd01"
+  assert.strictEqual(cache.bodyDirName(key), "account-" + key)
+  assert.strictEqual(cache.bodyDirName(""), "", "no key, no directory: never the parent of all of them")
+  assert.strictEqual(cache.bodyDirName("huacnlee@gmail.com"), "", "and never an address")
+  assert.ok(/^[0-9a-f]{32}\.json$/.test(cache.bodyFileName(key, "17:Clients/Acme")))
+  assert.notStrictEqual(cache.bodyFileName(key, "17:Clients/Acme"), cache.bodyFileName(key, "17:INBOX"))
+  assert.notStrictEqual(cache.bodyFileName(key, "17:INBOX"),
+    cache.bodyFileName("0123456789abcdef0123456789abcd02", "17:INBOX"), "keyed by the account")
+  assert.notStrictEqual(cache.bodyFileName(key, "17:INBOX").substring(0, 32),
+    cache.sha256Hex("17:INBOX").substring(0, 32), "not a plain hash of the id")
+  assert.strictEqual(cache.bodyFileName("", "17:INBOX"), "")
+  assert.strictEqual(cache.bodyFileName(key, ""), "", "an id-less message is never written")
   assert.strictEqual(cache.sha256Hex("abc"),
     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-  assert.strictEqual(cache.bodyFileName(""), "", "an id-less message is never written")
-  var hostile = cache.bodyFileName("../../etc/passwd")
-  assert.ok(hostile.indexOf("/") < 0, "a traversal cannot survive the escape")
 
   var body = {
     text: "t", source: "plain", html: "<p>x</p>",

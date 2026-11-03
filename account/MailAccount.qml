@@ -39,6 +39,9 @@ Item {
   // account still counts its unread mail; it just does not fetch lists or
   // bodies nobody can see.
   property string accountId: ""
+  // The account's opaque name for the keyring and the body cache, which are
+  // reached through process arguments where the address must not be.
+  property string keyId: ""
 
   // Which mail service this mailbox is. Everything provider-specific hangs off
   // this one string: which pair of objects gets built at the bottom of the
@@ -1782,9 +1785,9 @@ Item {
     AuthManager {
       pluginDir: root.pluginDir
       accountId: root.accountId
+      keyId: root.keyId
       mayAdoptLegacyToken: root.mayAdoptLegacyToken
       oauthPort: root.oauthPort
-      loginHint: root.accountEmail
 
       onLoginSucceeded: {
         root.lastError = lastError
@@ -1802,6 +1805,7 @@ Item {
     ImapAuth {
       pluginDir: root.pluginDir
       accountId: root.accountId
+      keyId: root.keyId
       // Normalised here rather than trusted from the file: a host that arrived
       // in a hand-edited accounts.json has to pass the same check as one the
       // user typed into the form.
@@ -1845,7 +1849,7 @@ Item {
   BodyCache {
     id: bodyCache
     pluginDir: root.pluginDir
-    accountId: root.accountId
+    keyId: root.keyId
   }
 
   // The loader has to have built the manager first, which it has not when this

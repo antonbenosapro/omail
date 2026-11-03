@@ -29,6 +29,9 @@ Item {
   // address from the moment it is created — the user typed it — so this is set
   // before anything is asked of the server rather than after a profile read.
   property string accountId: ""
+  // What the keyring entry is named by. Never the address: secret-tool takes
+  // attributes as arguments, and those are readable by every local account.
+  property string keyId: ""
 
   // Server settings, pushed down from the account entry. Held as the validated
   // shape rather than as whatever was in the file.
@@ -114,56 +117,45 @@ Item {
     startSecretLookup()
   }
 
-  // The service name the keyring entry was written under has been renamed, so
-  // the lookup falls back through the old names exactly as the Gmail manager's
-  // does. Without this an IMAP account is the one that loses its credential to
-  // a rename: a refresh token can be obtained again from a browser, while this
-  // is the user's own password and only they can type it back in.
-  //
-  // Stage 0 is the current service name; each stage after it is one old name,
-  // newest first.
-  property int secretLookupStage: 0
-  readonly property int lastSecretLookupStage: Credentials.renamedServiceCount()
-  property var renamedAttributesToClear: []
-
-  function secretLookupAttributes(stage) {
-    return stage <= 0
-      ? Credentials.imapKeyringAttributes(accountId)
-      : Credentials.renamedImapKeyringAttributes(accountId, stage - 1)
-  }
+  // Whether this session has already asked keyring-migrate.sh. An entry from
+  // before accounts were named by a keyId is keyed by the address, under this
+  // service name or an old one; the script re-keys it in place, taking the
+  // address on stdin, and the lookup runs once more. Without it an IMAP
+  // account is the one that loses its credential: a refresh token can be had
+  // again from a browser, while this is the user's own password.
+  property bool migrationTried: false
 
   function startSecretLookup() {
-    secretLookupStage = -1
-    renamedAttributesToClear = []
-    startNextSecretLookup()
+    lookupHandled = false
+    var attributes = Credentials.imapKeyringAttributes(keyId)
+    // No key, no entry: a lookup with no attributes would match every entry
+    // this plugin ever wrote.
+    if (attributes.length === 0) {
+      handleSecretLookup("")
+      return
+    }
+    secretLookup.command = ["secret-tool", "lookup"].concat(attributes)
+    secretLookup.running = true
   }
 
-  function startNextSecretLookup() {
-    lookupHandled = false
-    while (secretLookupStage < lastSecretLookupStage) {
-      secretLookupStage++
-      var attributes = secretLookupAttributes(secretLookupStage)
-      // An account with no address is not addressable under any service name,
-      // so every stage hands back nothing and the walk ends without asking
-      // secret-tool anything — a lookup with no attributes would match every
-      // entry this plugin ever wrote.
-      if (attributes.length) {
-        secretLookup.command = ["secret-tool", "lookup"].concat(attributes)
-        secretLookup.running = true
-        return
-      }
-    }
-    handleSecretLookup("")
+  function startMigration() {
+    if (keyringMigrate.running) return false
+    migrationTried = true
+    var request = Credentials.migrationRequest(Credentials.IMAP_KEYRING_KIND, keyId,
+      accountId, "", false)
+    if (request === "") return false
+    keyringMigrate.request = request
+    keyringMigrate.adopting = true
+    keyringMigrate.command = [pluginDir + "/scripts/keyring-migrate.sh"]
+    keyringMigrate.running = true
+    return true
   }
 
   function handleSecretLookup(line) {
     if (lookupHandled) return
     lookupHandled = true
     var value = String(line || "")
-    if (value === "" && secretLookupStage < lastSecretLookupStage) {
-      startNextSecretLookup()
-      return
-    }
+    if (value === "" && !migrationTried && startMigration()) return
     passwordChecked = true
     if (value === "") {
       finishWaiters("", "No password saved for this mailbox. Sign in again")
@@ -173,13 +165,6 @@ Item {
       return
     }
     password = value
-    // Found under an old service name: rewrite it under the current one and
-    // drop the old entry, so the fallback runs once per machine rather than on
-    // every start.
-    if (secretLookupStage > 0) {
-      renamedAttributesToClear = secretLookupAttributes(secretLookupStage)
-      storePassword()
-    }
     finishWaiters(settings.username + ":" + password, "")
     loginSucceeded()
   }
@@ -232,7 +217,7 @@ Item {
   }
 
   function storePassword() {
-    var attributes = Credentials.imapKeyringAttributes(accountId)
+    var attributes = Credentials.imapKeyringAttributes(keyId)
     if (attributes.length === 0 || password === "") return
     keyringWriteSecret = password
     keyringStore.command = [pluginDir + "/scripts/keyring-store.sh"].concat(attributes)
@@ -245,10 +230,19 @@ Item {
     password = ""
     pendingPassword = ""
     passwordChecked = true
-    var attributes = Credentials.imapKeyringAttributes(accountId)
+    var attributes = Credentials.imapKeyringAttributes(keyId)
     if (attributes.length > 0) {
       keyringClear.command = ["secret-tool", "clear"].concat(attributes)
       keyringClear.running = true
+    }
+    // And anything still keyed by the address, so signing out leaves nothing
+    // named after the user behind.
+    var forget = Credentials.forgetRequest(Credentials.IMAP_KEYRING_KIND, accountId, "")
+    if (forget !== "" && !keyringMigrate.running) {
+      keyringMigrate.request = forget
+      keyringMigrate.adopting = false
+      keyringMigrate.command = [pluginDir + "/scripts/keyring-migrate.sh"]
+      keyringMigrate.running = true
     }
     loggedOut()
   }
@@ -344,13 +338,6 @@ Item {
       if (exitCode !== 0)
         root.lastError = "Signed in, but the password could not be saved. "
           + "You may need to enter it again after a restart"
-      // The old entry goes only after the new one is safely written. A clear
-      // that ran first would leave a failed write with no password anywhere.
-      if (exitCode === 0 && root.renamedAttributesToClear.length && !keyringClear.running) {
-        keyringClear.command = ["secret-tool", "clear"].concat(root.renamedAttributesToClear)
-        root.renamedAttributesToClear = []
-        keyringClear.running = true
-      }
     }
   }
 
@@ -358,5 +345,27 @@ Item {
     id: keyringClear
     stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector { waitForEnd: true }
+  }
+
+  // keyring-migrate.sh: the address goes in on stdin, never as an argument.
+  Process {
+    id: keyringMigrate
+    property string request: ""
+    // An adopt has a lookup waiting on it; a forget does not.
+    property bool adopting: false
+    stdinEnabled: true
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onStarted: {
+      write(request)
+      request = ""
+    }
+    onExited: function(exitCode) {
+      if (!adopting) return
+      adopting = false
+      // Whatever it did, the lookup runs again — and finds the entry if it was
+      // re-keyed, or nothing, which ends the walk.
+      root.startSecretLookup()
+    }
   }
 }

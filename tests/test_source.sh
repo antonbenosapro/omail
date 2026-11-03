@@ -424,4 +424,17 @@ for client in providers/GmailApiClient.qml providers/ImapClient.qml; do
     || fail "$client must implement the provider-neutral sender-list operation"
 done
 
+# The keyring is named by the account's keyId and never its address: these
+# attributes are secret-tool's arguments, readable by every local account in
+# /proc. A builder handed the account id is the address coming back.
+if grep -nE '(keyringAttributes|imapKeyringAttributes)\([^)]*accountId' providers/*.qml account/*.qml Service.qml; then
+  fail "keyring attributes must be built from keyId, never accountId"
+fi
+if grep -nE 'loginHint|login_hint *:' providers/*.qml providers/*.js account/*.qml; then
+  fail "the sign-in URL is on the browser's command line; it carries no login hint"
+fi
+for script in scripts/*.sh; do
+  [ -x "$script" ] || fail "$script is run directly by the plugin and must be executable"
+done
+
 printf 'test_source.sh ok\n'
