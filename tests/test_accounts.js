@@ -639,4 +639,42 @@ assert.strictEqual(accounts.count(accounts.discardDraftAt(pendingList, 0)), 3)
   assert.strictEqual(accounts.active(legacy).clientId, "abc")
 }
 
+// Every account has a keyId: what the keyring entry and the body cache are
+// named by, because those names are process arguments and the address must
+// not be one. Random, made once, kept for as long as the account is.
+{
+  const KEY = /^[0-9a-f]{32}$/
+  const old = JSON.stringify({ version: 1, activeId: "a@example.com",
+    accounts: [{ email: "a@example.com" }, { email: "b@example.com", provider: "imap" }] })
+  const loaded = accounts.load(old)
+  assert.ok(loaded.accounts.every(entry => KEY.test(entry.keyId)), "an account from before keys gets one")
+  assert.notStrictEqual(loaded.accounts[0].keyId, loaded.accounts[1].keyId)
+  assert.ok(loaded.accounts[0].keyId.indexOf("example") < 0)
+  assert.strictEqual(loaded.keysMade, true, "and the loader is told to write it down")
+
+  // Written, the keys come back exactly: a different key on the next start
+  // would orphan every keyring entry named by the last one.
+  const again = accounts.load(accounts.serialize(loaded))
+  deepEqual(again.accounts.map(entry => entry.keyId), loaded.accounts.map(entry => entry.keyId))
+  assert.notStrictEqual(again.keysMade, true, "nothing new to save the second time")
+  assert.strictEqual(accounts.serialize(again), accounts.serialize(loaded))
+
+  // Every rebuild carries it: adding, recolouring, renaming.
+  const key = loaded.accounts[1].keyId
+  let list = accounts.setColorAt(loaded, 1, "#ff0000")
+  assert.strictEqual(list.accounts[1].keyId, key)
+  list = accounts.setMergedAt(list, 1, false)
+  assert.strictEqual(list.accounts[1].keyId, key)
+  const renamed = {}
+  for (const name in list.accounts[1]) renamed[name] = list.accounts[1][name]
+  renamed.label = "Work"
+  list = accounts.add(list, renamed)
+  assert.strictEqual(accounts.find(list, list.accounts[1].id).keyId, key)
+
+  // A hand-edited key that is not one is replaced, not trusted.
+  const edited = accounts.load(JSON.stringify({ version: 1, accounts: [{ email: "c@example.com", keyId: "c@example.com" }] }))
+  assert.ok(KEY.test(edited.accounts[0].keyId))
+  assert.strictEqual(edited.keysMade, true)
+}
+
 console.log("test_accounts.js ok")

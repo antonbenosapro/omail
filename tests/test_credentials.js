@@ -127,123 +127,63 @@ credentials.BUILTIN.clientSecret = ""
 // A Cloud OAuth client belongs to a project, not to a mailbox, so two accounts
 // may legitimately run on one. Keyed by client id alone, the second sign-in
 // would overwrite the first account's refresh token and silently sign it out.
+//
+// And the account is named by its keyId, never its address: these attributes
+// are secret-tool's arguments, and every local account can read those in /proc.
 
 const sharedClient = "1234-abc.apps.googleusercontent.com"
-const first = credentials.keyringAttributes(sharedClient, "one@gmail.com")
-const second = credentials.keyringAttributes(sharedClient, "two@gmail.com")
+const keyOne = "0123456789abcdef0123456789abcd01"
+const keyTwo = "0123456789abcdef0123456789abcd02"
+const first = credentials.keyringAttributes(sharedClient, keyOne)
+const second = credentials.keyringAttributes(sharedClient, keyTwo)
 
 deepEqual(first, [
   "service", "omail",
   "kind", "refresh-token",
   "client-id", sharedClient,
-  "account", "one@gmail.com"
+  "account", keyOne
 ])
 assert.notStrictEqual(JSON.stringify(first), JSON.stringify(second),
   "two accounts on one client must not share a keyring entry")
-
-// The lookup runs on every session restore; an attribute set that drifts
-// between calls would look exactly like a signed-out account.
-deepEqual(credentials.keyringAttributes(sharedClient, "one@gmail.com"), first)
-deepEqual(credentials.keyringAttributes(sharedClient, "  One@Gmail.com  "), first,
-  "the same mailbox typed differently is the same account")
-
-// secret-tool reads an empty attribute value as a wildcard, which would match
-// some other account's token, so no value may ever be blank.
-const attributeSets = [
-  first,
-  second,
-  credentials.legacyKeyringAttributes(sharedClient)
-]
-for (const attributes of attributeSets) {
-  assert.strictEqual(attributes.length % 2, 0, "attributes are name, value pairs")
-  assert.ok(attributes.length > 0)
-  for (const value of attributes) {
-    assert.strictEqual(typeof value, "string")
-    assert.ok(value.length > 0, "an empty attribute value is a secret-tool wildcard")
-  }
+for (const attributes of [first, second]) {
+  assert.ok(attributes.join(" ").indexOf("@") < 0, "no address is ever an attribute")
 }
 
-// An account with no address is not addressable at all. It used to key on a
-// literal "default", which every unnamed account shared: whoever was added
-// next could read the last one's token out of it and write over it. There is
-// no safe stand-in for a name, so the answer is to hand back nothing and let
-// the caller wait for the real one.
-deepEqual(credentials.keyringAttributes(sharedClient, ""), [],
-  "an unnamed account has no keyring entry")
-deepEqual(credentials.keyringAttributes(sharedClient, "   "), [])
-deepEqual(credentials.keyringAttributes(sharedClient, null), [])
-deepEqual(credentials.renamedKeyringAttributes(sharedClient, ""), [],
-  "and none under the pre-rename service name either")
-for (const attributes of [first, second, credentials.legacyKeyringAttributes(sharedClient)]) {
-  assert.strictEqual(attributes.indexOf("default"), -1,
-    "no shared placeholder account survives anywhere in the attributes")
+// No key, or not a key, is no entry: secret-tool reads a missing attribute as
+// "anything", so a lookup without one would match every token ever stored.
+for (const key of ["", null, "one@gmail.com", "0123", "0123456789ABCDEF0123456789ABCD01"]) {
+  deepEqual(credentials.keyringAttributes(sharedClient, key), [], "no entry for key " + key)
+  deepEqual(credentials.imapKeyringAttributes(key), [])
 }
+deepEqual(credentials.keyringAttributes("", keyOne), [], "nor without a client")
 
-// Without a client id there is nothing to look up, and an attribute-free
-// lookup would match every token the plugin ever stored.
-deepEqual(credentials.keyringAttributes("", "one@gmail.com"), [])
-deepEqual(credentials.legacyKeyringAttributes(""), [])
+// What keyring-migrate.sh is handed on stdin: the address is a field of a line
+// there, which is the one place it may go.
+assert.strictEqual(
+  credentials.migrationRequest(credentials.KEYRING_KIND, keyOne, " One@Gmail.com ", sharedClient, true),
+  "adopt refresh-token " + keyOne + " one@gmail.com " + sharedClient + " 1\n")
+assert.strictEqual(
+  credentials.migrationRequest(credentials.IMAP_KEYRING_KIND, keyTwo, "imap:jon@example.com", "", false),
+  "adopt imap-password " + keyTwo + " imap:jon@example.com - 0\n")
+// An unnamed account can still claim the pre-accounts token, by client alone.
+assert.strictEqual(
+  credentials.migrationRequest(credentials.KEYRING_KIND, keyOne, "", sharedClient, true),
+  "adopt refresh-token " + keyOne + " - " + sharedClient + " 1\n")
+// Anything that could break the line or the script's quoting finds nothing
+// rather than something else.
+assert.strictEqual(
+  credentials.migrationRequest(credentials.IMAP_KEYRING_KIND, keyOne, "o'brien@example.com", "", false),
+  "adopt imap-password " + keyOne + " - - 0\n")
+assert.strictEqual(
+  credentials.migrationRequest(credentials.IMAP_KEYRING_KIND, keyOne, "a@b.com\nforget x", "", false),
+  "adopt imap-password " + keyOne + " - - 0\n")
+assert.strictEqual(credentials.migrationRequest("password", keyOne, "a@b.com", "", false), "")
+assert.strictEqual(credentials.migrationRequest(credentials.KEYRING_KIND, "nope", "a@b.com", sharedClient, false), "")
 
-// The old single-account entries carry no "account" attribute, so the new
-// lookup cannot see them. They are read once with these and rewritten, rather
-// than leaving an already signed-in user at a sign-in button.
-deepEqual(credentials.legacyKeyringAttributes(sharedClient), [
-  "service", "omail",
-  "kind", "refresh-token",
-  "client-id", sharedClient
-])
-assert.strictEqual(credentials.legacyKeyringAttributes(sharedClient).indexOf("account"), -1)
-
-// The service name has been renamed twice, so the fallback is a list and the
-// index selects which old name to ask about — newest first, so a machine that
-// skipped a release is still found by the one after it.
-assert.strictEqual(credentials.renamedServiceCount(), 2,
-  "both previous service names are still searched")
-
-deepEqual(credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", 0), [
-  "service", "omamail",
-  "kind", "refresh-token",
-  "client-id", sharedClient,
-  "account", "one@gmail.com"
-])
-deepEqual(credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", 1), [
-  "service", "omarchy-gmail",
-  "kind", "refresh-token",
-  "client-id", sharedClient,
-  "account", "one@gmail.com"
-])
-deepEqual(credentials.renamedLegacyKeyringAttributes(sharedClient, 0), [
-  "service", "omamail",
-  "kind", "refresh-token",
-  "client-id", sharedClient
-])
-deepEqual(credentials.renamedLegacyKeyringAttributes(sharedClient, 1), [
-  "service", "omarchy-gmail",
-  "kind", "refresh-token",
-  "client-id", sharedClient
-])
-
-// Omitting the index asks about the most recent old name, so a caller that
-// does not know the list grew still gets a usable answer.
-deepEqual(credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com"),
-  credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", 0))
-
-// Past the end of the list there is no such name, and the walk has to stop
-// rather than fall back to a wildcard or to the current service name.
-for (const which of [credentials.renamedServiceCount(), 99, -1]) {
-  deepEqual(credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", which), [],
-    "there is no service name at index " + which)
-  deepEqual(credentials.renamedLegacyKeyringAttributes(sharedClient, which), [])
-  deepEqual(credentials.renamedImapKeyringAttributes("imap:jon@example.com", which), [])
-}
-
-// None of the old names may be the current one: a "fallback" that asked about
-// the service just written would loop, rewriting an entry over itself.
-for (let which = 0; which < credentials.renamedServiceCount(); which++) {
-  const renamed = credentials.renamedKeyringAttributes(sharedClient, "one@gmail.com", which)
-  assert.notStrictEqual(renamed[1], first[1],
-    "an old service name must differ from the current one")
-}
+assert.strictEqual(credentials.forgetRequest(credentials.KEYRING_KIND, "one@gmail.com", sharedClient),
+  "forget refresh-token one@gmail.com " + sharedClient + "\n")
+assert.strictEqual(credentials.forgetRequest(credentials.IMAP_KEYRING_KIND, "", ""), "",
+  "an account with no address has nothing keyed by one")
 
 // ------------------------------------------------------------ the store
 //
@@ -299,8 +239,8 @@ deepEqual(credentials.load(storedText, ""), credentials.empty())
 
 // Two accounts on one client each keep their own token.
 assert.notStrictEqual(
-  JSON.stringify(credentials.keyringAttributes(credentials.forAccount(store, "one@gmail.com").clientId, "one@gmail.com")),
-  JSON.stringify(credentials.keyringAttributes(credentials.forAccount(store, "two@gmail.com").clientId, "two@gmail.com")))
+  JSON.stringify(credentials.keyringAttributes(credentials.forAccount(store, "one@gmail.com").clientId, keyOne)),
+  JSON.stringify(credentials.keyringAttributes(credentials.forAccount(store, "two@gmail.com").clientId, keyTwo)))
 
 // Saving a client again for an account it already has must not shuffle the
 // panel's order.
@@ -351,11 +291,9 @@ deepEqual(credentials.accountIds(damaged), ["three@work.com"])
 
 // An IMAP account is added with an empty address and only learns its id from
 // the profile read that signing in makes possible. So there is a moment where
-// it has a password and no name. There is nowhere to put that password: the
-// keyring keys on the address, and the stand-in that used to fill in for a
-// missing one was shared by every unnamed account, so each new mailbox could
-// read and overwrite what the last one left there. The refusal is the design;
-// the caller holds the secret in memory until the name arrives.
+// it has a password and no name. The caller holds the secret in memory until
+// the name arrives, so a sign-in that turns out to be a mailbox already set up
+// is caught before anything is written twice.
 {
   assert.strictEqual(credentials.isUnnamedAccount(""), true,
     "an account with no address yet is unnamed")
@@ -369,63 +307,16 @@ deepEqual(credentials.accountIds(damaged), ["three@work.com"])
   assert.strictEqual(credentials.isUnnamedAccount("default"), false,
     "\"default\" is no longer a reserved stand-in for a missing name")
 
-  // An unnamed account is refused a key rather than given a shared one.
-  deepEqual(credentials.imapKeyringAttributes(""), [],
-    "an unnamed account gets no IMAP keyring entry")
-  deepEqual(credentials.imapKeyringAttributes("  "), [])
-  deepEqual(credentials.imapKeyringAttributes(null), [])
-  deepEqual(credentials.imapKeyringAttributes("imap:jon@example.com"), [
-    "service", "omail",
-    "kind", "imap-password",
-    "account", "imap:jon@example.com"
-  ], "a named account keys on its own address")
-  deepEqual(credentials.imapKeyringAttributes("  IMAP:Jon@Example.com "),
-    credentials.imapKeyringAttributes("imap:jon@example.com"),
-    "the same mailbox typed differently is the same account")
-
-  // An IMAP password and a Gmail refresh token for one address stay two
+  // An IMAP password and a Gmail refresh token for one account stay two
   // entries, because the kind differs.
   assert.notStrictEqual(
-    JSON.stringify(credentials.imapKeyringAttributes("jon@example.com")),
-    JSON.stringify(credentials.keyringAttributes("1234-abc.apps.googleusercontent.com",
-      "jon@example.com")))
-
-  // An IMAP password gets the same fallback the refresh token has. It used to
-  // get none, which made an IMAP account the one a rename actually cost
-  // something: a refresh token can be fetched again from a browser, while the
-  // password is the user's own and only they can type it back in.
-  deepEqual(credentials.renamedImapKeyringAttributes("imap:jon@example.com", 0), [
-    "service", "omamail",
+    JSON.stringify(credentials.imapKeyringAttributes(keyOne)),
+    JSON.stringify(credentials.keyringAttributes(sharedClient, keyOne)))
+  deepEqual(credentials.imapKeyringAttributes(keyOne), [
+    "service", "omail",
     "kind", "imap-password",
-    "account", "imap:jon@example.com"
-  ])
-  deepEqual(credentials.renamedImapKeyringAttributes("imap:jon@example.com", 1), [
-    "service", "omarchy-gmail",
-    "kind", "imap-password",
-    "account", "imap:jon@example.com"
-  ])
-
-  // The kind and the account survive the fallback: only the service name
-  // changes, or the old lookup would ask for an entry nobody ever wrote.
-  for (let which = 0; which < credentials.renamedServiceCount(); which++) {
-    const current = credentials.imapKeyringAttributes("imap:jon@example.com")
-    const renamed = credentials.renamedImapKeyringAttributes("imap:jon@example.com", which)
-    assert.strictEqual(renamed.length, current.length)
-    for (let i = 0; i < current.length; i++) {
-      if (i === 1) assert.notStrictEqual(renamed[i], current[i])
-      else assert.strictEqual(renamed[i], current[i])
-    }
-  }
-
-  // And an unnamed account is no more addressable under an old name than
-  // under the current one — a blank value is a secret-tool wildcard over every
-  // password this plugin ever stored.
-  for (const id of ["", "  ", null]) {
-    for (let which = 0; which < credentials.renamedServiceCount(); which++) {
-      deepEqual(credentials.renamedImapKeyringAttributes(id, which), [],
-        "an unnamed account has no entry under any service name")
-    }
-  }
+    "account", keyOne
+  ], "an IMAP account keys on its keyId")
 }
 
 // The decision a successful sign-in makes about the secret it now holds. It is
@@ -444,15 +335,13 @@ deepEqual(credentials.accountIds(damaged), ["three@work.com"])
     credentials.STORE_WHEN_NAMED)
   assert.notStrictEqual(credentials.STORE_NOW, credentials.STORE_WHEN_NAMED)
 
-  // Whatever the disposition says to wait for has no attributes to write
-  // under, and whatever it says to store now does. The two must not disagree:
-  // a "store now" with no key would drop the password silently, and a "wait"
-  // with a key is the shared placeholder coming back.
-  const ids = ["", "  ", null, "default", "jon@example.com", "imap:jon@example.com"]
-  for (const id of ids) {
-    const waits = credentials.secretDisposition(id) === credentials.STORE_WHEN_NAMED
-    assert.strictEqual(credentials.imapKeyringAttributes(id).length === 0, waits,
-      "disposition and addressability agree for " + JSON.stringify(id))
+  // The name decides when a secret is written; the keyId decides where. A
+  // named account always has somewhere to write it, because every account has
+  // a key from the moment it exists — a "store now" with no attributes would
+  // drop the password silently.
+  for (const id of ["jon@example.com", "imap:jon@example.com"]) {
+    assert.strictEqual(credentials.secretDisposition(id), credentials.STORE_NOW)
+    assert.ok(credentials.imapKeyringAttributes(keyOne).length > 0)
   }
 }
 

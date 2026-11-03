@@ -115,6 +115,14 @@ function makeAccount(account) {
   var provider = normalizeProvider(raw.provider)
   return {
     id: accountId(email, provider),
+    // What the keyring entry and the body cache are named by, instead of the
+    // address. Those names are arguments to secret-tool, mv and touch, and
+    // every local account can read a process's arguments in /proc; a hash of
+    // the address would not do either, because anyone who can guess an
+    // address can hash it. Random, made once, and kept in accounts.json (0600)
+    // for as long as the account is — which is exactly as long as the secret
+    // it names is worth anything.
+    keyId: isKeyId(raw.keyId) ? raw.keyId : newKeyId(),
     email: email,
     provider: provider,
     clientId: trimmed(raw.clientId),
@@ -128,6 +136,21 @@ function makeAccount(account) {
     // that never opens this setting behaves exactly as it did.
     merged: raw.merged !== false
   }
+}
+
+var KEY_ID = /^[0-9a-f]{32}$/
+
+function isKeyId(value) {
+  return KEY_ID.test(String(value || ""))
+}
+
+// 128 bits. Not a secret — it only has to say nothing about the address, and
+// to be unlikely to repeat across the handful of accounts one install holds.
+function newKeyId() {
+  var out = ""
+  for (var i = 0; i < 4; i++)
+    out += ("00000000" + Math.floor(Math.random() * 0x100000000).toString(16)).slice(-8)
+  return out
 }
 
 function copyList(list) {
@@ -468,6 +491,10 @@ function load(text) {
   for (var i = 0; i < entries.length; i++) {
     if (!isObject(entries[i])) continue
     var entry = makeAccount(entries[i])
+    // A key made here exists only in memory until the list is saved, and the
+    // next read would make a different one: `keysMade` tells the loader to
+    // write the file back before anything is stored under it.
+    if (!isKeyId(entries[i].keyId)) next.keysMade = true
     // The id is recomputed rather than trusted, so a hand-edited file cannot
     // introduce two entries the rest of the code believes are different
     // accounts while Gmail treats them as one.

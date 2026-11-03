@@ -44,7 +44,7 @@ guided by an in-app four-step walkthrough.
 - Listener is a single-shot `socat`; the browser does the rest
 - Scopes: `gmail.modify` (read, label, archive, trash — cannot permanently
   delete) and `gmail.send`
-- Refresh token → GNOME Keyring via `secret-tool`, keyed by client and account
+- Refresh token → GNOME Keyring via `secret-tool`, keyed by client and the account's opaque `keyId` (never the address)
 - Client id/secret → `~/.config/omail/credentials.json`, mode 0600.
   Not plugin settings: `shell.json` is world-readable.
 - Access token → process memory only

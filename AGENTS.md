@@ -228,6 +228,7 @@ key. What matters while working:
 ## Secrets
 
 - Refresh tokens go to GNOME Keyring over stdin, never through a command line.
+- A keyring entry is named by the account's `keyId` — random, made once, kept in `accounts.json` — and never by the address. secret-tool takes attributes as arguments, readable by every local account, and a hash of the address would only be a guess away. Entries from before this are re-keyed in place by `scripts/keyring-migrate.sh`, which takes the address on stdin and speaks the Secret Service API through gdbus. The body cache is named from the same key. `tests/test_keyring_migrate.sh` runs it against a real gnome-keyring and fails if an address reaches an argument.
 - The OAuth client goes to a 0600 file, never to plugin settings: `shell.json`
   is world-readable.
 - Anything that could carry a credential passes through `OAuth.redact` before

@@ -34,13 +34,14 @@ assert.ok(url.indexOf("access_type=offline") > 0)
 assert.ok(url.indexOf("prompt=consent") > 0)
 assert.ok(url.indexOf("redirect_uri=http%3A%2F%2F127.0.0.1%3A9481%2Foauth2callback") > 0)
 assert.ok(url.indexOf("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.modify%20") > 0)
-assert.ok(url.indexOf("login_hint") < 0, "an absent hint is omitted, not sent empty")
-
+// No login_hint, ever: the URL is on xdg-open's and the browser's command line,
+// readable by every local account, and the hint was the user's address.
+assert.ok(url.indexOf("login_hint") < 0)
 const hinted = oauth.authorizationUrl({
   clientId: "123-abc.apps.googleusercontent.com",
   challenge: "C", state: "S", loginHint: "user@example.com"
 })
-assert.ok(hinted.indexOf("login_hint=user%40example.com") > 0)
+assert.ok(hinted.indexOf("user%40example.com") < 0 && hinted.indexOf("login_hint") < 0)
 
 // --------------------------------------------------------------- callback
 

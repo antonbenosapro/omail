@@ -394,6 +394,11 @@ Item {
     if (accountsWriter.running || accountsSaveQueued) return
     accountList = loaded
     accountsLoaded = true
+    // Accounts written before keyring keys existed were just given them, in
+    // memory. Saved now, before any keyring entry or cached body is named by
+    // one: a restart before this landed would make different keys, and the
+    // entries named by these would be nobody's.
+    if (loaded.keysMade === true) saveAccounts()
   }
 
   signal accountAdded()
@@ -1170,6 +1175,7 @@ Item {
 
       pluginDir: root.pluginDir
       accountId: entry ? entry.id : ""
+      keyId: entry ? String(entry.keyId || "") : ""
       configuredEmail: entry ? entry.email : ""
       // Which service this mailbox is, and — for the one that needs them — the
       // servers it talks to. Both come off the account entry, so changing an

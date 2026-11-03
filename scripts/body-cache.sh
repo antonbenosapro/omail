@@ -72,9 +72,15 @@ case "$command" in
     prune_dir "${3:-1000}"
     ;;
   clear)
-    # Only ever the directory this plugin built, and only if it looks like it.
-    case "$dir" in
-      */omail/bodies/*) rm -rf -- "$dir" ;;
+    # Only ever one account's directory, and only if it looks like one: an
+    # account-<keyId> under omail/bodies. The parent itself — what a missing
+    # key would leave — is every account's cache and is refused.
+    case "${dir%/}" in
+      */omail/bodies/account-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+        case "${dir%/}" in
+          */omail/bodies/account-*[!0-9a-f]*) usage ;;
+        esac
+        rm -rf -- "$dir" ;;
       *) usage ;;
     esac
     ;;

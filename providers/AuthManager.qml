@@ -32,6 +32,9 @@ Item {
   // keyring entry has to be keyed on both or they overwrite each other and one
   // gets signed out at random.
   property string accountId: ""
+  // What the keyring entry is named by. Never the address: secret-tool takes
+  // attributes as arguments, and those are readable by every local account.
+  property string keyId: ""
 
   // The browser page after Google redirects is the only part of this app that
   // renders outside Quickshell, so it takes the active theme with it.
@@ -84,7 +87,6 @@ Item {
   property var tokenRequest: null
   property int tokenRequestSerial: 0
   property bool logoutPendingClear: false
-  property string loginHint: ""
 
   signal loginSucceeded()
   signal loggedOut()
@@ -192,18 +194,10 @@ Item {
 
   // -------------------------------------------------------------- keyring
 
-  // An install that predates multi-account stored its token under the client id
-  // alone. Reading that once, and rewriting under the new attributes, is the
-  // difference between an upgrade and a silent sign-out.
-  property bool triedLegacyLookup: false
-  property int secretLookupStage: 0
-  property var renamedAttributesToClear: []
-
   // Two keyring entries are not tied to an address: the pre-multi-account one
   // keyed by client alone, and the one written for a mailbox that had not
-  // learned its address yet, which keys on a literal stand-in. Either can be
-  // found by *any* account sharing the client, and both belong to whichever
-  // mailbox was signed in before accounts were separated — the first one.
+  // learned its address yet. Either belongs to whichever mailbox was signed in
+  // before accounts were separated — the first one.
   //
   // Only that one may claim them. Without this a mailbox you have just added
   // restores the token of the mailbox you already had, signs itself in, reports
@@ -211,7 +205,13 @@ Item {
   // adding a second account did.
   property bool mayAdoptLegacyToken: true
 
+  // Whether this session has already asked keyring-migrate.sh. It runs once,
+  // and only when the entry is not under the keyId: on every start after the
+  // first it is never needed, and a lookup is the only thing that runs.
+  property bool migrationTried: false
+
   function startSecretLookup() {
+    lookupHandled = false
     if (!clientId) {
       handleSecretLookup("")
       return
@@ -222,76 +222,37 @@ Item {
       handleSecretLookup("")
       return
     }
-    lookupHandled = false
-    triedLegacyLookup = false
-    // An unnamed account has no keyed entry of its own, so `keyringAttributes`
-    // hands back nothing and the account-keyed stage has nothing to ask for.
-    // Skipping straight to the legacy stages is what lets the first mailbox
-    // still adopt the pre-accounts token; running the lookup with no
-    // attributes would instead match every token this plugin ever stored.
-    secretLookupStage = 0
-    var attributes = Credentials.keyringAttributes(clientId, accountId)
+    var attributes = Credentials.keyringAttributes(clientId, keyId)
     if (attributes.length === 0) {
-      startNextSecretLookup()
+      handleSecretLookup("")
       return
     }
     secretLookup.command = ["secret-tool", "lookup"].concat(attributes)
     secretLookup.running = true
   }
 
-  // Stage 0 is this account's own entry under the current service name and
-  // stage 1 the pre-accounts one; after those come a keyed and a legacy stage
-  // per old service name, oldest layout last. Deriving the count from the list
-  // rather than writing it down is what keeps a third rename from silently
-  // stopping the walk one name short.
-  readonly property int lastSecretLookupStage: 1 + 2 * Credentials.renamedServiceCount()
-
-  // What stage `n` asks for, and whether it is one of the unkeyed entries only
-  // the first mailbox may claim. `service` is -1 for the current name.
-  function secretLookupStagePlan(stage) {
-    if (stage <= 1) return { service: -1, legacy: stage === 1 }
-    return { service: Math.floor((stage - 2) / 2), legacy: (stage - 2) % 2 === 1 }
-  }
-
-  function secretLookupAttributes(stage) {
-    var plan = secretLookupStagePlan(stage)
-    if (plan.legacy && !mayAdoptLegacyToken) return []
-    if (plan.service < 0) {
-      return plan.legacy
-        ? Credentials.legacyKeyringAttributes(clientId)
-        : Credentials.keyringAttributes(clientId, accountId)
-    }
-    return plan.legacy
-      ? Credentials.renamedLegacyKeyringAttributes(clientId, plan.service)
-      : Credentials.renamedKeyringAttributes(clientId, accountId, plan.service)
-  }
-
-  function startNextSecretLookup() {
-    lookupHandled = false
-    // A stage with nothing to ask for is skipped rather than ending the walk:
-    // an unnamed account has no keyed entry at any service name, and stopping
-    // at the first of those would never reach the legacy entry it may adopt.
-    while (secretLookupStage < lastSecretLookupStage) {
-      secretLookupStage++
-      var attributes = secretLookupAttributes(secretLookupStage)
-      if (attributes.length) {
-        secretLookup.command = ["secret-tool", "lookup"].concat(attributes)
-        secretLookup.running = true
-        triedLegacyLookup = secretLookupStagePlan(secretLookupStage).legacy
-        return
-      }
-    }
-    handleSecretLookup("")
+  // Not under the keyId: an entry from before accounts were named by one may
+  // still be keyed by the address, under this service name or an old one.
+  // keyring-migrate.sh re-keys it in place, taking the address on stdin, and
+  // the lookup runs once more.
+  function startMigration() {
+    if (keyringMigrate.running) return false
+    migrationTried = true
+    var request = Credentials.migrationRequest(Credentials.KEYRING_KIND, keyId,
+      accountId, clientId, mayAdoptLegacyToken)
+    if (request === "") return false
+    keyringMigrate.request = request
+    keyringMigrate.adopting = true
+    keyringMigrate.command = [pluginDir + "/scripts/keyring-migrate.sh"]
+    keyringMigrate.running = true
+    return true
   }
 
   function handleSecretLookup(raw) {
     if (lookupHandled) return
     lookupHandled = true
     var token = String(raw || "").trim()
-    if (!token && secretLookupStage < lastSecretLookupStage && clientId !== "") {
-      startNextSecretLookup()
-      return
-    }
+    if (!token && !migrationTried && clientId !== "" && startMigration()) return
     var purpose = lookupPurpose
     lookupPurpose = ""
     if (!token) {
@@ -300,12 +261,6 @@ Item {
       if (purpose === "request") finishWaiters("", "Sign in to Gmail first")
       return
     }
-    // A token found under an old service name is rewritten under the current
-    // one and the old entry removed, so the fallback runs once per machine
-    // rather than on every start.
-    renamedAttributesToClear = secretLookupStage >= 2
-      ? secretLookupAttributes(secretLookupStage)
-      : []
     refreshWithToken(token, purpose)
   }
 
@@ -335,7 +290,7 @@ Item {
       return
     }
     if (keyringStore.running) return
-    var attributes = Credentials.keyringAttributes(clientId, accountId)
+    var attributes = Credentials.keyringAttributes(clientId, keyId)
     if (attributes.length === 0) return
     keyringWriteToken = String(refreshToken)
     keyringStore.command = [pluginDir + "/scripts/keyring-store.sh"].concat(attributes)
@@ -344,12 +299,21 @@ Item {
 
   function clearStoredToken() {
     if (keyringClear.running) return
-    // No name, no entry: an unnamed account never wrote one, and a `clear`
-    // with no attributes deletes every entry this plugin owns.
-    var attributes = Credentials.keyringAttributes(clientId, accountId)
+    // No key, no entry, and a `clear` with no attributes deletes every entry
+    // this plugin owns.
+    var attributes = Credentials.keyringAttributes(clientId, keyId)
     if (attributes.length === 0) return
     keyringClear.command = ["secret-tool", "clear"].concat(attributes)
     keyringClear.running = true
+    // And anything still keyed by the address, so signing out leaves nothing
+    // named after the user behind.
+    var forget = Credentials.forgetRequest(Credentials.KEYRING_KIND, accountId, clientId)
+    if (forget !== "" && !keyringMigrate.running) {
+      keyringMigrate.request = forget
+      keyringMigrate.adopting = false
+      keyringMigrate.command = [pluginDir + "/scripts/keyring-migrate.sh"]
+      keyringMigrate.running = true
+    }
   }
 
   // ---------------------------------------------------------------- tokens
@@ -398,9 +362,6 @@ Item {
   }
 
   function acceptToken(result) {
-    // Rewriting after a legacy read is what completes the migration; without it
-    // the old entry stays authoritative and a second account would still clash.
-    if (triedLegacyLookup && !result.refreshToken) triedLegacyLookup = false
     accessToken = result.accessToken
     accessTokenExpiresAt = Date.now() + result.expiresIn * 1000
     if (result.scope) grantedScope = result.scope
@@ -457,8 +418,7 @@ Item {
       challenge: pkceChallenge,
       state: oauthState,
       port: oauthPort,
-      scopes: scopes,
-      loginHint: loginHint
+      scopes: scopes
     })])
   }
 
@@ -703,11 +663,6 @@ Item {
       root.keyringWriteToken = ""
       if (exitCode !== 0)
         root.lastError = "Signed in, but the session could not be saved. You may need to sign in again after a restart"
-      if (exitCode === 0 && root.renamedAttributesToClear.length && !keyringClear.running) {
-        keyringClear.command = ["secret-tool", "clear"].concat(root.renamedAttributesToClear)
-        root.renamedAttributesToClear = []
-        keyringClear.running = true
-      }
       if (root.logoutPendingClear) {
         root.logoutPendingClear = false
         root.clearStoredToken()
@@ -719,5 +674,27 @@ Item {
     id: keyringClear
     stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector { waitForEnd: true }
+  }
+
+  // keyring-migrate.sh: the address goes in on stdin, never as an argument.
+  Process {
+    id: keyringMigrate
+    property string request: ""
+    // An adopt has a lookup waiting on it; a forget does not.
+    property bool adopting: false
+    stdinEnabled: true
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onStarted: {
+      write(request)
+      request = ""
+    }
+    onExited: function(exitCode) {
+      if (!adopting) return
+      adopting = false
+      // Whatever it did, the lookup runs again — and finds the entry if it was
+      // re-keyed, or nothing, which ends the walk.
+      root.startSecretLookup()
+    }
   }
 }

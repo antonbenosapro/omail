@@ -298,20 +298,25 @@ function prune(store) {
 // the same prefix-free escape the account file uses, so a message id can never
 // climb out of the directory it belongs to however strange it is.
 
-// The body cache's names are hashes. They reach body-cache.sh, and from it
-// mv, chmod, touch and rm, as arguments — and every local account can read a
-// process's arguments in /proc. Named after the message id, a file said which
-// folder a message sat in ("17:Clients/Acme"), and the directory said whose
-// mailbox it was. A hash says neither, and cannot contain a separator.
-function bodyDirName(accountId) {
-  var key = String(accountId || "").trim()
-  return "account-" + sha256Hex(key).substring(0, 32)
+// The body cache's names reach body-cache.sh, and from it mv, chmod, touch and
+// rm, as arguments — and every local account can read a process's arguments in
+// /proc. Named after the message id, a file said which folder a message sat in
+// ("17:Clients/Acme"), and the directory said whose mailbox it was.
+//
+// So the directory is the account's keyId (Accounts.makeAccount), which is
+// random, and a file is a hash keyed by it: a plain hash of "17:INBOX" is a
+// guess away from its input, and one keyed by a value nobody else can read is
+// not. Neither can contain a separator.
+var KEY_ID = /^[0-9a-f]{32}$/
+
+function bodyDirName(keyId) {
+  return KEY_ID.test(String(keyId || "")) ? "account-" + keyId : ""
 }
 
-function bodyFileName(id) {
+function bodyFileName(keyId, id) {
   var key = String(id || "").trim()
-  if (!key) return ""
-  return sha256Hex(key).substring(0, 32) + ".json"
+  if (!key || !KEY_ID.test(String(keyId || ""))) return ""
+  return sha256Hex(keyId + "\n" + key).substring(0, 32) + ".json"
 }
 
 // SHA-256, because Qt's own hashing is not reachable from a plain JS library
