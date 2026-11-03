@@ -853,6 +853,7 @@ Item {
   readonly property bool remoteImagesAllowed: !!reader && reader.remoteImagesAllowed
   readonly property var selectedAttachments: reader ? reader.selectedAttachments : []
   readonly property bool selectedTooHeavy: !!reader && reader.selectedTooHeavy
+  readonly property bool selectedTruncated: !!reader && reader.selectedTruncated
   // The meeting inside the message, and the answer of the account it arrived
   // in — which is the account that has to send the reply.
   readonly property var selectedInvite: reader ? reader.selectedInvite : null

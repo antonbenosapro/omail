@@ -804,4 +804,64 @@ assert.ok(!/[\r\n]/.test(message.addressHeader("Cc",
   "\u00dc <=?UTF-8?B?" + Buffer.from("x@y.com>\r\nBcc: z@w.com").toString("base64") + "?=>")),
   "a line break decoded out of an encoded word does not survive")
 
+// Sibling parts. Each delimiter used to copy the rest of the message to test
+// what followed it, and depth does not bound siblings, so 25 MiB of empty
+// parts was millions of copies and millions of entities on the thread that
+// draws the desktop. Both are bounded now: the scan walks by index, and one
+// message holds at most MAX_MIME_PARTS entities however they nest.
+{
+  const flood = n => "Content-Type: multipart/mixed; boundary=b\r\n\r\n"
+    + "--b\r\n\r\n\r\n".repeat(n) + "--b--\r\n"
+  let started = Date.now()
+  const parsed = message.parseRfc822(flood(1000000))
+  assert.ok(Date.now() - started < 1000, "a million empty parts took " + (Date.now() - started) + "ms")
+  assert.strictEqual(parsed.mimeType, "multipart/mixed")
+  assert.strictEqual(parsed.parts.length, message.MAX_MIME_PARTS - 1, "the root counts as one entity")
+
+  // The budget is shared across levels: a nested container gets what is left.
+  const nested = message.parseRfc822(
+    "Content-Type: multipart/mixed; boundary=o\r\n\r\n"
+    + "--o\r\nContent-Type: multipart/alternative; boundary=i\r\n\r\n"
+    + "--i\r\n\r\nx\r\n".repeat(message.MAX_MIME_PARTS) + "--i--\r\n"
+    + "--o\r\n\r\nlate\r\n--o--\r\n")
+  let count = 0
+  const walk = e => { count++; e.parts.forEach(walk) }
+  walk(nested)
+  assert.strictEqual(count, message.MAX_MIME_PARTS, "the whole tree stays within the limit")
+
+  // A container the limit declined to read is still a container, not text.
+  const exhausted = message.parseRfc822(
+    "Content-Type: multipart/mixed; boundary=o\r\n\r\n"
+    + "--o\r\n\r\nx\r\n".repeat(message.MAX_MIME_PARTS - 2)
+    + "--o\r\nContent-Type: multipart/alternative; boundary=i\r\n\r\n--i\r\n\r\ny\r\n--i--\r\n--o--\r\n")
+  const last = exhausted.parts[exhausted.parts.length - 1]
+  assert.strictEqual(last.mimeType, "multipart/alternative")
+  assert.strictEqual(last.parts.length, 0)
+  assert.strictEqual(last.body.data, undefined, "its raw octets are not shown as a body")
+
+  // The delimiter's line still allows transport padding, and only that.
+  const padded = message.parseRfc822(
+    "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b \t\r\nContent-Type: text/plain\r\n\r\none\r\n--b\tx\r\n--b--")
+  assert.strictEqual(padded.parts.length, 1)
+  assert.strictEqual(Buffer.from(padded.parts[0].body.data, "base64").toString("latin1"),
+    "one\r\n--b\tx", "a boundary followed by anything but whitespace is body text")
+
+  // Only the line break before a delimiter is dropped, never a lone CR.
+  const cr = message.parseRfc822("Content-Type: multipart/mixed; boundary=b\n\n--b\n\nab\r--b--\n")
+  assert.strictEqual(cr.parts.length, 1)
+}
+
+// The text reading of markup lets go after MAX_MARKUP_TAGS, and a list row's
+// preview reads only the start of a body.
+{
+  let started = Date.now()
+  const text = message.htmlToText("<p>first</p>" + "<b>x</b>".repeat(1000000))
+  assert.ok(Date.now() - started < 500, "a million elements took " + (Date.now() - started) + "ms")
+  assert.ok(text.indexOf("first") === 0)
+  assert.ok(text.length < 2 * message.MAX_MARKUP_TAGS)
+  started = Date.now()
+  assert.strictEqual(message.buildSnippet("hello " + "x ".repeat(12 * 1024 * 1024)).length, 200)
+  assert.ok(Date.now() - started < 200, "a snippet of a 25 MiB body took " + (Date.now() - started) + "ms")
+}
+
 console.log("test_message.js ok")

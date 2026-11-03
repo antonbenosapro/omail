@@ -78,6 +78,14 @@ function matchesIgnoreCase(text, at, needle) {
 
 var PLAIN_ATTRIBUTE_NAME = /^[a-z_][a-z0-9_.:-]*$/
 
+// Attributes read on one element. Each new name is checked against the ones
+// already kept, so without a ceiling one tag of distinct names is quadratic: a
+// third of a megabyte of them took two seconds. Real mail stays under twenty.
+// Past this they are stepped over by character and dropped without a string
+// being cut for either half, and since the serialiser writes only what was
+// kept, Qt never sees them either.
+var MAX_ATTRIBUTES = 64
+
 function hasAttributeNamed(attributes, name) {
   for (var i = 0; i < attributes.length; i++) {
     if (attributes[i].name === name) return true
@@ -93,8 +101,16 @@ function hasAttributeNamed(attributes, name) {
 // `out` carries back where the tag ended and whether it ended at all. It is the
 // caller's, and reused: a message body is tens of thousands of tags, and an
 // object per tag to hold two numbers is an object per tag for the collector.
-function readTag(text, from, out) {
+//
+// `allowance` is how many characters of markup may be stepped over one at a
+// time. A quoted value is passed with one `indexOf` and costs nothing, which
+// is what lets an inline image through; everything else counts. `out.read` is
+// what this tag spent, and `out.cut` is true when it ran out first.
+function readTag(text, from, out, allowance) {
   var length = text.length
+  var stop = Math.min(length, from + allowance)
+  var jumped = 0
+  out.cut = false
   var at = from + 1
   var closing = false
   if (text.charCodeAt(at) === 47) {
@@ -106,7 +122,7 @@ function readTag(text, from, out) {
   if (!isNameStartCode(text.charCodeAt(at))) return null
   var nameStart = at
   var upper = false
-  while (at < length) {
+  while (at < stop) {
     var nameCode = text.charCodeAt(at)
     if (!isNameCode(nameCode)) break
     if (nameCode >= 65 && nameCode <= 90) upper = true
@@ -119,14 +135,16 @@ function readTag(text, from, out) {
   if (upper) name = name.toLowerCase()
 
   var attributes = []
+  var read = 0
   var selfClosing = false
-  while (at < length) {
-    while (at < length && isSpaceCode(text.charCodeAt(at))) at++
-    if (at >= length) break
+  while (at < stop) {
+    while (at < stop && isSpaceCode(text.charCodeAt(at))) at++
+    if (at >= stop) break
     var code = text.charCodeAt(at)
     if (code === 62) {
       at++
       out.end = at
+      out.read = at - from - jumped
       out.terminated = true
       return {
         type: closing ? "end" : "start",
@@ -143,7 +161,7 @@ function readTag(text, from, out) {
 
     var attrStart = at
     var attrUpper = false
-    while (at < length) {
+    while (at < stop) {
       var attrCode = text.charCodeAt(at)
       if (isSpaceCode(attrCode) || attrCode === 61 || attrCode === 62 || attrCode === 47) break
       if (attrCode >= 65 && attrCode <= 90) attrUpper = true
@@ -155,44 +173,52 @@ function readTag(text, from, out) {
       at++
       continue
     }
-    var attributeName = text.substring(attrStart, at)
-    if (attrUpper) attributeName = attributeName.toLowerCase()
+    var keeping = read++ < MAX_ATTRIBUTES
+    var attributeName = keeping ? text.substring(attrStart, at) : ""
+    if (attrUpper && keeping) attributeName = attributeName.toLowerCase()
     // Qt reads an attribute's name the way it reads its value: a quoted one
     // loses its quotes and a reference in one is decoded, so `"src"` and
     // `&#115;rc` are both `src` to the engine and neither is to anything here.
     // Only a plain name is kept. A repeated name keeps its first, which is what
     // HTML does — and Qt takes the last, so `<img src="cid:a" src="https://...">`
     // passed the image policy with one source and was fetched with the other.
-    var plainName = PLAIN_ATTRIBUTE_NAME.test(attributeName)
+    var plainName = keeping && PLAIN_ATTRIBUTE_NAME.test(attributeName)
       && !hasAttributeNamed(attributes, attributeName)
 
-    while (at < length && isSpaceCode(text.charCodeAt(at))) at++
+    while (at < stop && isSpaceCode(text.charCodeAt(at))) at++
     var value = null
-    if (text.charCodeAt(at) === 61) {
+    if (at < stop && text.charCodeAt(at) === 61) {
       at++
-      while (at < length && isSpaceCode(text.charCodeAt(at))) at++
-      var quote = text.charCodeAt(at)
+      while (at < stop && isSpaceCode(text.charCodeAt(at))) at++
+      var quote = at < stop ? text.charCodeAt(at) : NaN
       if (quote === 34 || quote === 39) {
         at++
         var close = text.indexOf(quote === 34 ? "\"" : "'", at)
         // A quote that never closes runs to the end of the document, which is
         // also how Qt reads it.
-        value = close < 0 ? text.substring(at) : text.substring(at, close)
-        at = close < 0 ? length : close + 1
+        if (keeping) value = close < 0 ? text.substring(at) : text.substring(at, close)
+        var past = close < 0 ? length : close + 1
+        jumped += past - at
+        stop = Math.min(length, stop + past - at)
+        at = past
       } else {
         var valueStart = at
-        while (at < length) {
+        while (at < stop) {
           var valueCode = text.charCodeAt(at)
           if (isSpaceCode(valueCode) || valueCode === 62) break
           at++
         }
-        value = text.substring(valueStart, at)
+        if (keeping) value = text.substring(valueStart, at)
       }
     }
     if (plainName) attributes.push({ name: attributeName, value: value })
   }
 
+  // Out of allowance with document still to go: what is past here is not read
+  // at all, which the tokenizer reports as a truncated document.
+  out.cut = stop < length
   out.end = length
+  out.read = at - from - jumped
   out.terminated = false
   return {
     type: closing ? "end" : "start",
@@ -220,17 +246,53 @@ function findRawTextEnd(text, from, name) {
   return { contentEnd: text.length, next: text.length }
 }
 
+// Tags read from one document. Every one is a token, a node and a walk in
+// each pass after, and all of it runs before anything can say the document is
+// too heavy to draw — so a sender who fills the message with tags held the
+// shell for seconds just being measured. The heaviest real newsletter is a few
+// thousand; past this the rest of the document is not read, and the tree says
+// so with `truncated`.
+var MAX_PARSE_TAGS = 20000
+
+// Characters of text read from one document, for the same reason: every pass
+// after the parse walks the text too, and a body that is megabytes of one
+// paragraph cost a second before anything decided not to draw it. Twice what
+// the reader lays out as plain text, so that cap is the one anybody meets.
+var MAX_PARSE_TEXT = 1024 * 1024
+
+// Characters of markup stepped over one at a time — names, unquoted values,
+// the space between them — across one document. Tags alone do not bound it:
+// one tag can be megabytes of attributes. A quoted value is not counted,
+// because it is passed with one `indexOf`; that is where inline images live.
+var MAX_PARSE_MARKUP = 512 * 1024
+
 // With a `visit`, tokens are handed over one at a time and nothing is kept;
 // without one they come back as an array. The tree builder takes the first
 // form, because a message body is tens of thousands of tokens and building a
 // list of them only to walk it once is a list nobody needed.
-function tokenize(html, visit) {
+//
+// `budget.tags` and `budget.text` are how many more tags and characters of
+// text may be read; `budget.truncated` comes back true when the document had
+// more.
+function tokenize(html, visit, budget) {
   var text = String(html === undefined || html === null ? "" : html)
   var tokens = visit ? null : []
   var emit = visit || function(token) { tokens.push(token) }
+  var limit = budget || newBudget()
   var pending = ""
   var at = 0
-  var out = { end: 0, terminated: false }
+  var out = { end: 0, terminated: false, read: 0, cut: false }
+
+  // The text from `from` to `to`, or as much of it as the budget has left.
+  function textBetween(from, to) {
+    var size = to - from
+    if (size > limit.text) {
+      size = limit.text
+      limit.truncated = true
+    }
+    limit.text -= size
+    return text.substring(from, from + size)
+  }
 
   function flushText() {
     if (pending === "") return
@@ -241,10 +303,16 @@ function tokenize(html, visit) {
   while (at < text.length) {
     var open = text.indexOf("<", at)
     if (open < 0) {
-      pending += text.substring(at)
+      pending += textBetween(at, text.length)
       break
     }
-    pending += text.substring(at, open)
+    pending += textBetween(at, open)
+
+    if (limit.truncated || limit.tags <= 0) {
+      limit.truncated = true
+      break
+    }
+    limit.tags--
 
     // By code: this runs at every "<" in the document, and substr+toLowerCase
     // here allocates two strings per tag for a four-character test.
@@ -267,7 +335,7 @@ function tokenize(html, visit) {
       continue
     }
 
-    var token = readTag(text, open, out)
+    var token = readTag(text, open, out, limit.markup)
     if (!token) {
       // A "<" that starts no tag is a "<" the sender typed.
       pending += "<"
@@ -275,17 +343,20 @@ function tokenize(html, visit) {
       continue
     }
     flushText()
+    limit.markup -= out.read
     if (out.terminated) emit(token)
     // An unterminated tag took the rest of the document with it, so there is
     // nothing after it to keep and nothing about it worth keeping.
     at = out.end
+    if (out.cut) limit.truncated = true
     if (!out.terminated) break
 
     if (token.type === "start" && !token.selfClosing
       && RAW_TEXT_ELEMENTS[token.name] === true) {
       var raw = findRawTextEnd(text, at, token.name)
-      emit({ type: "text", text: text.substring(at, raw.contentEnd), raw: true })
+      emit({ type: "text", text: textBetween(at, raw.contentEnd), raw: true })
       emit({ type: "end", name: token.name })
+      if (limit.truncated) break
       at = raw.next
     }
   }
@@ -337,9 +408,14 @@ function elementNode(token) {
 // tooHeavyForRichText refuses it a step later.
 var MAX_TREE_DEPTH = 128
 
+function newBudget() {
+  return { tags: MAX_PARSE_TAGS, text: MAX_PARSE_TEXT, markup: MAX_PARSE_MARKUP, truncated: false }
+}
+
 function parse(html) {
-  var root = { type: "root", children: [] }
+  var root = { type: "root", children: [], truncated: false }
   var stack = [root]
+  var budget = newBudget()
 
   tokenize(html, function(token) {
     var top = stack[stack.length - 1]
@@ -375,8 +451,9 @@ function parse(html) {
         return
       }
     }
-  })
+  }, budget)
 
+  root.truncated = budget.truncated
   return root
 }
 
@@ -1243,6 +1320,9 @@ function sanitize(html, options) {
     remoteImages: loadable,
     complexity: size,
     tooHeavy: isTooHeavy(size),
+    // Only the beginning was read: the reader says so rather than drawing a
+    // message that simply stops.
+    truncated: root.truncated === true,
     plainText: plain,
     // The document itself, so the reader can fit it to a window without
     // parsing back the string that was just written from it. Nothing below
@@ -1656,12 +1736,31 @@ function preserveSpacing(escaped) {
   })
 }
 
+// Characters of text the reader lays out. Qt lays a document out in one go on
+// the GUI thread, and several megabytes of plain text hold the whole shell
+// while it does; this is about a hundred pages, past anything sent as a letter.
+var MAX_PLAIN_TEXT = 512 * 1024
+
+// The part of `text` the reader draws. Never ends on half a surrogate pair.
+function displayedText(text) {
+  var value = String(text === undefined || text === null ? "" : text)
+  if (value.length <= MAX_PLAIN_TEXT) return value
+  var end = MAX_PLAIN_TEXT
+  var last = value.charCodeAt(end - 1)
+  if (last >= 0xd800 && last <= 0xdbff) end--
+  return value.substring(0, end)
+}
+
+function isTextCut(text) {
+  return String(text === undefined || text === null ? "" : text).length > MAX_PLAIN_TEXT
+}
+
 function plainTextDocument(text, colors, linkImages) {
   var palette = colors || {}
   var foreground = String(palette.foreground || "")
   var background = String(palette.background || "")
   var link = String(palette.link || foreground)
-  var body = preserveSpacing(escapeText(readableText(text)))
+  var body = preserveSpacing(escapeText(readableText(displayedText(text))))
   if (linkImages) {
     body = body.replace(/\[image (\d+)\]/g, function(match, index) {
       return "<a href=\"" + IMAGE_LINK_PREFIX + index + "\">" + match + "</a>"

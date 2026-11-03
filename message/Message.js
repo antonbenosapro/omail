@@ -387,9 +387,16 @@ function tagNameAt(source, open) {
   return name.toLowerCase()
 }
 
+// Tags read before the rest is let go, for the same reason as Html.js's
+// MAX_PARSE_TAGS: linear is still seconds on the GUI thread when a sender
+// fills 25 MiB with tags. What reads this text wants its beginning — a list
+// row's preview, or a reading the reader replaces with its own parse.
+var MAX_MARKUP_TAGS = 20000
+
 function stripMarkup(source) {
   var out = []
   var imageCount = 0
+  var tags = 0
   var scan = { exhausted: false }
   var at = 0
   while (at < source.length) {
@@ -399,6 +406,7 @@ function stripMarkup(source) {
       break
     }
     out.push(source.substring(at, open))
+    if (++tags > MAX_MARKUP_TAGS) break
 
     // A comment, a script and a style are dropped whole. Left open, each runs
     // to the end of the message, which is what a browser does with one.
@@ -595,6 +603,13 @@ function formatSize(bytes) {
 
 var MAX_MIME_DEPTH = 12
 
+// Entities in one message, counted across every level. Depth does not bound
+// siblings, and each part costs a header parse, a decode and an object on the
+// thread that draws the desktop, so a sender who fills 25 MiB with empty parts
+// gets millions of them. Real mail stays in the tens; a digest of forwards
+// reaches the low hundreds. Parts past the limit are not read.
+var MAX_MIME_PARTS = 1000
+
 function latin1Bytes(text) {
   var input = String(text || "")
   var bytes = []
@@ -696,11 +711,16 @@ function delimiterAt(text, boundary, from) {
       var after = found + marker.length
       var closing = text.substr(after, 2) === "--"
       var rest = after + (closing ? 2 : 0)
-      // Only whitespace may follow before the line ends.
-      var tail = text.substring(rest)
-      var padding = tail.match(/^[ \t]*(\r?\n|$)/)
-      if (padding)
-        return { start: found, end: rest + padding[0].length, closing: closing }
+      // Only whitespace may follow before the line ends. Walked by index:
+      // matching against `text.substring(rest)` copied the rest of the message
+      // at every delimiter, which is quadratic in an engine without sliced
+      // strings, and Qt's is one.
+      var at = rest
+      while (at < text.length && (text.charAt(at) === " " || text.charAt(at) === "\t")) at++
+      if (text.charAt(at) === "\r" && text.charAt(at + 1) === "\n") at += 2
+      else if (text.charAt(at) === "\n") at += 1
+      else if (at < text.length) at = -1
+      if (at >= 0) return { start: found, end: at, closing: closing }
     }
     index = found + 1
   }
@@ -710,8 +730,8 @@ function delimiterAt(text, boundary, from) {
 // Splits a multipart body on its boundary. Everything before the first
 // delimiter is the preamble and everything after the closing one is the
 // epilogue; both are for clients that do not understand MIME, and neither is
-// part of the message.
-function splitMultipart(body, boundary) {
+// part of the message. At most `limit` parts are returned.
+function splitMultipart(body, boundary, limit) {
   var text = String(body || "")
   var name = String(boundary || "")
   if (name === "") return []
@@ -721,13 +741,17 @@ function splitMultipart(body, boundary) {
   if (!opening || opening.closing) return []
 
   var start = opening.end
-  while (true) {
+  while (parts.length < limit) {
     var next = delimiterAt(text, name, start)
     var end = next ? next.start : text.length
     // The CRLF that precedes the next delimiter belongs to the delimiter, not
     // to the part — a body that keeps it gains a trailing blank line, and a
     // base64 part gains bytes that were never in the attachment.
-    parts.push(text.substring(start, end).replace(/\r?\n$/, ""))
+    if (end > start && text.charAt(end - 1) === "\n") {
+      end--
+      if (end > start && text.charAt(end - 1) === "\r") end--
+    }
+    parts.push(text.substring(start, end))
     if (!next || next.closing) break
     start = next.end
   }
@@ -754,7 +778,10 @@ function decodeTransfer(body, encoding) {
 // One MIME entity — headers, and either a body or children. `partId` is the
 // RFC 3501 part path ("1", "1.2"), which is what an attachment would be
 // fetched by if this plugin ever fetches one separately.
-function parseMimeEntity(raw, partId, depth) {
+//
+// `budget.left` is how many more entities the message may hold; this one is
+// already counted.
+function parseMimeEntity(raw, partId, depth, budget) {
   var text = String(raw || "")
   // The first blank line ends the headers. CRLF is the standard; bare LF is
   // what a surprising number of senders actually emit.
@@ -783,17 +810,20 @@ function parseMimeEntity(raw, partId, depth) {
 
   var boundary = contentTypeParam(contentType, "boundary")
   if (mimeType.indexOf("multipart/") === 0 && boundary !== "" && depth < MAX_MIME_DEPTH) {
-    var chunks = splitMultipart(body, boundary)
+    var chunks = splitMultipart(body, boundary, budget.left)
+    budget.left -= chunks.length
     for (var i = 0; i < chunks.length; i++) {
       var childId = entity.partId === "" ? String(i + 1) : entity.partId + "." + String(i + 1)
-      entity.parts.push(parseMimeEntity(chunks[i], childId, depth + 1))
+      entity.parts.push(parseMimeEntity(chunks[i], childId, depth + 1, budget))
     }
     // A multipart whose boundary never appeared is not a container at all.
     // Falling through decodes its body, but that is only half the repair:
     // `extractBody` dispatches on `mimeType`, so an entity still labelled
     // multipart is skipped by every reader and the message shows as blank.
     // Relabelling is what makes those octets reachable.
-    if (entity.parts.length > 0) return entity
+    // Out of budget is not that: the container is real and its parts are
+    // what the limit declined to read.
+    if (entity.parts.length > 0 || budget.left <= 0) return entity
     entity.mimeType = looksLikeHtml(body) ? "text/html" : "text/plain"
   }
 
@@ -807,12 +837,13 @@ function parseMimeEntity(raw, partId, depth) {
   //
   // The wrapper keeps its own type and gains the message as its single child,
   // which is the part path a later FETCH would ask for.
-  if (mimeType === "message/rfc822" && depth < MAX_MIME_DEPTH) {
+  if (mimeType === "message/rfc822" && depth < MAX_MIME_DEPTH && budget.left > 0) {
     // Decoded first: an embedded message may itself be base64, and parsing the
     // encoded form would find no headers at all.
     var inner = bytesToLatin1(decodeTransfer(body, headerFrom(headers, "Content-Transfer-Encoding")))
     var innerId = entity.partId === "" ? "1" : entity.partId + ".1"
-    entity.parts.push(parseMimeEntity(inner, innerId, depth + 1))
+    budget.left -= 1
+    entity.parts.push(parseMimeEntity(inner, innerId, depth + 1, budget))
     return entity
   }
 
@@ -835,14 +866,19 @@ function parseMimeEntity(raw, partId, depth) {
 // the caller supplies the id, the labels and the internal date, because those
 // come from the IMAP response rather than from the message itself.
 function parseRfc822(raw) {
-  return parseMimeEntity(raw, "", 0)
+  return parseMimeEntity(raw, "", 0, { left: MAX_MIME_PARTS - 1 })
 }
 
 // A list row's preview. Gmail sends one; IMAP has no equivalent, so it is made
 // from the body once the body is here. Long enough to be useful, short enough
 // that the cache is not storing the message twice.
+//
+// Read from the first 64 KiB only: two hundred characters are wanted, and
+// collapsing the whitespace of a 25 MiB body to find them is all the rest
+// would cost.
 function buildSnippet(text) {
   return String(text || "")
+    .substring(0, 65536)
     .replace(/\s+/g, " ")
     .trim()
     .substring(0, 200)
