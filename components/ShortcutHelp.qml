@@ -96,6 +96,7 @@ Rectangle {
           }
 
           Text {
+            textFormat: Text.PlainText
             text: group.modelData.name
             color: root.dimColor
             font.family: root.panelFontFamily
@@ -112,6 +113,7 @@ Rectangle {
               implicitHeight: Style.space(20)
 
               Text {
+                textFormat: Text.PlainText
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 width: Style.space(178)
@@ -123,6 +125,7 @@ Rectangle {
               }
 
               Text {
+                textFormat: Text.PlainText
                 anchors.left: parent.left
                 anchors.leftMargin: Style.space(183)
                 anchors.right: parent.right

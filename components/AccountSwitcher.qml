@@ -449,6 +449,7 @@ Item {
       : "transparent"
 
     Text {
+      textFormat: Text.PlainText
       anchors.left: parent.left
       anchors.leftMargin: Style.space(9)
       anchors.right: parent.right

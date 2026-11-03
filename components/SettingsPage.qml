@@ -97,6 +97,7 @@ Column {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         // The cost, in the words of what it actually tells whom. Off, the
         // reader asks about each message and the answer covers that one.
@@ -134,6 +135,7 @@ Column {
   // What the switches on the rows below do, said once here rather than on
   // every row. Shown only where there is a merged view to be in.
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.offersUnified
     text: {
@@ -194,6 +196,7 @@ Column {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: {
               if (row.modelData.error !== undefined && row.modelData.error !== "")
@@ -416,6 +419,7 @@ Column {
       spacing: Style.space(2)
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: root.auth && root.auth.credentialsPresent
           ? root.auth.clientDescription : "No client yet"

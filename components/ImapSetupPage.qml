@@ -170,6 +170,7 @@ Column {
     border.color: Style.hoverBorderFor(root.textColor, root.accentColor)
 
     Text {
+      textFormat: Text.PlainText
       id: missingText
       anchors.left: parent.left
       anchors.right: parent.right
@@ -207,6 +208,7 @@ Column {
     // the address names one, because someone typing their everyday password
     // into this box will otherwise be told only that it was rejected.
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       visible: root.suggestion.note !== ""
       text: root.suggestion.note
