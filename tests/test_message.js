@@ -759,4 +759,49 @@ assert.strictEqual(message.extractHtml({
   deepEqual(message.attachments(message.parseRfc822("")), [])
 }
 
+// Linear on input made to make a pattern retry from every position: a run of
+// spaces with no line break after it, and markup that never closes. Each of
+// these took seconds at this size when htmlToText and parseAddress were
+// regular expressions, and each is a message anyone can send.
+{
+  const size = 200000
+  const within = (label, run) => {
+    const started = Date.now()
+    run()
+    const spent = Date.now() - started
+    assert.ok(spent < 500, label + " took " + spent + "ms")
+  }
+  within("trailing spaces", () => message.htmlToText("a" + " ".repeat(size) + "x"))
+  within("spaces and tabs", () => message.htmlToText(" \t".repeat(size / 2) + "x"))
+  within("unclosed comments", () => message.htmlToText("<!--".repeat(size / 4)))
+  within("unclosed scripts", () => message.htmlToText("<script ".repeat(size / 8)))
+  within("unclosed images", () => message.htmlToText("<img ".repeat(size / 5)))
+  within("images whose quotes hold the >", () => message.htmlToText("<img \"x>\" ".repeat(size / 8)))
+  within("unclosed list items", () => message.htmlToText("<li".repeat(size / 3)))
+  within("unclosed tags", () => message.htmlToText("<a ".repeat(size / 3)))
+  within("an address of angle brackets", () => message.parseAddressList("<".repeat(size)))
+  within("an address of names", () => message.parseAddressList("a<".repeat(size / 2)))
+}
+
+// What a tag left open means: a comment or a script runs to the end, the way a
+// browser reads it, and a "<" that nothing closes is text.
+assert.strictEqual(message.htmlToText("kept<!-- never closed"), "kept")
+assert.strictEqual(message.htmlToText("kept<script>never closed"), "kept")
+assert.strictEqual(message.htmlToText("a < b"), "a < b")
+assert.strictEqual(message.htmlToText("<li>one</li><link rel=x>two"), "\u2022 one\ntwo",
+  "a <link> is not a list item")
+
+// A name in angle-bracket form keeps meaning what it meant.
+assert.strictEqual(message.parseAddress("a<b<c@x.com>").email, "c@x.com")
+assert.strictEqual(message.parseAddress("Jane <j@x.com>  ").name, "Jane")
+assert.strictEqual(message.parseAddress("a<b>c").email, "a<b>c", "no trailing address, no split")
+
+// An encoded word may carry a display name and never an address.
+assert.strictEqual(message.addressHeader("To", "Jos\u00e9 <jose@example.com>, b@example.com"),
+  "To: =?UTF-8?B?" + Buffer.from("Jos\u00e9").toString("base64") + "?= <jose@example.com>, b@example.com")
+assert.strictEqual(message.addressHeader("To", "a@example.com, b@example.com"), "To: a@example.com, b@example.com")
+assert.ok(!/[\r\n]/.test(message.addressHeader("Cc",
+  "\u00dc <=?UTF-8?B?" + Buffer.from("x@y.com>\r\nBcc: z@w.com").toString("base64") + "?=>")),
+  "a line break decoded out of an encoded word does not survive")
+
 console.log("test_message.js ok")

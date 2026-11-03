@@ -1616,12 +1616,22 @@ Item {
     loadMessages(false)
   }
 
+  // A Gmail message id is opaque, so it may go on xdg-open's command line. An
+  // IMAP one is "<uid>:<folder>", and a folder name may not — which is one more
+  // reason than the missing web UI for refusing here, and not only in the menu.
   function openInBrowser(id) {
+    if (!canOpenOnWeb) return
     Quickshell.execDetached(["xdg-open", Api.webMessageUrl(id, 0)])
   }
 
+  // The URL is an argument to xdg-open, and every local account can read a
+  // process's arguments in /proc — so it carries one of the provider's own
+  // mailbox queries or nothing. A typed search or a label name is the user's
+  // own words; with either on screen this opens the inbox instead.
   function openWebInbox() {
-    Quickshell.execDetached(["xdg-open", Api.webSearchUrl(effectiveQuery, 0)])
+    if (!canOpenOnWeb) return
+    Quickshell.execDetached(["xdg-open",
+      Api.webSearchUrl(Model.webMailboxQuery(mailboxes, mailboxKey, searchQuery, rawQuery), 0)])
   }
 
   function openCloudConsole() {
@@ -1836,6 +1846,8 @@ Item {
 
   CacheStore {
     id: cacheStore
+    pluginDir: root.pluginDir
+    keyId: root.keyId
     accountId: root.accountId
     // The file lands after the window is already up, so the first paint waits
     // for it rather than the other way round.

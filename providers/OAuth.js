@@ -105,11 +105,15 @@ function parseCallbackRequestLine(line, expectedPath) {
   if (path !== requiredPath) return { ok: false, error: "Unexpected sign-in callback path" }
   var values = parseQuery(separator < 0 ? "" : target.substring(separator + 1))
   if (values.error) {
+    // A fixed sentence, never the description. Whatever reaches the port wrote
+    // this query — a web page can aim a redirect at loopback — so its
+    // error_description is a stranger's words that would otherwise be shown
+    // in the window as if Google had said them.
     return {
       ok: false,
       error: values.error === "access_denied"
         ? "Google sign-in was cancelled"
-        : (values.error_description || values.error),
+        : "Google sign-in did not finish. Please try again",
       state: values.state || ""
     }
   }
@@ -122,6 +126,36 @@ function parseCallbackRequestLine(line, expectedPath) {
   }
   return { ok: true, code: values.code, state: values.state || "" }
 }
+
+// How many requests that are not the callback the listener will answer before
+// it gives up. Each one costs a socat restart, and a local process looping on
+// the port would otherwise keep that going until the timeout.
+var MAX_CALLBACK_ATTEMPTS = 20
+
+// What the listener does with one request line, given the state this process
+// sent to Google:
+//
+//   exchange  the callback, carrying our state and a code
+//   fail      the callback, carrying our state and Google's refusal
+//   ignore    anything else — another path, a missing or different state —
+//             answered and dropped while the sign-in keeps waiting
+//
+// Only a request that carries our state can end the sign-in. The port is open
+// to every local process and to any web page that can redirect to loopback, so
+// a request without it is a stranger's, and letting the first one through
+// would let anybody on the machine cancel a sign-in by knocking first.
+function callbackVerdict(line, expectedPath, expectedState) {
+  var parsed = parseCallbackRequestLine(line, expectedPath)
+  var wanted = String(expectedState || "")
+  var state = String(parsed.state || "")
+  if (wanted === "" || state !== wanted) return { action: "ignore" }
+  if (!parsed.ok) return { action: "fail", error: parsed.error }
+  return { action: "exchange", code: parsed.code }
+}
+
+// The page an ignored request gets. Fixed, because it answers a request that
+// may not be Google's.
+var IGNORED_CALLBACK_REASON = "This request did not come from the sign-in Omail started"
 
 function parsePkceOutput(line) {
   var parts = String(line || "").trim().split("\t")

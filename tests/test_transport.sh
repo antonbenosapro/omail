@@ -33,6 +33,12 @@ if [ -z "$header_file" ]; then
   printf '%s' "${CURL_STUB_CAPABILITY:-}"
   exit "${CURL_STUB_PROBE_EXIT:-0}"
 fi
+# A reply too large for an environment variable, read from a file instead.
+if [ -n "${CURL_STUB_BODY_FILE:-}" ]; then
+  cat >/dev/null
+  cat "$CURL_STUB_BODY_FILE"
+  exit 0
+fi
 # Fails the first request and succeeds after, so the retry can be asserted on.
 if [ -n "${CURL_STUB_FAIL_ONCE:-}" ]; then
   if [ ! -f "$CURL_STUB_FAIL_ONCE" ]; then
@@ -285,30 +291,82 @@ upload-file = "/etc/shadow"') $(b64 'Subject: hi
 
 body') $(b64 'friend@example.com
 mail-rcpt = "attacker@example.com"')"
-config=$(config_for "$injected_send")
-# SMTP writes one `upload-file` of its own, for the message. The injected one
-# must not become a second: a directive curl reads later wins over an earlier
-# one, so an added `upload-file` would replace the message being sent.
-uploads=$(printf '%s' "$config" | grep -c '^upload-file = ' || true)
-if [ "$uploads" = "1" ]; then
-  printf '  ok   an LF in the sender cannot add a second upload-file\n'
+# An address with a line break in it is not one address, so the transport
+# refuses the send outright rather than strip the break and carry on: nothing
+# reaches curl, and the exit is a failure the panel reports.
+CURL_STUB_ARGV="$work/argv-injected"
+rm -f "$CURL_STUB_ARGV"
+if printf '%s\n' "$injected_send" \
+  | CURL_STUB_ARGV="$CURL_STUB_ARGV" XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" \
+    sh "$script" >/dev/null 2>&1; then
+  printf '  FAIL an LF in the sender was accepted\n'
+  failures=$(( failures + 1 ))
 else
-  printf '  FAIL an injected sender produced %s upload-file lines\n' "$uploads"
+  printf '  ok   an LF in the sender refuses the send\n'
+fi
+if [ -f "$CURL_STUB_ARGV" ]; then
+  printf '  FAIL curl ran for an envelope the transport should have refused\n'
+  failures=$(( failures + 1 ))
+else
+  printf '  ok   and curl never runs for it\n'
+fi
+
+# ------------------------------------------------------- envelope addresses
+#
+# Each address becomes `MAIL FROM:<...>` or `RCPT TO:<...>`, and curl writes it
+# between the brackets as given. A ">" ends the address and the rest is a
+# parameter; a space, a comma or a semicolon makes it more than one. The
+# transport refuses all of them itself, whatever ImapProtocol.js already did.
+
+send_to() {
+  printf '%s\n' "smtp $(b64 'smtps://smtp.example.org:465') $(b64 'jane:pw') $(b64 "$1") $(b64 'Subject: hi
+
+x') $(b64 "$2")" \
+    | CURL_STUB_CAPABILITY='250-AUTH PLAIN' XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" \
+      sh "$script" >/dev/null 2>&1
+}
+
+tab=$(printf '\t')
+bell=$(printf '\a')
+for bad in 'friend@example.com> NOTIFY=NEVER' 'friend@example.com>NOTIFY=NEVER' \
+  '<friend@example.com>' 'a@example.com,b@example.com' 'a@example.com;b@example.com' \
+  '"friend"@example.com' "friend@example.com${tab}x" "friend${bell}@example.com" ''; do
+  if send_to 'jane@example.org' "$bad"; then
+    printf '  FAIL the recipient [%s] was accepted\n' "$bad"
+    failures=$(( failures + 1 ))
+  else
+    printf '  ok   the recipient [%s] is refused\n' "$bad"
+  fi
+done
+# A trailing line break is the one thing a check on $(...) never sees, because
+# the substitution strips it.
+newline='
+'
+if send_to 'jane@example.org' "friend@example.com${newline}"; then
+  printf '  FAIL a recipient ending in a line break was accepted\n'
+  failures=$(( failures + 1 ))
+else
+  printf '  ok   a recipient ending in a line break is refused\n'
+fi
+if send_to 'jane@example.org> SIZE=1' 'friend@example.com'; then
+  printf '  FAIL a sender carrying a parameter was accepted\n'
+  failures=$(( failures + 1 ))
+else
+  printf '  ok   a sender carrying a parameter is refused\n'
+fi
+if send_to 'jane@example.org' 'friend+tag@mail.example.com'; then
+  printf '  ok   a plain address with a tag is still sent\n'
+else
+  printf '  FAIL a plain address was refused\n'
   failures=$(( failures + 1 ))
 fi
-froms=$(printf '%s' "$config" | grep -c '^mail-from = ' || true)
-if [ "$froms" = "1" ]; then
-  printf '  ok   an injected sender is still one mail-from\n'
+# A username with no "@" signs in on some servers and is what the account
+# sends as. The transport holds it to what the command needs, not to the shape
+# of an address.
+if send_to 'jane' 'friend@example.com'; then
+  printf '  ok   a bare username is still a usable sender\n'
 else
-  printf '  FAIL an injected sender produced %s mail-from lines\n' "$froms"
-  failures=$(( failures + 1 ))
-fi
-check_absent "an LF in a recipient cannot add another recipient" "$config" 'mail-rcpt = "attacker@example.com"'
-rcpts=$(printf '%s' "$config" | grep -c '^mail-rcpt = ' || true)
-if [ "$rcpts" = "1" ]; then
-  printf '  ok   an injected recipient is still one recipient\n'
-else
-  printf '  FAIL an injected recipient produced %s mail-rcpt lines\n' "$rcpts"
+  printf '  FAIL a bare username was refused as a sender\n'
   failures=$(( failures + 1 ))
 fi
 
@@ -713,6 +771,98 @@ else
   printf '  FAIL expected 3 lines of output, got %s\n' "$lines"
   failures=$(( failures + 1 ))
 fi
+
+# ------------------------------------------------------ loopback, exactly
+#
+# Plaintext is allowed to loopback alone, and the host is what decides it. A
+# prefix match on "localhost:" also matched a URL whose userinfo began that way
+# — `imap://localhost:1@evil.example/` dials evil.example — so ssl-reqd was
+# skipped for a remote host. Such a URL is refused outright, and the loopback
+# match itself takes only a port of digits after the host.
+
+# These answer the capability probe, so each host's answer is cached and the
+# checks do not wait out the retry an empty probe earns.
+CURL_STUB_CAPABILITY='* CAPABILITY IMAP4rev1 AUTH=PLAIN'
+export CURL_STUB_CAPABILITY
+
+for bad in 'imap://localhost:1@evil.example/INBOX' 'imap://127.0.0.1:1143@evil.example/' \
+  'smtp://[::1]:25@evil.example' 'imaps://jane@imap.example.org/INBOX'; do
+  if printf '%s\n' "imap $(b64 "$bad") $(b64 'jane:pw') $(b64 'NOOP')" \
+    | XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then
+    printf '  FAIL %s was accepted\n' "$bad"
+    failures=$(( failures + 1 ))
+  else
+    printf '  ok   %s is refused\n' "$bad"
+  fi
+done
+
+for remote in 'imap://localhost.evil.example:143/INBOX' 'imap://localhost:143x/INBOX' \
+  'imap://127.0.0.1.evil.example/INBOX' 'imap://localhost:/INBOX'; do
+  config=$(config_for "imap $(b64 "$remote") $(b64 'jane:pw') $(b64 'NOOP')")
+  check "$remote is not loopback, so TLS is required" "$config" 'ssl-reqd'
+done
+for local in 'imap://localhost/INBOX' 'imap://localhost:1143/INBOX' 'imap://127.0.0.1:1143/INBOX' \
+  'imap://[::1]:1143/INBOX'; do
+  config=$(config_for "imap $(b64 "$local") $(b64 'jane:pw') $(b64 'NOOP')")
+  check_absent "$local is loopback and may stay plain" "$config" 'ssl-reqd'
+done
+
+# --------------------------------------------------------- curl's arguments
+#
+# curl expands "[1-9]" and "{a,b}" in a URL into several transfers unless told
+# not to, and a folder name can hold either. Every invocation — the request and
+# the capability probe — turns that off, and carries the response size cap.
+
+rm -rf "$work/cache"
+argv_file="$work/argv"
+rm -f "$argv_file"
+printf '%s\n' "imap $(b64 'imaps://imap.example.org:993/%5BGmail%5D%2FAll%20Mail') $(b64 'jane:pw') $(b64 'NOOP')" \
+  | CURL_STUB_ARGV="$argv_file" XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" \
+    sh "$script" >/dev/null
+check "the request runs with --globoff" "$(cat "$argv_file")" '--globoff'
+check "the request caps the response size" "$(cat "$argv_file")" '--max-filesize'
+# The probe is the run with no --dump-header, and it runs first; a stub that
+# records only the last argv is pointed at a probe-only run instead.
+probe_argv="$work/probe-argv"
+cat > "$work/bin/curl-probe" <<'PROBESTUB'
+#!/bin/sh
+case " $* " in
+  *" --dump-header "*) ;;
+  *) printf '%s\n' "$@" >> "$PROBE_ARGV" ;;
+esac
+cat >/dev/null
+exit 0
+PROBESTUB
+chmod +x "$work/bin/curl-probe"
+mkdir -p "$work/probe-bin"
+ln -sf "$work/bin/curl-probe" "$work/probe-bin/curl"
+rm -rf "$work/cache"
+rm -f "$probe_argv"
+printf '%s\n' "imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 'jane:pw') $(b64 'NOOP')" \
+  | PROBE_ARGV="$probe_argv" XDG_CACHE_HOME="$work/cache" PATH="$work/probe-bin:$PATH" \
+    sh "$script" >/dev/null 2>&1 || true
+check "the capability probe runs with --globoff" "$(cat "$probe_argv" 2>/dev/null)" '--globoff'
+rm -rf "$work/cache"
+
+# A reply over the cap never reaches the panel: it answers 63, as curl's own
+# limit does, with nothing on stdout to decode. One octet under is untouched.
+big="$work/big-reply"
+head -c 27262977 /dev/zero | tr '\0' 'a' > "$big"
+out=$(printf '%s\n' "imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 'jane:pw') $(b64 'UID FETCH 1 (BODY.PEEK[])')" \
+  | CURL_STUB_BODY_FILE="$big" XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
+check "a reply over the cap answers 63" "$(printf '%s' "$out" | sed -n '1p')" '63'
+if [ -z "$(printf '%s' "$out" | sed -n '2p')" ]; then
+  printf '  ok   and hands the panel nothing to decode\n'
+else
+  printf '  FAIL an oversized reply still reached the panel\n'
+  failures=$(( failures + 1 ))
+fi
+head -c 27262976 /dev/zero | tr '\0' 'a' > "$big"
+out=$(printf '%s\n' "imap $(b64 'imaps://imap.example.org:993/INBOX') $(b64 'jane:pw') $(b64 'UID FETCH 1 (BODY.PEEK[])')" \
+  | CURL_STUB_BODY_FILE="$big" XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script")
+check "a reply exactly at the cap is delivered" "$(printf '%s' "$out" | sed -n '1p')" '0'
+rm -f "$big"
+unset CURL_STUB_CAPABILITY
 
 # A malformed request must fail rather than run curl with something guessed.
 if printf 'not-base64-at-all\n' | XDG_CACHE_HOME="$work/cache" PATH="$work/bin:$PATH" sh "$script" >/dev/null 2>&1; then

@@ -56,7 +56,7 @@ function serialize(store) {
 }
 
 function queryKey(query, maxResults) {
-  return String(query || "").replace(/^\s+|\s+$/g, "")
+  return String(query || "").trim()
     + "|" + Math.max(1, Math.floor(Number(maxResults) || 25))
 }
 
@@ -150,18 +150,34 @@ function putProfile(store, profile, nowMs) {
 
 // ------------------------------------------------------------ file naming
 //
-// One file per account, named after the address so a store on disk can be
-// matched to its mailbox by eye. The address is lower-cased first: mail
-// addresses are compared case-insensitively in practice, and two files for one
-// mailbox would silently halve the cache — which also keeps the name unique on
-// a case-insensitive filesystem, where the two spellings could not coexist.
+// One file per account, named by the account's keyId (Accounts.makeAccount) —
+// random, made once, and kept in accounts.json. The name ends up as an
+// argument wherever a script has to act on the file, and every local account
+// can read a process's arguments in /proc, so it says nothing about whose
+// mailbox it is. Without a key there is no file at all: a store with nowhere
+// of its own to go is held in memory rather than in a name shared with every
+// other keyless account.
+function storeFileName(keyId) {
+  return KEY_ID.test(String(keyId || "")) ? "store-" + keyId + ".json" : ""
+}
+
+// The name a store had before keyIds, which was the address. Kept only so an
+// upgrade can find the file once, take it over and remove it
+// (scripts/body-cache.sh adopt-store) — and that name travels on stdin, never
+// as an argument, because it is the address.
+//
+// The address is lower-cased first: mail addresses are compared
+// case-insensitively in practice, and two files for one mailbox would silently
+// halve the cache — which also keeps the name unique on a case-insensitive
+// filesystem, where the two spellings could not coexist.
 //
 // Every character outside [a-z0-9.-] becomes "_" plus the lower-case hex of one
 // UTF-8 byte. Nothing else can produce a "_", so the encoding is prefix-free
 // and reversible, and two different addresses therefore cannot land on one
 // name. Reversibility is also what makes the name safe: no "/", NUL, space, or
 // newline survives it, so the result is always a single component that stays
-// inside the cache directory.
+// inside the cache directory. The two forms cannot meet either: one starts
+// "account-", the other "store-".
 
 var SAFE_NAME_CHAR = /^[a-z0-9.\-]$/
 
@@ -222,7 +238,7 @@ function fnv1a(text) {
   return (hash >>> 0).toString(16)
 }
 
-function fileName(accountId) {
+function legacyFileName(accountId) {
   var encoded = encodeAccountId(String(accountId || "").toLowerCase())
   // A missing address still needs somewhere to put a store. The trailing "_"
   // is what keeps this name out of every real address's reach: the encoder

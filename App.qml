@@ -1344,6 +1344,7 @@ Item {
         // window most needs to say, or — when it has nothing to report — what
         // the keyboard can do from where you are standing.
         readonly property bool hasNotice: root.notice !== ""
+          || reader.linkHint !== ""
           || (!!root.service
             && (root.service.actionStatus !== "" || root.service.lastError !== ""))
 
@@ -1370,18 +1371,22 @@ Item {
           urgentColor: root.urgent
           accentColor: root.accent
           panelFontFamily: root.fontFamily
+          // Where the link under the pointer goes comes first: the words of a
+          // link are the sender's, and this is the one place its real host is
+          // said out loud before it is clicked.
           text: {
+            if (reader.linkHint !== "") return reader.linkHint
             if (root.notice !== "") return root.notice
             if (!root.service) return ""
             if (root.service.actionStatus !== "") return root.service.actionStatus
             return root.service.lastError
           }
-          urgent: !!root.service && root.service.lastError !== ""
+          urgent: reader.linkHint === "" && !!root.service && root.service.lastError !== ""
             && root.service.actionStatus === ""
           // Only ever beside the account's own sentence. The window's `notice`
           // is its own thing — a refused duplicate mailbox — and has nothing
           // to take back.
-          actionLabel: root.notice === "" && !!root.service
+          actionLabel: reader.linkHint === "" && root.notice === "" && !!root.service
             && root.service.actionStatus !== "" ? root.service.undoLabel : ""
           busy: !!root.service && root.service.undoBusy
           busyLabel: "Undoing…"

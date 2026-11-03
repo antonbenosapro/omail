@@ -37,7 +37,12 @@ Item {
     if (wanted === "") return
     requested = wanted
     refused = !Html.isDisplayableImageUrl(wanted)
-    source = refused ? "" : wanted
+    // The string the check passed, not the one it was handed. The check reads
+    // the URL with its references decoded and its padding trimmed; the raw
+    // src is a different string, and Qt reading it some other way is exactly
+    // the gap between what was approved and what is fetched. A data: image
+    // past Html's size cap is refused by the same check.
+    source = refused ? "" : Html.normalizedUrl(wanted)
     sheet.open()
   }
 

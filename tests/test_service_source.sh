@@ -63,4 +63,34 @@ grep -q 'property var mergedIds' Service.qml \
 grep -q 'Accounts.mergedIds' Service.qml \
   || fail "which mailboxes merge is Accounts.js's rule, not a local one"
 
+# Removing an account purges what was kept for it, from the entry as it was
+# when the user removed it. The Instantiator above is modelled on a count, so
+# the object at that index becomes the next account's the moment the list
+# changes; a purge that asked it afterwards would delete the wrong mailbox's
+# sign-in. So the entry has to be read before the list is reassigned.
+removal=$(awk '/function removeAccountAt\(/,/^  }$/' Service.qml)
+printf '%s\n' "$removal" | grep -q 'purgeAccountData(removed, true)' \
+  || fail "removeAccountAt must purge the removed account's keyring entries and caches"
+first_capture=$(printf '%s\n' "$removal" | grep -n 'var removed = accounts\[index\]' | cut -d: -f1)
+first_assign=$(printf '%s\n' "$removal" | grep -n 'accountList = ' | cut -d: -f1)
+[ -n "$first_capture" ] && [ -n "$first_assign" ] && [ "$first_capture" -lt "$first_assign" ] \
+  || fail "removeAccountAt must capture the entry before the list changes"
+grep -q 'Accounts.removalJobs' Service.qml \
+  || fail "what a removal deletes is Accounts.removalJobs's decision"
+if printf '%s\n' "$removal" | grep -q 'accountAt(\|accountHosts.objectAt'; then
+  fail "a purge must not read the account's object: it is rebound to the next account"
+fi
+
+# The list store is named by keyId, and never by the address.
+grep -q 'Cache.storeFileName(keyId)' cache/CacheStore.qml \
+  || fail "CacheStore must name its file by the account's keyId"
+if grep -q 'Cache.fileName(' cache/CacheStore.qml; then
+  fail "CacheStore must not name its file after the address"
+fi
+
+# Open web inbox hands its URL to xdg-open; a typed search must not ride along.
+if grep -q 'webSearchUrl(effectiveQuery\|webSearchUrl(searchQuery' account/MailAccount.qml; then
+  fail "openWebInbox must not put the typed search on xdg-open's command line"
+fi
+
 printf 'test_service_source.sh ok\n'

@@ -67,6 +67,38 @@ assert.strictEqual(
   oauth.parseCallbackRequestLine("GET /oauth2callback?state=abc HTTP/1.1", "/oauth2callback").error,
   "Google did not return an authorization code")
 
+// Only a request carrying the state this process sent can end the sign-in.
+// Anything else is answered and ignored, and the listener keeps waiting.
+{
+  const path = "/oauth2callback"
+  deepEqual(oauth.callbackVerdict("GET /oauth2callback?code=C1&state=s1 HTTP/1.1", path, "s1"),
+    { action: "exchange", code: "C1" })
+  deepEqual(oauth.callbackVerdict("GET /oauth2callback?code=C1&state=other HTTP/1.1", path, "s1"),
+    { action: "ignore" }, "a different state is not the callback")
+  deepEqual(oauth.callbackVerdict("GET /oauth2callback?code=C1 HTTP/1.1", path, "s1"),
+    { action: "ignore" }, "nor is a missing one")
+  deepEqual(oauth.callbackVerdict("GET /oauth2callback?error=access_denied HTTP/1.1", path, "s1"),
+    { action: "ignore" }, "an error without our state cannot cancel the sign-in")
+  deepEqual(oauth.callbackVerdict(
+    "GET /oauth2callback?error=x&error_description=Call%20555-0100&state=evil HTTP/1.1", path, "s1"),
+    { action: "ignore" })
+  deepEqual(oauth.callbackVerdict("GET /favicon.ico?state=s1 HTTP/1.1", path, "s1"), { action: "ignore" })
+  deepEqual(oauth.callbackVerdict("POST /oauth2callback?state=s1&code=C HTTP/1.1", path, "s1"), { action: "ignore" })
+  deepEqual(oauth.callbackVerdict("GET /oauth2callback?code=C&state= HTTP/1.1", path, ""),
+    { action: "ignore" }, "no state of our own matches nothing, not the empty string")
+  deepEqual(oauth.callbackVerdict("GET /oauth2callback?error=access_denied&state=s1 HTTP/1.1", path, "s1"),
+    { action: "fail", error: "Google sign-in was cancelled" })
+  deepEqual(oauth.callbackVerdict(
+    "GET /oauth2callback?error=server_error&error_description=Call%20us%20at%20555-0100&state=s1 HTTP/1.1",
+    path, "s1"),
+    { action: "fail", error: "Google sign-in did not finish. Please try again" },
+    "even with our state, the description is not shown")
+  deepEqual(oauth.callbackVerdict("GET /oauth2callback?state=s1 HTTP/1.1", path, "s1"),
+    { action: "fail", error: "Google did not return an authorization code" })
+  assert.ok(oauth.MAX_CALLBACK_ATTEMPTS > 1)
+  assert.ok(oauth.IGNORED_CALLBACK_REASON.length > 0)
+}
+
 // ------------------------------------------------------------------- PKCE
 
 const pkce = oauth.parsePkceOutput(
@@ -189,9 +221,11 @@ assert.strictEqual(oauth.byteLength(""), 0)
     + encodeURIComponent(hostile) + " HTTP/1.1"
   var parsed = oauth.parseCallbackRequestLine(line, "/oauth2callback")
   assert.strictEqual(parsed.ok, false)
-  assert.strictEqual(parsed.error, hostile, "the description arrives decoded")
+  assert.strictEqual(parsed.error, "Google sign-in did not finish. Please try again",
+    "the description is a stranger's words and is never shown")
 
-  var page = oauth.failureResponse(null, parsed.error)
+  // failureResponse still escapes whatever it is handed.
+  var page = oauth.failureResponse(null, hostile)
   assert.ok(page.indexOf("<img") < 0, "no element survives into the page")
   assert.ok(page.toLowerCase().indexOf("<script") < 0, "and no script does either")
   assert.ok(page.indexOf("&lt;img src=x onerror=alert(1)&gt;") > 0, "it is shown as text")

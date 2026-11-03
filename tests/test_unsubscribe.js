@@ -173,6 +173,13 @@ assert.strictEqual(unsub.postContentType(), "application/x-www-form-urlencoded")
   assert.ok(command.indexOf("-L") < 0 && command.indexOf("--location") < 0)
   assert.ok(command.indexOf("--url") < 0, "the address is never an argument: /proc shows those to everyone")
   assert.strictEqual(command[command.indexOf("--data") + 1], "List-Unsubscribe=One-Click")
+  // A sender's [1-999999] is a range to curl unless globbing is off, and one
+  // click would then be a million POSTs to whoever the URL names.
+  const globoff = command.indexOf("--globoff")
+  assert.ok(globoff > command.indexOf("sh", 1), "--globoff is one of curl's own arguments")
+  assert.ok(command.join(" ").indexOf("no-globoff") < 0, "and nothing turns it back on")
+  assert.ok(command[2].indexOf("\"$@\"") > 0, "the script passes its arguments on to curl")
+  assert.ok(unsub.postInput("https://victim.example/u/[1-999999]").indexOf("globoff") < 0)
   assert.strictEqual(unsub.postInput("https://list.example/u/1"), "https://list.example/u/1\n")
   assert.strictEqual(unsub.postInput('https://x.example/a"b\\c'), 'https://x.example/a\\"b\\\\c\n')
   assert.strictEqual(unsub.postInput("https://x.example/a\nproxy = evil"), "https://x.example/aproxy = evil\n",

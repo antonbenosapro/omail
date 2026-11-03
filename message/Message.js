@@ -240,17 +240,30 @@ function unquote(value) {
   return text.replace(/\\(.)/g, "$1").trim()
 }
 
+// The "<...>" a header value ends with, and what came before it. Found with
+// lastIndexOf rather than /^(.*)<([^>]*)>\s*$/, which retried from every "<"
+// in the value and so took seconds over a From header that was mostly "<".
+// `raw` arrives trimmed. A name cannot span a line, as `.` could not.
+function angleAddress(raw) {
+  if (raw.charAt(raw.length - 1) !== ">") return null
+  var open = raw.lastIndexOf("<", raw.length - 2)
+  if (open < 0 || raw.indexOf(">", open) !== raw.length - 1) return null
+  var name = raw.substring(0, open)
+  if (/[\n\r\u2028\u2029]/.test(name)) return null
+  return { name: name, email: raw.substring(open + 1, raw.length - 1) }
+}
+
 // "Jane Doe <jane@example.com>", "<jane@example.com>" and a bare address all
 // have to end up as the same shape.
 function parseAddress(value) {
   var raw = decodeHeaderValue(value).trim()
   if (!raw) return { name: "", email: "", display: "" }
-  var angled = raw.match(/^(.*)<([^>]*)>\s*$/)
+  var angled = angleAddress(raw)
   var name = ""
   var email = ""
   if (angled) {
-    name = unquote(angled[1])
-    email = angled[2].trim()
+    name = unquote(angled.name)
+    email = angled.email.trim()
   } else {
     email = raw.replace(/^\s*<|>\s*$/g, "").trim()
   }
@@ -259,6 +272,18 @@ function parseAddress(value) {
 }
 
 function parseAddressList(value) {
+  var entries = splitAddressList(value)
+  var result = []
+  for (var j = 0; j < entries.length; j++) {
+    if (!entries[j].trim()) continue
+    result.push(parseAddress(entries[j]))
+  }
+  return result
+}
+
+// The entries of a list, split on the commas that are not inside a quoted
+// name or an angle address.
+function splitAddressList(value) {
   var raw = String(value || "")
   var entries = []
   var current = ""
@@ -277,12 +302,7 @@ function parseAddressList(value) {
     current += character
   }
   entries.push(current)
-  var result = []
-  for (var j = 0; j < entries.length; j++) {
-    if (!entries[j].trim()) continue
-    result.push(parseAddress(entries[j]))
-  }
-  return result
+  return entries
 }
 
 function formatAddressList(addresses, limit) {
@@ -322,23 +342,109 @@ function decodePart(part) {
 // reader offer the image itself when the marker is clicked.
 var IMAGE_MARKER = /\[image (\d+)\]/g
 
+// One pass over the markup, by index. This used to be a chain of regular
+// expressions, and three of them retried from every position of a run they
+// could not finish: an unclosed "<!--", "<img" or "<li" scanned to the end of
+// the message from each one, and a run of spaces with no line break after it
+// was rescanned from every space. A message made of nothing else froze the
+// shell for seconds. Every scan here either finds its terminator and moves past
+// it or gives up on the rest of the text, so the work is linear.
 function htmlToText(html) {
+  return tidyText(decodeEntities(stripMarkup(String(html || ""))))
+}
+
+// Where a tag that starts at `open` ends. Quotes are honoured for an image,
+// whose alt text is where a ">" turns up; anything else ends at the first ">".
+// -1 when nothing closes it.
+//
+// A quoted scan that reaches the end found a quote nothing closes, and every
+// later scan would find the same: so it is done once, `scan.exhausted`
+// remembers, and every image after it ends at its first ">". Without that, an
+// image whose quote holds the ">" the fallback stops at sends the next image's
+// scan to the end of the message too.
+function tagEnd(source, open, quoted, scan) {
+  if (!quoted || scan.exhausted) return source.indexOf(">", open + 1)
+  var quote = ""
+  for (var i = open + 1; i < source.length; i++) {
+    var character = source.charAt(i)
+    if (quote !== "") {
+      if (character === quote) quote = ""
+    } else if (character === "\"" || character === "'") {
+      quote = character
+    } else if (character === ">") {
+      return i
+    }
+  }
+  scan.exhausted = true
+  return source.indexOf(">", open + 1)
+}
+
+function tagNameAt(source, open) {
+  var at = open + 1
+  if (source.charAt(at) === "/") at++
+  var name = ""
+  while (at < source.length && /[A-Za-z0-9]/.test(source.charAt(at))) name += source.charAt(at++)
+  return name.toLowerCase()
+}
+
+function stripMarkup(source) {
+  var out = []
   var imageCount = 0
-  return String(html || "")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")
+  var scan = { exhausted: false }
+  var at = 0
+  while (at < source.length) {
+    var open = source.indexOf("<", at)
+    if (open < 0) {
+      out.push(source.substring(at))
+      break
+    }
+    out.push(source.substring(at, open))
+
+    // A comment, a script and a style are dropped whole. Left open, each runs
+    // to the end of the message, which is what a browser does with one.
+    if (source.substr(open, 4) === "<!--") {
+      var closeComment = source.indexOf("-->", open + 4)
+      if (closeComment < 0) break
+      at = closeComment + 3
+      continue
+    }
+    var name = tagNameAt(source, open)
+    var closing = source.charAt(open + 1) === "/"
+    if (!closing && (name === "script" || name === "style")) {
+      var finish = new RegExp("</" + name + ">", "gi")
+      finish.lastIndex = open
+      var found = finish.exec(source)
+      if (!found) break
+      at = found.index + found[0].length
+      continue
+    }
+
+    var end = tagEnd(source, open, !closing && name === "img", scan)
+    if (end < 0) {
+      // Nothing closes it, and nothing later can: the rest is text.
+      out.push(source.substring(open))
+      break
+    }
+    at = end + 1
+    if (name === "") {
+      // "<" not starting a tag name: "a < b", "<>" or "<!doctype". What the
+      // patterns this replaced did with it was drop it up to the next ">".
+      continue
+    }
     // The reader does not use this numbering: MailAccount takes the body text
     // and the picture list from one walk over Html.js's parse tree, so the two
     // cannot disagree. What is left here serves decodeSnippet, where Gmail's
     // snippet is escaped prose that never carried an image.
-    .replace(/<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, function() {
-      imageCount++
-      return "[image " + imageCount + "]"
-    })
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
-    .replace(/<li[^>]*>/gi, "• ")
-    .replace(/<[^>]+>/g, "")
+    if (!closing && name === "img") out.push("[image " + (++imageCount) + "]")
+    else if (!closing && name === "br") out.push("\n")
+    else if (!closing && name === "li") out.push("\u2022 ")
+    else if (closing && /^(p|div|tr|li|h[1-6])$/.test(name)) out.push("\n")
+  }
+  return out.join("")
+}
+
+function decodeEntities(text) {
+  return text
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
@@ -347,9 +453,20 @@ function htmlToText(html) {
     .replace(/&#39;|&apos;/gi, "'")
     .replace(/&#(\d+);/g, function(match, code) { return String.fromCharCode(Number(code)) })
     .replace(/&#x([0-9a-fA-F]+);/g, function(match, code) { return String.fromCharCode(parseInt(code, 16)) })
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/^\s+|\s+$/g, "")
+}
+
+// Trailing spaces off each line, no more than one blank line in a row, and
+// nothing around the whole. Per line rather than /[ \t]+\n/, for the reason
+// at the top of htmlToText.
+function tidyText(text) {
+  var lines = text.split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i]
+    var keep = line.length
+    while (keep > 0 && (line.charAt(keep - 1) === " " || line.charAt(keep - 1) === "\t")) keep--
+    if (keep !== line.length) lines[i] = line.substring(0, keep)
+  }
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim()
 }
 
 function isAttachment(part) {
@@ -866,6 +983,33 @@ function foldHeader(name, value) {
   return name + ": =?UTF-8?B?" + encodeBase64(text) + "?="
 }
 
+// To and Cc. An encoded word may carry a display name and never an address
+// (RFC 2047, section 5), so a list with "José <jose@example.com>" in it cannot
+// go through `foldHeader`: that encoded the whole value, and the recipient got
+// a header with no address left in it to read. Each name is encoded on its
+// own, as `fromHeader` does, and the addresses stay as written.
+function addressHeader(name, value) {
+  var text = headerSafe(value)
+  if (/^[\x20-\x7e]*$/.test(text)) return name + ": " + text
+  var entries = splitAddressList(text)
+  var out = []
+  for (var i = 0; i < entries.length; i++) {
+    var raw = decodeHeaderValue(entries[i]).trim()
+    if (raw === "") continue
+    var angled = angleAddress(raw)
+    if (!angled) {
+      out.push(headerSafe(raw.replace(/^</, "").replace(/>$/, "")).trim())
+      continue
+    }
+    // Decoding can bring back a line break an encoded word was hiding, so the
+    // address is made safe again after it.
+    var phrase = encodedPhrase(unquote(angled.name))
+    var address = headerSafe(angled.email).trim()
+    out.push(phrase === "" ? address : phrase + " <" + address + ">")
+  }
+  return name + ": " + out.join(", ")
+}
+
 // In-Reply-To and References carry a Message-ID, and a Message-ID is a string
 // off a message a stranger sent — it reaches here having been read out of their
 // headers and no further. It goes back out verbatim because a reply has to
@@ -924,8 +1068,8 @@ function buildRawMessage(fields) {
   var values = fields || {}
   var lines = []
   if (values.from) lines.push(fromHeader(values.from, values.fromName))
-  lines.push(foldHeader("To", values.to || ""))
-  if (values.cc) lines.push(foldHeader("Cc", values.cc))
+  lines.push(addressHeader("To", values.to || ""))
+  if (values.cc) lines.push(addressHeader("Cc", values.cc))
   lines.push(foldHeader("Subject", values.subject || ""))
   var inReplyTo = referenceValue(values.inReplyTo)
   if (inReplyTo) {

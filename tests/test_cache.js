@@ -150,7 +150,7 @@ const DIRECTORY = "/home/u/.cache/omail"
 const SAFE_NAME = /^[a-z0-9._-]+$/
 
 function checkName(id) {
-  const name = cache.fileName(id)
+  const name = cache.legacyFileName(id)
   assert.ok(SAFE_NAME.test(name), "unsafe file name for " + JSON.stringify(id) + ": " + name)
   // The only property that really matters: whatever the address contains, the
   // name stays one component inside the cache directory.
@@ -163,13 +163,13 @@ function checkName(id) {
 const nameA = checkName("a@example.com")
 const nameB = checkName("b@example.com")
 assert.notStrictEqual(nameA, nameB, "two mailboxes never share a file")
-assert.strictEqual(cache.fileName("a@example.com"), nameA, "the name is stable across calls")
+assert.strictEqual(cache.legacyFileName("a@example.com"), nameA, "the name is stable across calls")
 
 // Mail addresses are compared case-insensitively in practice, and a
 // case-insensitive filesystem could not hold both spellings anyway: two files
 // for one mailbox would silently halve the cache.
-assert.strictEqual(cache.fileName("A@Example.COM"), nameA)
-assert.strictEqual(cache.fileName("A@EXAMPLE.COM"), nameA)
+assert.strictEqual(cache.legacyFileName("A@Example.COM"), nameA)
+assert.strictEqual(cache.legacyFileName("A@EXAMPLE.COM"), nameA)
 
 // A name built from an address must survive whatever the address contains. A
 // separator or a parent reference in a cache file name could point a write at
@@ -196,19 +196,19 @@ for (const id of awkward) {
 // file must not be some real mailbox's.
 const fallback = checkName("")
 assert.ok(fallback.length > 0, "an empty address still names a file")
-assert.strictEqual(cache.fileName(null), fallback)
-assert.strictEqual(cache.fileName(undefined), fallback)
-assert.strictEqual(cache.fileName(0), fallback)
-for (const id of awkward) assert.notStrictEqual(cache.fileName(id), fallback)
-assert.notStrictEqual(cache.fileName("none"), fallback)
-assert.notStrictEqual(cache.fileName("unknown"), fallback)
-assert.notStrictEqual(cache.fileName("account"), fallback)
+assert.strictEqual(cache.legacyFileName(null), fallback)
+assert.strictEqual(cache.legacyFileName(undefined), fallback)
+assert.strictEqual(cache.legacyFileName(0), fallback)
+for (const id of awkward) assert.notStrictEqual(cache.legacyFileName(id), fallback)
+assert.notStrictEqual(cache.legacyFileName("none"), fallback)
+assert.notStrictEqual(cache.legacyFileName("unknown"), fallback)
+assert.notStrictEqual(cache.legacyFileName("account"), fallback)
 
 // A file name has to fit in 255 bytes while an address may be far longer than
 // that, so long names are shortened — but shortening must not merge two
 // mailboxes that share a prefix.
 const longStem = new Array(201).join("a")
-assert.notStrictEqual(cache.fileName(longStem + "1@example.com"), cache.fileName(longStem + "2@example.com"))
+assert.notStrictEqual(cache.legacyFileName(longStem + "1@example.com"), cache.legacyFileName(longStem + "2@example.com"))
 checkName(longStem + "1@example.com")
 checkName(new Array(60).join("\u5f20") + "@example.cn")
 
@@ -223,11 +223,27 @@ for (let i = 0; i < 5000; i++) {
     longStem + i + "@example.com"
   ]
   for (const id of ids) {
-    const name = cache.fileName(id)
+    const name = cache.legacyFileName(id)
     assert.ok(sweep[name] === undefined,
       "collision: " + JSON.stringify(id) + " and " + JSON.stringify(sweep[name]) + " share " + name)
     sweep[name] = id
   }
+}
+
+// The store is named by the account's keyId now. The legacy name above is the
+// address, and a store's name reaches body-cache.sh as an argument, which
+// every local account can read in /proc.
+{
+  const key = "0123456789abcdef0123456789abcd01"
+  assert.strictEqual(cache.storeFileName(key), "store-" + key + ".json")
+  assert.strictEqual(path.dirname(path.resolve(DIRECTORY, cache.storeFileName(key))), DIRECTORY)
+  assert.strictEqual(cache.storeFileName(""), "", "no key, no file: never one shared by every keyless account")
+  assert.strictEqual(cache.storeFileName("a@example.com"), "", "and never an address")
+  assert.strictEqual(cache.storeFileName("../" + key), "")
+  assert.strictEqual(cache.storeFileName(key.toUpperCase()), "")
+  // The two forms cannot name the same file, so adopting one never clobbers
+  // the other.
+  for (const id of awkward) assert.ok(cache.legacyFileName(id).indexOf("store-") !== 0)
 }
 
 // --------------------------------------------------------------- freshness

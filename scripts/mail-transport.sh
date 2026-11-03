@@ -105,6 +105,74 @@ case "$url" in
   *) fail 'mail-transport.sh: refusing a URL that is not imap(s) or smtp(s)' ;;
 esac
 
+# The part of a URL between the scheme and the path: host, and port if any.
+authority_of() {
+  authority=${1#*://}
+  printf '%s' "${authority%%/*}"
+}
+
+# No userinfo. Imap.js never builds a URL with one — credentials travel as
+# `user` in the config — so an "@" in the authority is a URL somebody else
+# made, and it is the shape that fooled the loopback check below:
+# `imap://localhost:1@evil.example/` begins with "localhost:", and curl dials
+# evil.example. Refused outright rather than stripped, because a URL that was
+# edited to carry one has no right reading to fall back on.
+case "$(authority_of "$url")" in
+  *@*) fail 'mail-transport.sh: refusing a URL with userinfo in it' ;;
+esac
+
+# The SMTP envelope. Each of these becomes `MAIL FROM:<...>` or `RCPT TO:<...>`
+# and curl writes the value between the brackets as it is given, so a ">" ends
+# the address and what follows is a parameter — `a@b.com> NOTIFY=NEVER` — and a
+# line break is another command. ImapProtocol.js refuses such an address before
+# it gets here and says why; this is the transport not depending on that, the
+# same way `escape` does not depend on its callers stripping newlines.
+#
+# Checked before anything runs, in this shell rather than in `build_config`:
+# that runs in a pipeline, where `fail` would end only the subshell and curl
+# would be handed whatever config had been printed so far.
+# Decoded with nothing taken off. $(...) strips trailing newlines, and an
+# address checked without them is not the address that was sent.
+envelope_field_safe() {
+  value=$(decode "$1"; printf x)
+  envelope_safe "${value%x}"
+}
+
+envelope_safe() {
+  [ -n "$1" ] || return 1
+  case "$1" in
+    *[[:space:]]*|*[[:cntrl:]]*|*'<'*|*'>'*|*','*|*';'*|*'"'*) return 1 ;;
+  esac
+  return 0
+}
+
+if [ "$mode" = "smtp" ]; then
+  [ $# -ge 3 ] || fail 'mail-transport.sh: smtp needs a sender, a message and a recipient'
+  envelope_field_safe "$1" || fail 'mail-transport.sh: refusing a sender that is not one plain address'
+  envelope_index=0
+  for envelope_field in "$@"; do
+    envelope_index=$(( envelope_index + 1 ))
+    [ "$envelope_index" -gt 2 ] || continue
+    envelope_field_safe "$envelope_field" \
+      || fail 'mail-transport.sh: refusing a recipient that is not one plain address'
+  done
+fi
+
+# The most a response may be, in octets, before it reaches the panel: the
+# 25 MiB message cap (`MAX_MESSAGE_OCTETS` in ImapProtocol.js) plus 1 MiB for
+# everything around it — the FETCH line, its flags and date, curl's own
+# protocol lines. That headroom is generous: the framing of a whole page of
+# list rows is a few kilobytes. Measured on curl's raw output, before it is
+# base64-encoded for the pipe, so what the panel then decodes is at most a third
+# larger than this.
+#
+# Partial fetches already keep a message under it; this is the bound on
+# everything else a server might send, because the panel reads the whole reply
+# into a string on the GUI thread. curl enforces it where it knows a size in
+# advance; the check after it runs covers the rest, including the
+# protocol-header channel curl's own limit never looks at.
+max_response_octets=27262976
+
 escaped_url=$(escape "$url")
 escaped_credentials=$(escape "$credentials")
 
@@ -133,15 +201,34 @@ imap_probe='CAPABILITY'
 # chosen to avoid. Loopback alone may be plaintext, for a local bridge. This is
 # the second gate: Imap.js only builds a plain URL for one of those two cases,
 # and this keeps a password off the wire in clear even if it ever built another.
+#
+# The host is matched exactly, with nothing after it but an optional port of
+# digits. A prefix match — "localhost:*" — also matched
+# `localhost:1@evil.example`, whose host is evil.example; userinfo is refused
+# above, and this does not rely on that.
+is_loopback_authority() {
+  for loopback_host in 127.0.0.1 localhost '[::1]'; do
+    [ "$1" != "$loopback_host" ] || return 0
+    case "$1" in
+      "$loopback_host":*)
+        loopback_port=${1#"$loopback_host":}
+        case "$loopback_port" in
+          ''|*[!0-9]*) ;;
+          *) return 0 ;;
+        esac
+        ;;
+    esac
+  done
+  return 1
+}
+
 tls_directive() {
   case "$1" in
     imaps://*|smtps://*) return 0 ;;
   esac
-  authority=${1#*://}
-  authority=${authority%%/*}
-  case "$authority" in
-    127.0.0.1|127.0.0.1:*|localhost|localhost:*|'[::1]'|'[::1]:'*) return 0 ;;
-  esac
+  if is_loopback_authority "$(authority_of "$1")"; then
+    return 0
+  fi
   printf 'ssl-reqd\n'
 }
 
@@ -174,14 +261,16 @@ have_kerberos_ticket() {
 # " NAME " cannot hit a prefix of a longer one.
 run_probe() {
   if [ "$mode" = "imap" ]; then
-    curl --config - --silent --show-error --max-time 20 --connect-timeout 20 <<PROBE 2>&1
+    curl --config - --globoff --silent --show-error --max-filesize "$max_response_octets" \
+      --max-time 20 --connect-timeout 20 <<PROBE 2>&1
 url = "$1"
 noproxy = "*"
 $(tls_directive "$1")
 request = "$imap_probe"
 PROBE
   else
-    curl --config - --silent --show-error --verbose --max-time 20 --connect-timeout 20 <<PROBE 2>&1
+    curl --config - --globoff --silent --show-error --verbose --max-filesize "$max_response_octets" \
+      --max-time 20 --connect-timeout 20 <<PROBE 2>&1
 url = "$1"
 noproxy = "*"
 $(tls_directive "$1")
@@ -364,7 +453,6 @@ fi
 # The SMTP body has to be on disk before curl starts, because the config it is
 # named in is what stdin is carrying.
 if [ "$mode" = "smtp" ]; then
-  [ $# -ge 3 ] || fail 'mail-transport.sh: smtp needs a sender, a message and a recipient'
   decode "$2" > "$work/message"
 fi
 
@@ -392,9 +480,16 @@ fi
 #
 # Only the transport is retried. A server that answered NO answered, and
 # sending it again would be asking a question already settled.
+#
+# `--globoff` because nothing here is a URL pattern. curl reads "[1-9]" and
+# "{a,b}" in a URL as a range to expand into several transfers, and a mailbox
+# name may hold either — so a folder called "[Gmail]" or "{work,home}" could
+# turn one request into several, each carrying the password.
 run_curl() {
   build_config "$@" | curl \
     --config - \
+    --globoff \
+    --max-filesize "$max_response_octets" \
     --fail-early \
     --silent \
     --show-error \
@@ -442,7 +537,6 @@ while : ; do
 done
 set -e
 
-printf '%s\n' "$status"
 if [ "$mode" = "imap" ] && [ ! -s "$work/out" ] && [ -s "$work/headers" ]; then
   # libcurl recognises only a single numeric UID as a BODY FETCH. A legal IMAP
   # sequence-set is treated as a generic custom request, whose response is
@@ -450,10 +544,22 @@ if [ "$mode" = "imap" ] && [ ! -s "$work/out" ] && [ -s "$work/headers" ]; then
   # A single UID BODY FETCH is recognised by libcurl and its complete response
   # stays on stdout; prefer that whenever it exists because the header channel
   # then contains only a partial protocol preamble.
-  encode "$work/headers"
+  reply="$work/headers"
 else
-  encode "$work/out"
+  reply="$work/out"
 fi
+
+# Over the cap, the reply is dropped and the request answers as curl does when
+# its own limit fires: 63, which the panel turns into the too-large message.
+reply_octets=$(wc -c < "$reply" | tr -d ' ')
+if [ "${reply_octets:-0}" -gt "$max_response_octets" ]; then
+  status=63
+  : > "$reply"
+  printf 'curl: (63) Maximum file size exceeded\n' > "$work/err"
+fi
+
+printf '%s\n' "$status"
+encode "$reply"
 printf '\n'
 encode "$work/err"
 printf '\n'

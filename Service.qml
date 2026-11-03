@@ -260,23 +260,63 @@ Item {
     var index = activeIndex >= 0 ? activeIndex : indexOfActiveAccount()
     var next = Accounts.discardDraftAt(accountList, index)
     if (Accounts.count(next) === accountCount) return
+    // A draft has no address, so what it may have kept is under its key alone.
+    var draft = accountList.accounts[index]
     activeIndex = -1
     accountList = next
+    purgeAccountData(draft, false)
     refreshCurrent()
   }
 
   function removeAccount(id) {
-    activeIndex = -1
-    accountList = Accounts.remove(accountList, id)
-    saveAccounts()
-    refreshCurrent()
+    var accounts = accountList.accounts
+    for (var i = 0; i < accounts.length; i++) {
+      if (accounts[i].id === id && id !== "") {
+        removeAccountAt(i)
+        return
+      }
+    }
   }
 
+  // The entry is taken before the list changes, and the purge runs from it
+  // alone. See Accounts.removalJobs for why the account's own object cannot be
+  // asked: after this line it is somebody else's.
   function removeAccountAt(index) {
+    var accounts = accountList.accounts
+    if (index < 0 || index >= accounts.length) return
+    var removed = accounts[index]
     activeIndex = -1
     accountList = Accounts.removeAt(accountList, index)
     saveAccounts()
+    purgeAccountData(removed, true)
     refreshCurrent()
+  }
+
+  // ------------------------------------------------------------- purging
+
+  readonly property string cacheDir: (Quickshell.env("XDG_CACHE_HOME")
+    || (Quickshell.env("HOME") + "/.cache")) + "/omail"
+
+  // One process at a time, in order: the keyring first, because a sign-in is
+  // the thing worth most to whoever finds it, then the list store, then the
+  // bodies. Queued rather than dropped, so two removals in a row both happen.
+  property var purgeQueue: []
+
+  function purgeAccountData(entry, ownsAddress) {
+    if (!pluginDir) return
+    var jobs = Accounts.removalJobs(entry, ownsAddress, pluginDir, cacheDir)
+    if (jobs.length === 0) return
+    purgeQueue = purgeQueue.concat(jobs)
+    drainPurge()
+  }
+
+  function drainPurge() {
+    if (purger.running || purgeQueue.length === 0) return
+    var job = purgeQueue[0]
+    purgeQueue = purgeQueue.slice(1)
+    purger.payload = job.input
+    purger.command = job.command
+    purger.running = true
   }
 
   // An account learns its own address on its first profile read; until then the
@@ -296,9 +336,13 @@ Item {
     // not a rename, and the row that has to go is the new one.
     for (var d = 0; d < accounts.length; d++) {
       if (d === index || accounts[d].id !== named) continue
+      // What the new row kept is under its own key; what is keyed by the
+      // address belongs to the row that was here first.
+      var duplicate = accounts[index]
       activeIndex = -1
       accountList = Accounts.removeAt(accountList, index)
       saveAccounts()
+      purgeAccountData(duplicate, false)
       refreshCurrent()
       duplicateAccount(email)
       return
@@ -1251,6 +1295,24 @@ Item {
     onFileChanged: reload()
     // No list yet is the ordinary first-run state, not an error.
     onLoadFailed: root.applyAccounts("")
+  }
+
+  Process {
+    id: purger
+    // What the job sends on stdin: the address, where it needs one, travels
+    // here and never as an argument.
+    property string payload: ""
+    stdinEnabled: true
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { waitForEnd: true }
+    onStarted: {
+      write(payload)
+      payload = ""
+    }
+    onExited: {
+      payload = ""
+      root.drainPurge()
+    }
   }
 
   Process {

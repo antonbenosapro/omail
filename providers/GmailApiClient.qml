@@ -21,6 +21,17 @@ Item {
   property int inFlight: 0
   readonly property bool busy: inFlight > 0
 
+  // The `sizeEstimate` of every message Google has described this session, by
+  // id. A list row is a metadata fetch and carries it, so opening a message
+  // usually knows its size already and a message over the cap costs no request
+  // at all to refuse.
+  property var knownSizes: ({})
+
+  function rememberSize(id, payload) {
+    var size = Api.sizeEstimateOf(payload)
+    if (size >= 0) knownSizes[String(id)] = size
+  }
+
   function newHandle() {
     return { aborted: false, xhr: null, children: [] }
   }
@@ -121,13 +132,58 @@ Item {
   // one interface — same names, same arguments — and the provider declares
   // whether the fold happened through `fetchMarksRead` rather than by having a
   // different signature.
+  //
+  // A full fetch is decided by the message's size first. Known and over the
+  // cap, it is refused on the spot; unknown, a `minimal` request asks for the
+  // size before the body is. The refusal arrives as the error a failed fetch
+  // would, so the reader shows it where it shows any other.
   function getMessage(id, full, callback, markSeen) {
-    return request("GET", Api.messagePath(id),
-      full ? Api.fullQuery() : Api.metadataQuery(), null,
-      function(status, payload, error) {
-        if (typeof callback !== "function") return
-        callback(error ? null : payload, error)
+    var key = String(id)
+    var known = root.knownSizes.hasOwnProperty(key) ? root.knownSizes[key] : -1
+    var decision = full ? Api.fullFetchDecision(known) : "fetch"
+
+    if (decision === "refuse") {
+      var refused = newHandle()
+      // Deferred, because every other answer is: a caller assigns the handle
+      // this returns before it expects to hear back.
+      Qt.callLater(function() {
+        if (!root || refused.aborted) return
+        if (typeof callback === "function") callback(null, Api.TOO_LARGE_MESSAGE)
       })
+      return refused
+    }
+
+    function fetch(handle) {
+      return request("GET", Api.messagePath(id),
+        full ? Api.fullQuery() : Api.metadataQuery(), null,
+        function(status, payload, error) {
+          if (!error) root.rememberSize(key, payload)
+          if (typeof callback !== "function") return
+          callback(error ? null : payload, error)
+        }, false, handle)
+    }
+
+    if (decision === "fetch") return fetch(null)
+
+    var handle = newHandle()
+    request("GET", Api.messagePath(id), Api.minimalQuery(), null,
+      function(status, payload, error) {
+        if (handle.aborted) return
+        if (error) {
+          if (typeof callback === "function") callback(null, error)
+          return
+        }
+        root.rememberSize(key, payload)
+        // A resource with no size at all is fetched rather than refused:
+        // Google documents the field on every format, so its absence is a
+        // change on their side, and refusing every message would be worse.
+        if (Api.isTooLarge(Api.sizeEstimateOf(payload))) {
+          if (typeof callback === "function") callback(null, Api.TOO_LARGE_MESSAGE)
+          return
+        }
+        fetch(handle)
+      }, false, handle)
+    return handle
   }
 
   // The octets of a part Gmail described but did not send. Every part the

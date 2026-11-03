@@ -1308,4 +1308,30 @@ assert.strictEqual(model.isUndoable({ reverse: "untrash", entries: [] }), false)
 deepEqual(model.restoreEntries(null, null), [])
 deepEqual(model.restoreEntries([], [null]), [])
 
+// ------------------------------------------------------------ the web
+//
+// "Open web inbox" hands a URL to xdg-open, whose arguments every local account
+// can read in /proc. Only the provider's own mailbox queries may reach it; a
+// typed search or a label name opens the plain inbox instead.
+{
+  const provider = load("providers/Registry.js")
+  const api = load("providers/GmailApi.js")
+  const boxes = provider.mailboxes("gmail")
+  const open = function (key, search, raw) {
+    return api.webSearchUrl(model.webMailboxQuery(boxes, key, search, raw), 0)
+  }
+  assert.strictEqual(open("sent", "", ""), "https://mail.google.com/mail/u/0/#search/in%3Asent")
+  assert.strictEqual(open("inbox", "", ""), "https://mail.google.com/mail/u/0/#search/in%3Ainbox")
+  assert.strictEqual(open("inbox", "invoice from acme", ""), "https://mail.google.com/mail/u/0/#inbox",
+    "a typed search never reaches the command line")
+  assert.strictEqual(open("sent", "  x ", ""), "https://mail.google.com/mail/u/0/#inbox")
+  assert.strictEqual(open("inbox", "", "label:Clients/Acme"), "https://mail.google.com/mail/u/0/#inbox",
+    "nor does a label name")
+  assert.strictEqual(open("nonsense", "", ""), "https://mail.google.com/mail/u/0/#inbox")
+  assert.strictEqual(model.webMailboxQuery(null, "inbox", "", ""), "")
+  for (const word of ["invoice", "acme", "Clients"]) {
+    assert.ok(open("inbox", "invoice from acme", "label:Clients/Acme").indexOf(word) < 0)
+  }
+}
+
 console.log("test_model.js ok")

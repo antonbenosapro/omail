@@ -528,7 +528,39 @@ function decodeReferences(text) {
 function normalizedUrl(value) {
   var text = String(value === undefined || value === null ? "" : value)
   text = decodeReferences(decodeReferences(text))
-  return text.replace(/[\t\n\r]/g, "").replace(/^[\s\u0000-\u001f]+|[\s\u0000-\u001f]+$/g, "")
+  return trimWhere(text.replace(/[\t\n\r]/g, ""), isUrlPadding)
+}
+
+// Trimming by index. /^\s+|\s+$/ looks linear and is not: the second half
+// retries from every character of a run of white space that something else
+// follows, which a sender writes as a style value or a paragraph of nothing
+// but no-break spaces, and the shell froze for seconds on one message. Every
+// trim in this file goes through `trim()` or here.
+function trimWhere(text, isPadding) {
+  var start = 0
+  var end = text.length
+  while (start < end && isPadding(text.charCodeAt(start), text.charAt(start))) start++
+  while (end > start && isPadding(text.charCodeAt(end - 1), text.charAt(end - 1))) end--
+  return text.substring(start, end)
+}
+
+// What normalizedUrl trims: white space and the C0 controls a browser ignores
+// around a URL.
+function isUrlPadding(code, character) {
+  return code <= 0x1f || /\s/.test(character)
+}
+
+// White space off the end of every line, the line breaks kept. A line at a
+// time for the reason above.
+function trimLineEnds(text) {
+  var lines = String(text).split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i]
+    var keep = line.length
+    while (keep > 0 && /\s/.test(line.charAt(keep - 1))) keep--
+    if (keep !== line.length) lines[i] = line.substring(0, keep)
+  }
+  return lines.join("\n")
 }
 
 // The host of an http(s) or protocol-relative URL, lower-cased, with the
@@ -548,6 +580,36 @@ function hostOf(url) {
   }
   var colon = authority.indexOf(":")
   return (colon < 0 ? authority : authority.substring(0, colon)).toLowerCase()
+}
+
+// The port of an http(s) or protocol-relative URL, as written: "" when there is
+// none. Parsed the way `hostOf` finds the host, so the two read one authority.
+function portOf(url) {
+  var text = String(url || "").replace(/^https?:/i, "")
+  if (text.indexOf("//") !== 0) return ""
+  var authority = text.substring(2)
+  var end = authority.search(/[\/?#]/)
+  if (end >= 0) authority = authority.substring(0, end)
+  var at = authority.lastIndexOf("@")
+  if (at >= 0) authority = authority.substring(at + 1)
+  if (authority.charAt(0) === "[") {
+    var close = authority.indexOf("]")
+    authority = close < 0 ? "" : authority.substring(close + 1)
+  }
+  var colon = authority.indexOf(":")
+  return colon < 0 ? "" : authority.substring(colon + 1)
+}
+
+// An image is fetched from the ports the web serves images on, and no other.
+// The host check cannot see where a name resolves, and names exist whose whole
+// purpose is to resolve to a private address — "127.0.0.1.nip.io" is public by
+// every test a URL can be put to and is a request to this machine. A printer's
+// page, a router's admin and a development server answer on ports of their own,
+// so refusing those keeps most of what lives behind the front door out of a
+// sender's reach. A name that resolves inward on 80 or 443 is the limit of what
+// a check on the URL can do, after the reader has chosen to load images.
+function isWebPort(port) {
+  return port === "" || port === "80" || port === "443"
 }
 
 var DOTTED_QUAD = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
@@ -596,8 +658,9 @@ var PUBLIC_TLD = /\.(xn--[a-z0-9-]+|[a-z]{2,})$/
 // as one number — without having to have thought of each of them first.
 //
 // A public name that resolves to a private address is beyond what any check on
-// the URL can see. That is DNS rebinding, and stopping it needs a resolver
-// this plugin does not own.
+// the URL can see — a name made to do that, or DNS rebinding — and stopping it
+// needs a resolver this plugin does not own. `isWebPort` narrows what such a
+// name can reach.
 function isPublicHost(host) {
   var name = String(host || "")
   if (name === "" || name.length > 253) return false
@@ -624,12 +687,17 @@ function isRemoteSource(value) {
 //   local   no scheme. Qt resolves a relative source against the document's
 //           base URL, which for a TextEdit is the QML file's own directory —
 //           a read of whatever sits next to the plugin.
+var MAX_DATA_IMAGE_CHARS = 2 * 1024 * 1024
+
 function imageSourceKind(value) {
   var url = normalizedUrl(value)
   if (url === "") return "none"
   if (/^cid:/i.test(url)) return "inline"
-  if (/^data:/i.test(url)) return "inline"
-  if (/^(https?:)?\/\//i.test(url)) return isPublicHost(hostOf(url)) ? "remote" : "unsafe"
+  // A data: image is decoded on the thread that draws the desktop, so one past
+  // any size a message needs is refused rather than unpacked.
+  if (/^data:/i.test(url)) return url.length <= MAX_DATA_IMAGE_CHARS ? "inline" : "unsafe"
+  if (/^(https?:)?\/\//i.test(url))
+    return isPublicHost(hostOf(url)) && isWebPort(portOf(url)) ? "remote" : "unsafe"
   return /^[a-z][a-z0-9+.-]*:/i.test(url) ? "unsafe" : "local"
 }
 
@@ -689,8 +757,8 @@ function splitDeclarations(style) {
     var colon = piece.indexOf(":")
     if (colon < 0) continue
     declarations.push({
-      name: piece.substring(0, colon).replace(/^\s+|\s+$/g, "").toLowerCase(),
-      value: piece.substring(colon + 1).replace(/^\s+|\s+$/g, "")
+      name: piece.substring(0, colon).trim().toLowerCase(),
+      value: piece.substring(colon + 1).trim()
     })
   }
   return declarations
@@ -1294,7 +1362,7 @@ var SIDE_SPACING = {
 }
 
 function withoutSides(value) {
-  var parts = String(value).replace(/^\s+|\s+$/g, "").split(/\s+/)
+  var parts = String(value).trim().split(/\s+/)
   if (parts.length >= 4) return parts[0] + " 0 " + parts[2] + " 0"
   if (parts.length === 3) return parts[0] + " 0 " + parts[2]
   return parts[0] + " 0"
@@ -1525,8 +1593,7 @@ function imageSourceOf(node) {
 
 function readTree(root) {
   var state = flatten(root, { text: "", images: [] })
-  state.text = state.text
-    .replace(/[^\S\n]+\n/g, "\n")
+  state.text = trimLineEnds(state.text)
     // A line does not start where the markup was indented. Every box a block
     // sits inside contributes a space of its own on the way down, so a heading
     // four tables deep arrived four spaces in — and two spaces are two
@@ -1534,7 +1601,7 @@ function readTree(root) {
     // edge down the whole message. The sender indented markup, not text.
     .replace(/\n[^\S\n]+/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
-    .replace(/^\s+|\s+$/g, "")
+    .trim()
   return state
 }
 
@@ -1570,7 +1637,7 @@ function readableText(text) {
     .replace(UNDRAWN_CHARACTERS, "")
     .replace(BLANK_LINE, "")
     .replace(BLANK_RUN, "\n\n")
-    .replace(/^\s+|\s+$/g, "")
+    .trim()
 }
 
 function escapeText(text) {
