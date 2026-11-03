@@ -253,8 +253,15 @@ assert.strictEqual(reloaded.version, cache.VERSION)
 // Bodies are files now: one per message, under one directory per account. The
 // name has to survive a hostile message id without leaving that directory.
 {
-  assert.strictEqual(cache.bodyDirName("huacnlee@gmail.com"), "account-huacnlee_40gmail.com")
-  assert.strictEqual(cache.bodyFileName("198c2f3a4b"), "198c2f3a4b.json")
+  // Hashes: these names are arguments to body-cache.sh, mv, touch and rm, which
+  // every local account can read in /proc, so they carry neither the address
+  // nor the folder a message is in.
+  assert.ok(/^account-[0-9a-f]{32}$/.test(cache.bodyDirName("huacnlee@gmail.com")))
+  assert.ok(cache.bodyDirName("huacnlee@gmail.com").indexOf("huacnlee") < 0)
+  assert.ok(/^[0-9a-f]{32}\.json$/.test(cache.bodyFileName("17:Clients/Acme")))
+  assert.notStrictEqual(cache.bodyFileName("17:Clients/Acme"), cache.bodyFileName("17:INBOX"))
+  assert.strictEqual(cache.sha256Hex("abc"),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
   assert.strictEqual(cache.bodyFileName(""), "", "an id-less message is never written")
   var hostile = cache.bodyFileName("../../etc/passwd")
   assert.ok(hostile.indexOf("/") < 0, "a traversal cannot survive the escape")
@@ -266,8 +273,10 @@ assert.strictEqual(reloaded.version, cache.VERSION)
     unsubscribe: { available: true, oneClick: true, url: "https://l.example.com/u/1",
       postUrl: "https://l.example.com/u/1", mail: null }
   }
-  deepEqual(cache.parseBody(cache.serializeBody(body)), body,
+  deepEqual(cache.parseBody(cache.serializeBody(body, "17:INBOX"), "17:INBOX"), body,
     "the invitation and the unsubscribe offer survive the round trip whole")
+  // A file is the message it says it is, or a miss: its name is only a hash.
+  assert.strictEqual(cache.parseBody(cache.serializeBody(body, "17:INBOX"), "18:INBOX"), null)
   assert.strictEqual(cache.parseBody("not json"), null, "a truncated file reads as a miss")
   deepEqual(cache.parseBody(cache.serializeBody({})),
     { text: "", source: "", html: "", attachments: [], images: [],
