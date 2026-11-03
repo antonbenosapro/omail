@@ -67,6 +67,7 @@ Rectangle {
       }
 
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         text: root.invite ? Calendar.headline(root.invite) : ""
         color: root.dimColor
@@ -216,6 +217,7 @@ Rectangle {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       leftPadding: Style.font.iconSmall + Style.space(6)
       visible: !!root.invite && (root.invite.attendees || []).length > 6

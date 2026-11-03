@@ -232,6 +232,7 @@ key. What matters while working:
   is world-readable.
 - Anything that could carry a credential passes through `OAuth.redact` before
   it can reach a label.
+- Nothing private goes on a command line, and that includes what a script then passes on: an attachment name reached `chmod` and `mv` after it had been moved to stdin. A script writes a private name only as a redirection target, and the body cache names its files and directories by hash. `tests/test_save_attachment.sh` wraps every external command to prove it.
 - Nothing from a message goes on a command line. Every local account can read
   a process's arguments in `/proc`, so the new-mail notification says how many
   arrived and never who from or about what: `Model.notificationCommand` takes
@@ -280,9 +281,11 @@ key. What matters while working:
 - A message body, a subject, a sender name, a snippet, an attachment filename:
   all of it is written by whoever sent the mail, and none of it is markup.
 - `Text` defaults to `Text.AutoText`, which promotes anything tag-shaped to rich
-  text — and Qt's rich text engine fetches `<img src>`. Every `Text` showing
-  message content therefore says `textFormat: Text.PlainText`, and
-  `tests/test_qml_text_format.py` fails the build when one forgets.
+  text — and Qt's rich text engine fetches `<img src>`. Every `Text` whose words
+  are computed therefore names its format, `Text.PlainText` unless it has a
+  reason, and `tests/test_qml_text_format.py` fails the build when one forgets.
+  Only a string literal is excused. The test used to look for untrusted
+  expressions by name, and missed a server `[ALERT]` a message body could forge.
 - An image is only ever fetched from a host on the public internet. Loopback,
   private and link-local addresses, single-label and `.local` names, `file:`
   and relative sources are refused outright — `Html.imageSourceKind` is the one

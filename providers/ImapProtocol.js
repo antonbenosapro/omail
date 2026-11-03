@@ -907,16 +907,31 @@ function redact(text) {
 //
 // `NO`/`BAD` are also matched case-sensitively: the protocol writes them in
 // capitals, and the header that started this says "no" in lower case.
-var TAGGED_FAILURE = /^[A-Za-z0-9][A-Za-z0-9.\-_]*[ \t]+(?:NO|BAD)[ \t]/m
+//
+// And it is matched only where a response begins. A FETCH carries the message
+// as a literal, and a line inside it is the sender's: "A1 NO [ALERT] <img ...>"
+// in a body was read as the server refusing, and its text went to the account's
+// error line as the server's own words. `splitResponse` folds every literal
+// into the response that announced it, by its octet count, so the start of each
+// line it returns is the server speaking and never the message.
+var TAGGED_FAILURE = /^[A-Za-z0-9][A-Za-z0-9.\-_]*[ \t]+(?:NO|BAD)[ \t]/
+
+function taggedFailureLine(text) {
+  var lines = splitResponse(text)
+  for (var i = 0; i < lines.length; i++) {
+    if (TAGGED_FAILURE.test(lines[i])) return lines[i]
+  }
+  return ""
+}
 
 function isFailure(text) {
-  return TAGGED_FAILURE.test(String(text || ""))
+  return taggedFailureLine(text) !== ""
 }
 
 function failureDetail(text) {
-  var match = String(text || "")
-    .match(/^[A-Za-z0-9][A-Za-z0-9.\-_]*[ \t]+(?:NO|BAD)[ \t]+([\s\S]*)$/m)
-  return match ? trimmed(match[1].split(/[\r\n]/)[0]) : ""
+  var match = taggedFailureLine(text)
+    .match(/^[A-Za-z0-9][A-Za-z0-9.\-_]*[ \t]+(?:NO|BAD)[ \t]+([^\r\n]*)/)
+  return match ? trimmed(match[1]) : ""
 }
 
 // ------------------------------------------------------------- capabilities

@@ -63,6 +63,7 @@ Rectangle {
     color: Style.selectedFillFor(root.textColor, root.accentColor)
 
     Text {
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       text: root.initial
       color: root.textColor

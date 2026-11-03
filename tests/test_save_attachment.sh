@@ -152,6 +152,34 @@ else
   printf '  ok   missing arguments are refused\n'
 fi
 
+# ------------------------------------------------------------ the process table
+#
+# Every local account can read a process's arguments in /proc, and the filename
+# is the sender's — "Biopsy results J Doe.pdf" says what the mail is. So no
+# program the script runs may be handed it: each one is wrapped here to log its
+# arguments, and the name must appear in none of them.
+spy="$work/spy"
+mkdir -p "$spy"
+: > "$work/argv.log"
+for tool in chmod mv rm cp cat ln mktemp base64 tr sed cut mkdir touch install dd tee; do
+  real=$(command -v "$tool" 2>/dev/null) || continue
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s $*" >> "%s"\nexec "%s" "$@"\n' "$tool" "$work/argv.log" "$real" > "$spy/$tool"
+  chmod +x "$spy/$tool"
+done
+secret='Biopsy results J Doe.pdf'
+dir="$work/private"
+printf '%s %s\n' "$(named "$secret")" "$(printf 'x' | base64)" \
+  | PATH="$spy:$work/bin:$PATH" sh "$script" "$dir" >/dev/null 2>&1
+check 'the file was saved under its name' "$(cat "$dir/$secret" 2>/dev/null)" 'x'
+check 'the name was in no process arguments' "$(grep -c 'Biopsy' "$work/argv.log")" '0'
+# A name already taken, which is the path with the most file handling in it.
+printf '%s %s\n' "$(named "$secret")" "$(printf 'y' | base64)" \
+  | PATH="$spy:$work/bin:$PATH" sh "$script" "$dir" >/dev/null 2>&1
+check 'a second copy is numbered' "$(cat "$dir/Biopsy results J Doe (1).pdf" 2>/dev/null)" 'y'
+check 'and its name was in no process arguments either' "$(grep -c 'Biopsy' "$work/argv.log")" '0'
+check 'no staging file is left behind' "$(ls -A "$dir" | grep -c '^\.omail-save')" '0'
+check 'the file is readable only by its owner' "$(stat -c %a "$dir/$secret")" '600'
+
 check 'nothing was opened' "$([ -e "$work/opened" ] && echo opened || echo none)" 'none'
 
 if [ "$failures" -ne 0 ]; then

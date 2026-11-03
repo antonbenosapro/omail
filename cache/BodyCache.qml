@@ -38,6 +38,8 @@ Item {
   // ------------------------------------------------------------------ read
 
   property var pendingCallback: null
+  // The message the pending read is for; the file has to say the same.
+  property string pendingId: ""
 
   function read(id, callback) {
     var name = Cache.bodyFileName(id)
@@ -46,6 +48,7 @@ Item {
       return
     }
     pendingCallback = callback
+    pendingId = String(id || "").trim()
     var wanted = directory + "/" + name
     // Setting the same path again does not reload on its own, and reopening the
     // message you just closed has to hit the file rather than the last answer.
@@ -70,7 +73,7 @@ Item {
   FileView {
     id: reader
     printErrors: false
-    onLoaded: root.deliver(Cache.parseBody(text()))
+    onLoaded: root.deliver(Cache.parseBody(text(), root.pendingId))
     // Never cached, or cached under an account that has since been removed.
     onLoadFailed: root.deliver(null)
   }
@@ -98,7 +101,7 @@ Item {
   function put(id, body) {
     var name = Cache.bodyFileName(id)
     if (name === "") return
-    var payload = Cache.serializeBody(body)
+    var payload = Cache.serializeBody(body, String(id || "").trim())
     if (lastWritten[name] === payload) return
     // Recorded before the write rather than after it: two puts of the same
     // body queued together would otherwise both run, which is the burst this

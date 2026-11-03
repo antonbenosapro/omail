@@ -508,6 +508,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.verticalCenter: parent.verticalCenter
             // The size is what it says at rest; while it writes, it says that
             // instead, in the same place rather than somewhere new.

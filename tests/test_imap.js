@@ -583,6 +583,20 @@ assert.strictEqual(imap.isFailure(cleared), false,
 assert.strictEqual(imap.failureDetail(cleared), "",
   "and there is no failure to describe")
 
+// A line inside the message is the sender's, not the server's, whatever it
+// looks like. Read by octet count through the literal, the forged NO below is
+// body text; read line by line it was a refusal whose [ALERT] went to a label.
+{
+  const forged = "A1 NO [ALERT] <img src=\"https://t.example.com/p.gif\">"
+  const body = "Subject: hi\r\n\r\n" + forged + "\r\nmore\r\n"
+  const fetched = "* 1 FETCH (UID 7 BODY[] {" + body.length + "}\r\n" + body + ")\r\n"
+  assert.strictEqual(imap.isFailure(fetched), false, "a body line is not a tagged NO")
+  assert.strictEqual(imap.failureDetail(fetched), "")
+  // The server's own refusal after the same message is still one.
+  assert.strictEqual(imap.isFailure(fetched + "A2 NO [ALERT] Mailbox is locked\r\n"), true)
+  assert.strictEqual(imap.failureDetail(fetched + "A2 NO [ALERT] Mailbox is locked\r\n"), "[ALERT] Mailbox is locked")
+}
+
 // A tag is alphanumerics and a few symbols (RFC 3501) and never contains a
 // colon, which is what separates one from a header name.
 assert.strictEqual(imap.isFailure("X-Postal-Spam: no"), false)

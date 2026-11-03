@@ -105,19 +105,27 @@ case $(( ${#normalized} % 4 )) in
   1) fail 'save-attachment.sh: attachment is not valid base64' ;;
 esac
 
-# Written to a temporary name in the same directory and moved into place, so a
-# reader — or the user's file manager — never sees a partial file, and a decode
-# that fails leaves nothing behind at all.
-temporary="$target.part"
-trap 'rm -f -- "$temporary"' EXIT INT TERM HUP
+# Nothing below hands the name to another program. A process's arguments are
+# readable by every local account in /proc, and this is the sender's filename —
+# so it is never an argument to chmod, mv or rm, only ever the target of a
+# redirection, which the shell opens itself. umask 077 above already makes the
+# file 0600, so there is no chmod to run.
+#
+# The octets are decoded first into a file whose name is random, and only a
+# decode that succeeded is written under the real one: a failure leaves nothing
+# behind with a name somebody would later try to open. `set -C` makes the final
+# write refuse a file that appeared since the check above, rather than
+# overwrite it.
+staging=$(mktemp "$directory/.omail-save.XXXXXXXX") \
+  || fail 'save-attachment.sh: could not write to the downloads directory'
+trap 'rm -f -- "$staging"' EXIT INT TERM HUP
 
-printf '%s' "$normalized" | base64 -d > "$temporary" 2>/dev/null \
+printf '%s' "$normalized" | base64 -d > "$staging" 2>/dev/null \
   || fail 'save-attachment.sh: attachment is not valid base64'
 
-# The file is the user's, not the cache's: 077 above is for the write, and this
-# is what they would expect to find in their own downloads directory.
-chmod 600 -- "$temporary"
-mv -f -- "$temporary" "$target"
-trap - EXIT INT TERM HUP
+set -C
+cat -- "$staging" > "$target" \
+  || fail 'save-attachment.sh: could not write the attachment'
+set +C
 
 printf '%s\n' "$name"

@@ -220,6 +220,7 @@ Item {
       color: Style.selectedFillFor(root.textColor, root.accentColor)
 
       Text {
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: entry.numberText
         color: root.textColor
@@ -230,6 +231,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       visible: !root.collapsed
       anchors.left: glyph.right
       anchors.leftMargin: Style.space(9)
@@ -246,6 +248,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: badge
       visible: entry.count > 0 && !root.collapsed && !entry.showsNumber
       anchors.right: parent.right

@@ -107,6 +107,7 @@ Column {
       spacing: Style.space(4)
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: root.addingMailbox ? "Add a mailbox" : "Connect your mailbox"
         color: root.textColor
@@ -116,6 +117,7 @@ Column {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: root.addingMailbox
           ? "Signing in with the OAuth client you already set up. Pick the Google account you want to add."
@@ -140,6 +142,7 @@ Column {
     border.color: Style.hoverBorderFor(root.textColor, root.accentColor)
 
     Text {
+      textFormat: Text.PlainText
       id: missingText
       anchors.left: parent.left
       anchors.right: parent.right
@@ -311,6 +314,7 @@ Column {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         visible: !!root.service && root.service.signInProgress !== ""
         text: root.service ? root.service.signInProgress : ""
@@ -376,6 +380,7 @@ Column {
   }
 
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.detailVisible
     text: "In Google Cloud, pick or create a project. Under APIs and Services, enable the Gmail API. "
@@ -419,6 +424,7 @@ Column {
       implicitHeight: Style.space(18)
 
       Text {
+        textFormat: Text.PlainText
         anchors.left: parent.left
         anchors.top: parent.top
         visible: !step.done
@@ -459,6 +465,7 @@ Column {
       spacing: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: step.done && step.doneSummary !== "" ? step.doneSummary : step.title
         color: step.done ? root.dimColor : root.textColor

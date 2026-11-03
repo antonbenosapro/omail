@@ -1254,6 +1254,7 @@ Item {
           color: Style.selectedFillFor(root.foreground, root.accent)
 
           Text {
+            textFormat: Text.PlainText
             id: selectionCount
             anchors.centerIn: parent
             text: root.service ? root.service.selectionLabel : ""
@@ -1305,6 +1306,7 @@ Item {
         }
 
         Text {
+          textFormat: Text.PlainText
           id: accountLine
           anchors.left: selectionActions.visible
             ? selectionActions.right
