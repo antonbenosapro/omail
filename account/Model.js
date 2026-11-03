@@ -1182,6 +1182,24 @@ function notificationCommand(count, icon) {
     "--", pluralize(count, "new message")]
 }
 
+// ------------------------------------------------------------ the web
+
+// What "Open web inbox" asks Gmail to show. The URL is an argument to
+// xdg-open, and every local account can read a process's arguments in /proc,
+// so it may only carry words this plugin wrote: one of the provider's own
+// mailbox queries. A typed search is the user's own words and a label is their
+// own name for something, so with either on screen it is the plain inbox — ""
+// — rather than the view they were looking at.
+function webMailboxQuery(mailboxes, mailboxKey, searchQuery, rawQuery) {
+  if (String(searchQuery || "").trim() !== "") return ""
+  if (String(rawQuery || "").trim() !== "") return ""
+  var list = Array.isArray(mailboxes) ? mailboxes : []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].key === mailboxKey) return String(list[i].query || "")
+  }
+  return ""
+}
+
 // ------------------------------------------------------------- formatting
 
 function pluralize(count, singular, plural) {

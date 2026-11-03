@@ -112,7 +112,9 @@ Item {
     seen[name] = payload
     lastWritten = seen
     var next = writeQueue.slice()
-    next.push(({ name: name, payload: payload }))
+    // The directory is fixed now, with the name it was hashed for: the account
+    // this object holds can change before the write runs.
+    next.push(({ directory: directory, name: name, payload: payload }))
     writeQueue = next
     drain()
   }
@@ -122,7 +124,7 @@ Item {
     var job = writeQueue[0]
     writeQueue = writeQueue.slice(1)
     writer.payload = job.payload
-    writer.command = [script, "put", directory, job.name, String(Cache.MAX_BODIES)]
+    writer.command = [script, "put", job.directory, job.name, String(Cache.MAX_BODIES)]
     writer.running = true
   }
 
@@ -137,7 +139,12 @@ Item {
 
   // The account this cache belongs to changed, so the directory did: what was
   // written under the old one says nothing about what is on disk under the new.
-  onKeyIdChanged: lastWritten = ({})
+  // A queued write belongs to that account too, and if the account was removed
+  // its directory is about to be deleted; writing it would bring one back.
+  onKeyIdChanged: {
+    lastWritten = ({})
+    writeQueue = []
+  }
 
   Process {
     id: writer

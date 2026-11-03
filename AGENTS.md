@@ -208,6 +208,8 @@ key. What matters while working:
   been refused; and the commands must not depend on each other's parsed output,
   which is why SEARCH-then-FETCH is two processes and marking read is folded
   into the FETCH.
+- A FETCH response is read by its top-level items (`fetchItems`), never by searching the line: a literal is the sender's text and is skipped by its octet count, so a header reading `UID 999 FLAGS (\Seen)` is not the server's.
+- Every SMTP envelope address is one plain address (`isEnvelopeAddress`), and one that is not refuses the whole send rather than being dropped. The transport checks the same rule, refuses an authority with an `@` in it, matches loopback hosts exactly, passes `--globoff` to every curl, and caps a reply at 26 MiB. A message over 25 MiB is refused before anything decodes it on the GUI thread: by its known size, and otherwise by a partial IMAP fetch or a Gmail `minimal` request first.
 - **The response comes back base64 too, and that is load-bearing.** IMAP
   measures a literal in octets. Read as UTF-8 text, 2048 octets of a message
   with an accent in it is fewer than 2048 characters, and the parser walks off
@@ -229,6 +231,7 @@ key. What matters while working:
 
 - Refresh tokens go to GNOME Keyring over stdin, never through a command line.
 - A keyring entry is named by the account's `keyId` — random, made once, kept in `accounts.json` — and never by the address. secret-tool takes attributes as arguments, readable by every local account, and a hash of the address would only be a guess away. Entries from before this are re-keyed in place by `scripts/keyring-migrate.sh`, which takes the address on stdin and speaks the Secret Service API through gdbus. The body cache is named from the same key. `tests/test_keyring_migrate.sh` runs it against a real gnome-keyring and fails if an address reaches an argument.
+- Removing an account deletes what was kept for it — keyring entries, list store, body cache — from the entry captured at removal (`Accounts.removalJobs`), never from the account's object: the Instantiator rebinds that object to the next account, and a purge read off it would wipe the wrong one. `forget` and `purge` delete only under the `omail` service, because huacnlee/omamail may still be installed beside this. The list store is `store-<keyId>.json`; the address-named file from before is adopted once by `body-cache.sh adopt-store`, which takes the name on stdin and removes it by inode.
 - The OAuth client goes to a 0600 file, never to plugin settings: `shell.json`
   is world-readable.
 - Anything that could carry a credential passes through `OAuth.redact` before
@@ -291,6 +294,13 @@ key. What matters while working:
   private and link-local addresses, single-label and `.local` names, `file:`
   and relative sources are refused outright — `Html.imageSourceKind` is the one
   place that decides, and the reader, the popover and the sanitiser all ask it.
+  So are ports other than 80 and 443: a name like `127.0.0.1.nip.io` is public
+  by every test a URL can be put to and resolves to this machine, and the port
+  is what keeps a printer or a development server out of reach. Where a public
+  name resolves is beyond any check on the URL; that limit applies only after
+  the reader has chosen to load images.
+- Everything that reads a stranger's text runs on the thread that draws the whole desktop, so it must be linear in that text. Two shapes have frozen the shell for seconds on one message: a regular expression that retries from every position of a run it cannot finish (`/^\s+|\s+$/`, `/[ \t]+\n/`, `/<!--[\s\S]*?-->/` with nothing to close it, `/^(.*)<([^>]*)>$/` over a header of `<`), and an accumulator rebuilt on every step (`list = list.concat(...)`, `rest = rest.substring(n)` in a loop, which QML's engine copies even where V8 would not). Trim with `trim()` or a loop by index, scan markup with `indexOf` and give up on the rest when nothing closes it, append with `push`. Each fix carries a timed test at a size the old code could not meet; a new parser of untrusted input gets one too. A calendar part this did not hold for blocked the listing.
+- A link's words and its address are written separately, and nothing makes them agree. The reader shows the real host while the pointer is over a link, and `message/Link.js` decides what a click does: open a public http(s) address at once; ask first when the host is not public, hides behind a user name, or differs from a host the link's text names; refuse anything else. `mailto:` loses `attach`/`attachment` before it is handed off. Every link that leaves the app goes through `MessageReader.followLink`; never call `Qt.openUrlExternally` on a sender's address directly.
 - Values that go back out to Google — a `To`, a `Subject`, an `In-Reply-To`
   copied off the message being answered — lose their line breaks first, or the
   reply carries headers nobody typed.

@@ -17,7 +17,7 @@
 #   Properties.Set Attributes      re-key the match in place — the secret never
 #                                  moves, so there is nothing to read, store or
 #                                  lose in between
-#   Item.Delete                    `forget` only
+#   Item.Delete                    `forget` and `purge` only
 #
 # One line on stdin, because the address is the value that must not be an
 # argument. Quickshell's Process.write() never closes stdin, hence `read`.
@@ -27,7 +27,13 @@
 #       before accounts existed (keyed by client alone) may be claimed when
 #       there is none for <account>. Prints "adopted" when it changed one.
 #   forget <kind> <account> <client-id>
-#       Delete every entry still keyed by <account>.
+#       Delete every entry still keyed by <account>, under this plugin's own
+#       service name only.
+#   purge <kind> <keyId> <account>
+#       Removing the account: delete every entry of either kind keyed by
+#       <keyId>, and every <kind> entry still keyed by <account> — again under
+#       this plugin's own service name only. <account> may be "-" when the
+#       address is not this account's to clear.
 #
 # "-" stands for a field that is absent. Nothing is fatal to the caller: no
 # gdbus, no Secret Service, or no match all mean "nothing to migrate", and the
@@ -35,6 +41,13 @@
 # always meant.
 set -eu
 
+# `adopt` reads all three, because an upgrade from either earlier name is the
+# path this exists for, and the entry it finds is moved rather than copied.
+# huacnlee/omamail is a separate plugin that may still be installed beside this
+# one and write under its own name; adopting from it is the documented way
+# over, and it costs that plugin one sign-in. Deleting is another matter:
+# `forget` and `purge` touch only CURRENT_SERVICE, so signing out of Omail or
+# removing an account here never signs anybody out of the other plugin.
 SERVICES='omail omamail omarchy-gmail'
 CURRENT_SERVICE='omail'
 
@@ -56,6 +69,13 @@ case "$mode" in
   forget)
     account=$first; client=$second; may_adopt=0; key_id=''
     ;;
+  purge)
+    key_id=$first; account=$second; client=-; may_adopt=0
+    case "$key_id" in
+      *[!0-9a-f]*|'') exit 2 ;;
+    esac
+    [ "${#key_id}" -eq 32 ] || exit 2
+    ;;
   *) exit 2 ;;
 esac
 
@@ -75,20 +95,22 @@ call() {
   gdbus call --session --dest org.freedesktop.secrets "$@" 2>/dev/null
 }
 
-# Every entry of this kind under one service name. Locked ones are unlocked
-# first — that may put up the keyring's own prompt, which is the same prompt a
-# plain lookup would — because an attribute cannot be changed on a locked item.
+# Every entry of this kind — or of the one named second — under one service
+# name. Locked ones are unlocked first — that may put up the keyring's own
+# prompt, which is the same prompt a plain lookup would — because an attribute
+# cannot be changed on a locked item.
 items() {
+  wanted=${2:-$kind}
   found=$(call --object-path /org/freedesktop/secrets \
     --method org.freedesktop.Secret.Service.SearchItems \
-    "{'service': '$1', 'kind': '$kind'}") || return 0
+    "{'service': '$1', 'kind': '$wanted'}") || return 0
   case "$found" in
     *', [objectpath'*)
       command -v secret-tool >/dev/null 2>&1 \
-        && secret-tool search --unlock service "$1" kind "$kind" >/dev/null 2>&1 || true
+        && secret-tool search --unlock service "$1" kind "$wanted" >/dev/null 2>&1 || true
       found=$(call --object-path /org/freedesktop/secrets \
         --method org.freedesktop.Secret.Service.SearchItems \
-        "{'service': '$1', 'kind': '$kind'}") || return 0
+        "{'service': '$1', 'kind': '$wanted'}") || return 0
       ;;
   esac
   printf '%s\n' "$found" | grep -o "/org/freedesktop/secrets/collection/[A-Za-z0-9_/]*" || true
@@ -118,14 +140,30 @@ client_matches() {
   [ "$(value_of "$1" client-id)" = "$client" ]
 }
 
+delete() {
+  call --object-path "$1" --method org.freedesktop.Secret.Item.Delete >/dev/null || true
+}
+
 if [ "$mode" = forget ]; then
   [ "$account" != - ] || exit 0
-  for service in $SERVICES; do
-    for path in $(items "$service"); do
+  for path in $(items "$CURRENT_SERVICE"); do
+    attrs=$(attributes_of "$path")
+    [ "$(value_of "$attrs" account)" = "$account" ] || continue
+    client_matches "$attrs" || continue
+    delete "$path"
+  done
+  exit 0
+fi
+
+if [ "$mode" = purge ]; then
+  for of in refresh-token imap-password; do
+    for path in $(items "$CURRENT_SERVICE" "$of"); do
       attrs=$(attributes_of "$path")
-      [ "$(value_of "$attrs" account)" = "$account" ] || continue
-      client_matches "$attrs" || continue
-      call --object-path "$path" --method org.freedesktop.Secret.Item.Delete >/dev/null || true
+      named=$(value_of "$attrs" account)
+      if [ "$named" = "$key_id" ] \
+        || { [ "$of" = "$kind" ] && [ "$account" != - ] && [ "$named" = "$account" ]; }; then
+        delete "$path"
+      fi
     done
   done
   exit 0

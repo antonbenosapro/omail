@@ -160,6 +160,48 @@ function fullQuery() {
   return { format: "full" }
 }
 
+// The cheapest answer that carries `sizeEstimate`: ids, labels and the size,
+// with no headers and no body. Asked before a full fetch whose size nothing
+// has reported yet.
+function minimalQuery() {
+  return { format: "minimal" }
+}
+
+// ---------------------------------------------------------- the size cap
+//
+// `format=full` hands back every part's body inline, base64url-encoded, and
+// XMLHttpRequest reads the whole of it into the JavaScript engine before any of
+// it can be looked at — on the GUI thread of the shell that draws the whole
+// desktop. So the decision is made from `sizeEstimate`, which every format of
+// the message resource carries, before the full one is asked for. The figure
+// and the sentence are the IMAP provider's too (`ImapProtocol.js`), so the two
+// refuse the same messages with the same words; a test holds them together.
+
+var MAX_MESSAGE_OCTETS = 25 * 1024 * 1024
+var TOO_LARGE_MESSAGE = "This message is too large to open here (over 25 MB). Open it in your webmail."
+
+function isTooLarge(octets) {
+  var size = Number(octets)
+  return isFinite(size) && size > MAX_MESSAGE_OCTETS
+}
+
+// The size a message resource reports, or -1 when it reports none — which is
+// not the same as a message of nothing, and must not be read as permission.
+function sizeEstimateOf(payload) {
+  if (!payload || typeof payload !== "object") return -1
+  if (payload.sizeEstimate === undefined || payload.sizeEstimate === null) return -1
+  var size = Math.floor(Number(payload.sizeEstimate))
+  return isFinite(size) && size >= 0 ? size : -1
+}
+
+// What to do about a full fetch, given the size known for the message (-1 for
+// none): "refuse" it, "probe" for the size first, or "fetch" it.
+function fullFetchDecision(knownSize) {
+  var size = Number(knownSize)
+  if (!isFinite(size) || size < 0) return "probe"
+  return isTooLarge(size) ? "refuse" : "fetch"
+}
+
 // ---------------------------------------------------------------- parsing
 
 function arrayValues(value) {
@@ -310,7 +352,11 @@ function webMessageUrl(messageId, accountIndex) {
   return WEB_BASE + "/" + index + "/#all/" + encode(messageId)
 }
 
+// No query is the plain inbox, which is what the panel asks for whenever what
+// is on screen is the user's own words (Model.webMailboxQuery).
 function webSearchUrl(query, accountIndex) {
   var index = Math.max(0, Math.floor(Number(accountIndex) || 0))
-  return WEB_BASE + "/" + index + "/#search/" + encode(String(query || ""))
+  var text = String(query || "").trim()
+  if (text === "") return WEB_BASE + "/" + index + "/#inbox"
+  return WEB_BASE + "/" + index + "/#search/" + encode(text)
 }

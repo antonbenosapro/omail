@@ -1,9 +1,11 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Controls as QQC
 import qs.Commons
 import qs.Ui
 import "../account/Model.js" as Model
 import "../message/Html.js" as Html
+import "../message/Link.js" as Link
 import "../message/Message.js" as Mail
 
 // The right column. The body goes through Qt's own rich text engine — a real
@@ -74,6 +76,23 @@ Item {
   readonly property string bodySource: service && service.selectedBody
     ? String(service.selectedBody.source || "") : ""
   readonly property var imageSources: service ? service.selectedImages : []
+
+  // Where the link under the pointer really goes — the host, not the words the
+  // sender put over it — for the window's status line to show. Empty when no
+  // link is under the pointer, or when the link is one a click would refuse.
+  readonly property string linkHint: bodyText.hoveredLink !== ""
+    ? Link.hint(bodyText.hoveredLink) : ""
+
+  // Every link that leaves the app goes through here. An ordinary public
+  // address opens at once; one that is not on the public internet, or whose
+  // text names a different host than it goes to, is shown in full first and
+  // opened only if the reader says so. Link.js decides; this only carries out
+  // the answer.
+  function followLink(href, texts) {
+    var verdict = Link.decide(href, texts)
+    if (verdict.action === "open") Qt.openUrlExternally(verdict.url)
+    else if (verdict.action === "confirm") linkConfirm.ask(verdict)
+  }
 
   // At a narrow window the reader gives up most of its own gutter, and the
   // sender's horizontal padding is stripped as well. Keyed off the flickable's
@@ -335,7 +354,8 @@ Item {
       }
       // The same rule the body's own links obey: this leaves the app, and it
       // leaves it through the desktop's browser rather than anything here.
-      onOpenRequested: function(url) { Qt.openUrlExternally(url) }
+      // There are no words over it to compare, so only the host is judged.
+      onOpenRequested: function(url) { root.followLink(url, []) }
     }
 
     TextEdit {
@@ -352,7 +372,7 @@ Item {
       // taken from the sender — escaped text, line breaks and marker links and
       // nothing else — so it stays cheap to lay out even for the messages that
       // fell back to plain text because their own markup was too heavy.
-      textFormat: TextEdit.RichText
+      textFormat: TextEdit.RichText // rich-text-ok: Html.sanitize or plainTextDocument built every byte of it
       text: root.htmlAvailable
         ? Html.documentFor(root.bodyDocument ? root.bodyDocument : root.rawHtml, ({
             foreground: root.textColor,
@@ -389,7 +409,13 @@ Item {
           if (image <= sources.length) imagePopover.show(sources[image - 1])
           return
         }
-        Qt.openUrlExternally(link)
+        // The TextEdit reports the address and never the words, so the words
+        // are read back out of the document that was drawn — only now, on a
+        // click, so a message nobody clicks in costs no extra walk. The
+        // plain-text document holds no links but image markers.
+        root.followLink(link, root.htmlAvailable
+          ? Link.anchorTexts(root.bodyDocument ? root.bodyDocument : root.rawHtml, link)
+          : [])
       }
 
       // NoButton so selecting text still works; this exists only to turn the
@@ -630,6 +656,104 @@ Item {
         onClicked: if (root.service && root.summary) root.service.openInBrowser(root.service.selectedKey)
       }
     }
+    }
+  }
+
+  // Asked before a link that is not what it looks like is opened. The whole
+  // address is shown, because the host alone is the part a crafted one gets
+  // right. Laid out like the account removal dialog and answering keys the
+  // same way: an open popup takes every key before the shortcut map sees it,
+  // and CloseOnEscape makes Escape the cancel without a binding of its own.
+  // Nothing is bound to Return — the default answer to a doubtful link is the
+  // one that does not open it.
+  Item {
+    id: linkConfirm
+    anchors.fill: parent
+    z: 80
+
+    property var verdict: null
+
+    function ask(value) {
+      verdict = value
+      if (verdict) linkDialog.open()
+    }
+
+    QQC.Popup {
+      id: linkDialog
+      parent: linkConfirm
+      anchors.centerIn: parent
+      width: Math.min(Style.space(420), parent.width - Style.space(32))
+      padding: Style.space(18)
+      modal: true
+      focus: true
+      closePolicy: QQC.Popup.CloseOnEscape
+      onClosed: linkConfirm.verdict = null
+      background: Rectangle {
+        radius: Style.cornerRadius
+        color: root.popupBackgroundColor
+        border.width: 1
+        border.color: root.popupBorderColor
+      }
+      contentItem: Column {
+        spacing: Style.space(14)
+
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: "Open this link?"
+          color: root.textColor
+          font.family: root.panelFontFamily
+          font.pixelSize: Style.font.heading
+          font.bold: true
+          wrapMode: Text.Wrap
+        }
+        // Why it was stopped: which of the two doubts this link raised.
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: linkConfirm.verdict ? linkConfirm.verdict.reason : ""
+          color: root.textColor
+          font.family: root.panelFontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.Wrap
+        }
+        // The sender wrote every character of this. Wrapped anywhere rather
+        // than elided to one line, because a crafted address hides its trick
+        // after the part that looks right. Bounded all the same: a sender can
+        // pad an address to any length, and the dialog has to stay on screen.
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: linkConfirm.verdict ? linkConfirm.verdict.url : ""
+          color: root.dimColor
+          font.family: root.panelFontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WrapAnywhere
+          maximumLineCount: 12
+          elide: Text.ElideRight
+        }
+        Row {
+          anchors.right: parent.right
+          spacing: Style.space(8)
+          Button {
+            text: "Cancel"
+            foreground: root.textColor
+            bordered: false
+            onClicked: linkDialog.close()
+          }
+          // "..." because what it opens is a browser, not a finished action.
+          Button {
+            text: "Open..."
+            foreground: root.accentColor
+            bordered: false
+            onClicked: {
+              var value = linkConfirm.verdict
+              linkDialog.close()
+              if (value) Qt.openUrlExternally(value.url)
+            }
+          }
+        }
+      }
     }
   }
 

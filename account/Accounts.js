@@ -1,4 +1,6 @@
 .pragma library
+.import "../providers/Credentials.js" as Credentials
+.import "../cache/Cache.js" as Cache
 
 // The list of Gmail accounts and which one the window is showing. One account
 // was the original design; several is a list plus a selection, and every rule
@@ -317,6 +319,50 @@ function confirmRemoval(list, request) {
   var entry = values[at] || {}
   var id = String(request.id || "")
   return id !== "" && String(entry.id || "") === id ? at : -1
+}
+
+// ------------------------------------------------------ what removal deletes
+//
+// Removing an account deletes what was kept for it: its keyring entries, its
+// list store and its cached bodies. Taking it off the list alone left all
+// three behind, under names nothing would ever ask for again.
+//
+// Everything is decided from the entry as it was when the user removed it,
+// and nothing is read back from the account's object afterwards. That object
+// is not the account's for long: Service.qml's Instantiator is modelled on a
+// count, so when a row goes the object at that index is rebound to the next
+// account's entry — and a purge that asked it for a keyId a moment later would
+// delete the wrong mailbox's sign-in.
+//
+// `ownsAddress` is false for a row whose address belongs to another row: the
+// duplicate a sign-in turned out to be. Its own keyId is still its own, but
+// what is keyed by the address is the other account's.
+//
+// The commands are the whole plan, so a test can read every argument. The
+// address goes on stdin and nowhere else; the keyId is random and says nothing.
+function removalJobs(entry, ownsAddress, pluginDir, cacheDir) {
+  var source = entry || {}
+  var keyId = String(source.keyId || "")
+  var dir = String(cacheDir || "")
+  var scripts = String(pluginDir || "") + "/scripts/"
+  if (!isKeyId(keyId) || dir === "") return []
+  var id = ownsAddress === false ? "" : trimmed(source.id).toLowerCase()
+  var kind = normalizeProvider(source.provider) === "imap"
+    ? Credentials.IMAP_KEYRING_KIND : Credentials.KEYRING_KIND
+  return [
+    {
+      command: [scripts + "keyring-migrate.sh"],
+      input: ["purge", kind, keyId, id !== "" ? Credentials.lineField(id) : "-"].join(" ") + "\n"
+    },
+    {
+      command: [scripts + "body-cache.sh", "forget-store", dir, keyId],
+      input: (id !== "" ? Cache.legacyFileName(id) : "-") + "\n"
+    },
+    {
+      command: [scripts + "body-cache.sh", "retire", dir + "/bodies/" + Cache.bodyDirName(keyId)],
+      input: "\n"
+    }
+  ]
 }
 
 function discardDraftAt(list, index) {

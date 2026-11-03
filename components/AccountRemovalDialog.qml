@@ -58,7 +58,10 @@ Item {
       Text {
         width: parent.width
         textFormat: Text.PlainText
-        text: "This mailbox will be removed from Omail."
+        // Removing purges as well (Service.removeAccountAt), and the sentence
+        // says so: somebody removing an account to sign in again elsewhere
+        // should know the saved sign-in does not survive it.
+        text: "This mailbox will be removed from Omail, along with its saved sign-in and the mail cached on this computer. Nothing is deleted from the mail server."
         color: root.dimColor
         font.family: root.panelFontFamily
         font.pixelSize: Style.font.bodySmall

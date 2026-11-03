@@ -645,4 +645,141 @@ assert.strictEqual(imap.decodeResponse("", mail.base64ToBytes, mail.bytesToLatin
 assert.strictEqual(imap.decodeResponse("abc", null, null), "",
   "no decoder is an empty response, not a crash")
 
+// ------------------------------------------------- FETCH items, top level
+//
+// `splitResponse` folds a literal into the response that announced it, so a
+// header fetch puts the sender's text in the middle of the server's. The items
+// are read from the top level of the FETCH list, with each literal skipped by
+// its octet count; a sender who writes "UID 999" in a header is writing inside
+// a literal, and nothing in there is an item.
+
+const forged = "X-Evil: FLAGS (\\Seen) UID 999 INTERNALDATE \"1-Jan-2000 00:00:00 +0000\" RFC822.SIZE 1\r\n\r\n"
+const forgedFetch = imap.parseFetch(
+  "* 1 FETCH (BODY[HEADER.FIELDS (X-EVIL)] {" + forged.length + "}\r\n" + forged +
+  " UID 42 FLAGS () INTERNALDATE \"17-Jul-2026 09:02:11 +0000\" RFC822.SIZE 2048)\r\n")
+assert.strictEqual(forgedFetch.length, 1)
+assert.strictEqual(forgedFetch[0].uid, 42, "a UID inside a literal is the sender's, not the server's")
+deepEqual(forgedFetch[0].flags, [], "and so are the flags: the message is still unread")
+assert.strictEqual(new Date(forgedFetch[0].internalDate).toISOString(), "2026-07-17T09:02:11.000Z")
+assert.strictEqual(forgedFetch[0].size, 2048)
+assert.strictEqual(forgedFetch[0].raw, forged, "the literal itself is still the body")
+
+// A literal that is the only place a name appears supplies nothing either: no
+// UID at the top level is no message, however many the body names.
+deepEqual(imap.parseFetch(
+  "* 1 FETCH (BODY[] {" + forged.length + "}\r\n" + forged + ")\r\n"), [])
+
+// A nested list — an ENVELOPE nobody asked for — may hold quoted strings and
+// literals with parentheses of their own, and none of them closes it.
+const envelopeLiteral = "a) UID 7 (b"
+const nested = imap.parseFetch(
+  "* 1 FETCH (ENVELOPE (\"x) UID 8\" {" + envelopeLiteral.length + "}\r\n" + envelopeLiteral +
+  " NIL) UID 5 FLAGS (\\Flagged))\r\n")
+assert.strictEqual(nested[0].uid, 5)
+deepEqual(nested[0].flags, ["\\Flagged"])
+
+// A partial fetch answers with the origin in the item's name.
+const partial = imap.parseFetch("* 1 FETCH (UID 9 RFC822.SIZE 4 BODY[]<0> {4}\r\nmail)\r\n")
+assert.strictEqual(partial[0].raw, "mail")
+// NIL, and a short body sent as a quoted string.
+assert.strictEqual(imap.parseFetch("* 1 FETCH (UID 9 BODY[] NIL)\r\n")[0].raw, "")
+assert.strictEqual(imap.parseFetch("* 1 FETCH (UID 9 BODY[] \"a \\\"b\\\"\")\r\n")[0].raw, "a \"b\"")
+
+// The walk is linear in the line. A run of braces with no closing one, or a
+// thousand unclosed sections, must not make each step search the rest.
+;(function() {
+  const started = Date.now()
+  imap.parseFetch("* 1 FETCH (UID 1 FLAGS (" + "{".repeat(60000) + "))\r\n")
+  imap.parseFetch("* 1 FETCH (UID 1 " + "BODY[".repeat(12000) + ")\r\n")
+  imap.parseFetch("* 1 FETCH (UID 1 BODY[]" + " ".repeat(60000) + ")\r\n")
+  assert.ok(Date.now() - started < 200, "FETCH parsing is linear in the response")
+})()
+
+// --------------------------------------------------------- linear redaction
+//
+// `redact` runs over whatever a server sent back, on the GUI thread. Splitting
+// a URL's userinfo at a colon let the engine try every colon in a long run of
+// them, and 60,000 of them took more than a second.
+
+;(function() {
+  const started = Date.now()
+  imap.redact("imap://" + ":".repeat(60000))
+  imap.redact("smtps://" + "a:".repeat(30000) + " ")
+  imap.responseError(0, "imaps://" + ":".repeat(60000), "")
+  assert.ok(Date.now() - started < 200, "redaction is linear in its input")
+})()
+assert.strictEqual(imap.redact("see imaps://jane@imap.example.org/"), "see imaps://[redacted]@imap.example.org/",
+  "a userinfo with no password goes too")
+
+// ------------------------------------------------------------ the envelope
+//
+// Each address becomes an SMTP command argument between angle brackets, so
+// anything that could close the brackets, separate a second address or end the
+// line is refused — and the whole send with it, rather than the one address.
+
+assert.ok(imap.isEnvelopeAddress("friend@example.com"))
+assert.ok(imap.isEnvelopeAddress("friend+tag@mail.example.co.uk"))
+;[
+  "friend@example.com> NOTIFY=NEVER", "friend@example.com>NOTIFY=NEVER", "<friend@example.com>",
+  "a@example.com,b@example.com", "a@example.com;b@example.com", "\"friend\"@example.com",
+  "friend@example.com\r\nRCPT TO:<x@evil.example>", "friend@example.com\u0000", "friend\u0007@example.com",
+  "friend@localhost", "no-at-sign", "", "a@" + "b".repeat(300) + ".com"
+].forEach(function(bad) {
+  assert.ok(!imap.isEnvelopeAddress(bad), "refused as an envelope address: " + JSON.stringify(bad))
+})
+
+const goodEnvelope = imap.envelopeFor("jane@example.org", ["a@example.com", "b@example.com", "a@example.com"])
+assert.strictEqual(goodEnvelope.ok, true)
+deepEqual(goodEnvelope.recipients, ["a@example.com", "b@example.com"], "each recipient once")
+assert.strictEqual(goodEnvelope.from, "jane@example.org")
+
+const badEnvelope = imap.envelopeFor("jane@example.org", ["a@example.com", "b@example.com> NOTIFY=NEVER"])
+assert.strictEqual(badEnvelope.ok, false, "one bad address refuses the whole send")
+deepEqual(badEnvelope.recipients, [], "and nothing is left to send to")
+assert.ok(/Nothing was sent/.test(badEnvelope.error))
+assert.ok(badEnvelope.error.indexOf("b@example.com> NOTIFY=NEVER") >= 0, "the error names the address to fix")
+assert.ok(imap.envelopeFor("jane@example.org", ["x@example.com\r\nDATA"]).error.indexOf("\r") < 0,
+  "and draws it without its line breaks")
+
+assert.strictEqual(imap.envelopeFor("jane@example.org", []).error, "Add a recipient first")
+// A username with no "@" is a sender some servers accept; one with a ">" is not.
+assert.strictEqual(imap.envelopeFor("jane", ["a@example.com"]).ok, true)
+assert.strictEqual(imap.envelopeFor("jane@example.org> SIZE=1", ["a@example.com"]).ok, false)
+assert.strictEqual(imap.envelopeFor("", ["a@example.com"]).ok, false)
+
+;(function() {
+  const started = Date.now()
+  imap.isEnvelopeAddress("a@" + ".".repeat(60000) + " ")
+  assert.ok(Date.now() - started < 200, "checking an address is cheap however long it is")
+})()
+
+// ------------------------------------------------------------- the size cap
+//
+// A message over 25 MB is not fetched to the GUI thread. A size the list fetch
+// already reported refuses it before anything is sent; a size nobody has
+// reported yet is bounded by fetching one octet past the cap.
+
+assert.strictEqual(imap.MAX_MESSAGE_OCTETS, 25 * 1024 * 1024)
+assert.strictEqual(imap.TOO_LARGE_MESSAGE,
+  "This message is too large to open here (over 25 MB). Open it in your webmail.")
+assert.ok(imap.fullFetchCommand(12).indexOf("BODY.PEEK[]<0." + (imap.MAX_MESSAGE_OCTETS + 1) + ">") >= 0,
+  "an open fetches at most one octet past the cap")
+assert.ok(!imap.isTooLarge(imap.MAX_MESSAGE_OCTETS))
+assert.ok(imap.isTooLarge(imap.MAX_MESSAGE_OCTETS + 1))
+assert.ok(!imap.isTooLarge("nonsense"))
+
+deepEqual(imap.refuseOversized(["1:INBOX", "2:INBOX", "3:INBOX"],
+  { "1:INBOX": 1024, "2:INBOX": imap.MAX_MESSAGE_OCTETS + 1 }),
+  { fetch: ["1:INBOX", "3:INBOX"], refused: ["2:INBOX"] },
+  "a known size over the cap is refused; an unknown one is fetched")
+deepEqual(imap.refuseOversized(["1:INBOX"], null), { fetch: ["1:INBOX"], refused: [] })
+
+assert.ok(imap.entryTooLarge({ size: imap.MAX_MESSAGE_OCTETS + 1, raw: "" }), "by the declared size")
+assert.ok(imap.entryTooLarge({ size: 0, raw: "x".repeat(imap.MAX_MESSAGE_OCTETS + 1) }),
+  "or by what arrived, when the server declared less than it sent")
+assert.ok(!imap.entryTooLarge({ size: 2048, raw: "x" }))
+
+// The transport answers 63 when a reply is over its own cap.
+assert.strictEqual(imap.responseError(63, "curl: (63) Maximum file size exceeded", ""), imap.TOO_LARGE_MESSAGE)
+
 console.log("Imap.js ok")

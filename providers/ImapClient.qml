@@ -47,6 +47,13 @@ Item {
   // archives in one command, and one without it needs three.
   property var serverCapabilities: []
 
+  // The RFC822.SIZE of every message a fetch has reported, by message id. The
+  // list fetch asks for it on every row, so by the time a message is opened its
+  // size is almost always known — and a message over the cap is refused before
+  // a byte of it is asked for. Kept as a plain map: one number per message seen
+  // this session, cleared with the rest of the server's answers.
+  property var knownSizes: ({})
+
   function newHandle() {
     return { aborted: false, process: null, children: [] }
   }
@@ -257,15 +264,19 @@ Item {
   // provider is comfortably faster than the other.
   function getMessages(ids, full, callback, existingHandle, markSeen) {
     var handle = existingHandle || newHandle()
-    var groups = Imap.groupByFolder(ids)
+    // A message already known to be over the size cap is not fetched at all.
+    // The refusal is reported through the same error a failed fetch would be,
+    // so a single open shows it and a batch carries on with the rest.
+    var plan = full ? Imap.refuseOversized(ids, root.knownSizes) : { fetch: ids, refused: [] }
+    var firstError = plan.refused.length > 0 ? Imap.TOO_LARGE_MESSAGE : ""
+    var groups = Imap.groupByFolder(plan.fetch)
     if (groups.length === 0) {
-      if (typeof callback === "function") callback([], "")
+      if (typeof callback === "function") callback([], firstError)
       return handle
     }
 
     var results = []
     var remaining = groups.length
-    var firstError = ""
 
     function finish() {
       if (handle.aborted) return
@@ -299,13 +310,27 @@ Item {
         // reads an unread message as unread — the peek is what keeps the list
         // load from marking a mailbox seen, and the order is what keeps the
         // reader's own copy honest about what it opened.
+        //
+        // Only for a message whose size is already known, and so already
+        // passed the cap. One opened before its size was known may yet be
+        // refused as too large, and a message the reader never showed is not
+        // one it read: those are marked after they pass, on their own.
         var commands = [command]
+        var knownUids = []
+        var unknownIds = []
         if (markSeen === true) {
+          for (var u = 0; u < group.uids.length; u++) {
+            var sizedId = Imap.messageId(group.uids[u], group.folder)
+            if (root.knownSizes[sizedId] !== undefined) knownUids.push(group.uids[u])
+            else unknownIds.push(sizedId)
+          }
+        }
+        if (knownUids.length > 0) {
           // Through the same translation the separate mark-read call uses, so
           // the folded STORE and the standalone one cannot come to disagree
           // about which flag "read" is.
           var plan = Imap.flagPlanForLabels([], ["UNREAD"], root.special)
-          var store = Imap.storeCommand(group.uids, plan.add, plan.remove)
+          var store = Imap.storeCommand(knownUids, plan.add, plan.remove)
           if (typeof store === "string") store = store === "" ? [] : [store]
           commands = commands.concat(store)
         }
@@ -315,8 +340,22 @@ Item {
           if (error && !firstError) firstError = error
           if (!error) {
             var fetched = Imap.parseFetch(text)
-            for (var i = 0; i < fetched.length; i++)
+            var sizes = root.knownSizes
+            var passed = []
+            for (var i = 0; i < fetched.length; i++) {
+              var fetchedId = Imap.messageId(fetched[i].uid, group.folder)
+              sizes[fetchedId] = fetched[i].size
+              // A message opened before its size was known arrives cut at the
+              // cap, and is refused here rather than parsed: the parse is the
+              // cost the cap exists to avoid.
+              if (full && Imap.entryTooLarge(fetched[i])) {
+                if (!firstError) firstError = Imap.TOO_LARGE_MESSAGE
+                continue
+              }
+              if (unknownIds.indexOf(fetchedId) >= 0) passed.push(fetchedId)
               results.push(root.toMessage(fetched[i], group.folder, full))
+            }
+            if (passed.length > 0) root.batchModify(passed, [], ["UNREAD"], null)
           }
           remaining--
           if (remaining === 0) finish()
@@ -700,19 +739,23 @@ Item {
     }
 
     // The envelope is read from the message this client just built, so it can
-    // never name a recipient the headers do not.
+    // never name a recipient the headers do not. Every address in it is then
+    // held to one plain address by `envelopeFor`, which refuses the whole send
+    // rather than drop one: a reply copies addresses from mail a stranger
+    // wrote, and one carrying a ">" or a line break would add parameters or
+    // commands of its own to the SMTP conversation.
     var parsed = Mail.parseRfc822(message)
     var recipients = []
     var headerNames = ["To", "Cc", "Bcc"]
     for (var i = 0; i < headerNames.length; i++) {
       var addresses = Mail.parseAddressList(Mail.headerFrom(parsed.headers, headerNames[i]))
       for (var j = 0; j < addresses.length; j++) {
-        if (addresses[j].email !== "" && recipients.indexOf(addresses[j].email) < 0)
-          recipients.push(addresses[j].email)
+        if (addresses[j].email !== "") recipients.push(addresses[j].email)
       }
     }
-    if (recipients.length === 0) {
-      if (typeof callback === "function") callback(null, "Add a recipient first")
+    var envelope = Imap.envelopeFor(settings ? String(settings.username || "") : "", recipients)
+    if (!envelope.ok) {
+      if (typeof callback === "function") callback(null, envelope.error)
       return handle
     }
 
@@ -724,10 +767,10 @@ Item {
         if (typeof callback === "function") callback(null, credentialError || "Not signed in")
         return
       }
-      var sender = settings ? String(settings.username || "") : ""
       var fields = [Mail.encodeBase64(smtp), Mail.encodeBase64(credentials),
-        Mail.encodeBase64(sender), Mail.encodeBase64(message)]
-      for (var k = 0; k < recipients.length; k++) fields.push(Mail.encodeBase64(recipients[k]))
+        Mail.encodeBase64(envelope.from), Mail.encodeBase64(message)]
+      for (var k = 0; k < envelope.recipients.length; k++)
+        fields.push(Mail.encodeBase64(envelope.recipients[k]))
 
       var process = transportComponent.createObject(root, {
         command: [root.transport],
@@ -814,6 +857,7 @@ Item {
       root.foldersLoaded = false
       root.folders = []
       root.special = ({})
+      root.knownSizes = ({})
     }
   }
 

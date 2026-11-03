@@ -558,6 +558,42 @@ assert.ok(calendar.parseDateValue("20260821T100000Z").utc)
   assert.strictEqual(calendar.replyRecipient(organized("a@x.com b@y.com")), "")
   assert.strictEqual(calendar.replyRecipient(organized("Boss <a@x.com>")), "")
   assert.strictEqual(calendar.canRespond(organized("a@x.com,b@y.com"), "me@example.com"), false)
+  const started = Date.now()
+  assert.strictEqual(calendar.replyRecipient(organized("a@" + ".".repeat(60000) + " ")), "")
+  assert.ok(Date.now() - started < 200, "an organiser that is one long dotted run is refused quickly")
+}
+
+// The whole budget spent on empty siblings, and on zones. Each close used to
+// rebuild its parent's line array, so a sender's 512 KiB part cost hundreds of
+// millions of copies on the thread that draws the desktop. Linear is tens of
+// milliseconds here; the bound is loose enough for a slow machine and tight
+// enough that the quadratic version, seconds even under node, cannot pass.
+{
+  const budget = calendar.MAX_ICS_BYTES - 4096
+  const filled = (unit, tail) => {
+    const pieces = ["BEGIN:VCALENDAR", "METHOD:REQUEST"]
+    let size = 0
+    while (size < budget) { pieces.push(unit); size += unit.length + 2 }
+    return pieces.concat(tail, ["END:VCALENDAR"]).join("\r\n")
+  }
+  const event = [
+    "BEGIN:VEVENT", "UID:flood", "DTSTART;TZID=Zone:20261103T100000",
+    "ORGANIZER:mailto:organizer@example.com", "ATTENDEE:mailto:me@example.com", "END:VEVENT"
+  ]
+  const siblings = filled("BEGIN:X\r\nEND:X", event)
+  const zones = filled("BEGIN:VTIMEZONE\r\nTZID:Zone\r\nEND:VTIMEZONE", event)
+
+  let started = Date.now()
+  const root = calendar.parse(siblings)
+  assert.ok(Date.now() - started < 1000, "parse of many siblings took " + (Date.now() - started) + "ms")
+  assert.strictEqual(root.lines.length, 1 + 2 * (root.children.length - 1) + event.length,
+    "a parent's lines are still every child's source, in order")
+
+  started = Date.now()
+  const invite = calendar.fromAttachment(wanted, b64url(zones))
+  assert.ok(invite, "the flooded invitation still parses")
+  calendar.buildReply(invite, "me@example.com", "accepted", 0)
+  assert.ok(Date.now() - started < 1000, "many zones took " + (Date.now() - started) + "ms")
 }
 
 console.log("test_calendar.js ok")

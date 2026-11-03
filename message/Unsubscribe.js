@@ -234,10 +234,15 @@ function postContentType() {
 // usually carries a token for the subscriber. It arrives on stdin as one line,
 // from `postInput`, and `printf` — a shell builtin, so no process of its own —
 // hands it to curl's config on curl's stdin.
+//
+// `--globoff`, because curl reads `[1-999999]` and `{a,b}` in a URL as a range
+// to expand: a header naming `https://victim.example/u/[1-999999]` would have
+// this send a million POSTs to somebody else's server on one click. It applies
+// to the URL from the config as well, read before it.
 function postCommand() {
   return ["sh", "-c",
     "IFS= read -r line || exit 2; printf 'url = \"%s\"\\n' \"$line\" | curl --config - \"$@\"",
-    "sh", "--silent", "--show-error", "--output", "/dev/null",
+    "sh", "--globoff", "--silent", "--show-error", "--output", "/dev/null",
     "--write-out", "%{http_code}", "--max-time", "20",
     "--max-redirs", "0", "--proto", "=https",
     "--request", "POST", "--header", "Content-Type: " + postContentType(),

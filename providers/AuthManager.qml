@@ -83,6 +83,13 @@ Item {
   property string pkceChallenge: ""
   property string oauthState: ""
   property bool callbackHandled: false
+  // Set while the listener is being cycled after a request that was not the
+  // callback, so its exit restarts it instead of ending the sign-in.
+  property bool listenerRestarting: false
+  property int callbackAttempts: 0
+  // The browser is opened once per sign-in. A restarted listener starts again
+  // and must not open a second consent page.
+  property bool authorizationOpened: false
   property bool exchangingCode: false
   property var tokenRequest: null
   property int tokenRequestSerial: 0
@@ -386,6 +393,9 @@ Item {
     loginBusy = true
     callbackHandled = false
     exchangingCode = false
+    listenerRestarting = false
+    callbackAttempts = 0
+    authorizationOpened = false
     pkceGenerator.command = [pluginDir + "/scripts/pkce.sh"]
     pkceGenerator.running = true
   }
@@ -401,7 +411,9 @@ Item {
     pkceChallenge = result.challenge
     oauthState = result.state
     // socat answers exactly one connection and exits, which is all the
-    // loopback redirect needs and leaves nothing listening afterwards.
+    // loopback redirect needs and leaves nothing listening afterwards. A
+    // connection that turns out not to be the callback is answered and the
+    // listener started again — see handleCallbackLine.
     callbackListener.command = [
       "socat", "-T", "180",
       "TCP4-LISTEN:" + OAuth.normalizedPort(oauthPort) + ",bind=127.0.0.1,reuseaddr",
@@ -412,7 +424,8 @@ Item {
   }
 
   function openAuthorizationPage() {
-    if (!loginBusy || callbackHandled || pkceChallenge === "") return
+    if (!loginBusy || callbackHandled || pkceChallenge === "" || authorizationOpened) return
+    authorizationOpened = true
     Quickshell.execDetached(["xdg-open", OAuth.authorizationUrl({
       clientId: clientId,
       challenge: pkceChallenge,
@@ -423,25 +436,52 @@ Item {
   }
 
   function handleCallbackLine(rawLine) {
-    if (!loginBusy || callbackHandled) return
+    if (!loginBusy || callbackHandled || listenerRestarting) return
     var line = String(rawLine || "").replace(/\r$/, "")
-    if (line.indexOf("GET ") !== 0) return
+    // Only a request line is read; the headers after it are skipped. Any
+    // method counts as one, not only GET: a POST that was skipped would leave
+    // socat holding its one connection open and the real callback refused.
+    if (!/^[A-Z]+ \S+ HTTP\//.test(line)) return
+    var verdict = OAuth.callbackVerdict(line, OAuth.CALLBACK_PATH, oauthState)
+    // Not carrying the state this process sent, so not the callback: whatever
+    // knocked on the port is answered, and the sign-in keeps waiting for the
+    // one that is. Ending it here let any local process cancel a sign-in, and
+    // put its own words in the window as the reason.
+    if (verdict.action === "ignore") {
+      callbackAttempts++
+      callbackListener.write(OAuth.failureResponse(callbackTheme, OAuth.IGNORED_CALLBACK_REASON))
+      if (callbackAttempts >= OAuth.MAX_CALLBACK_ATTEMPTS) {
+        callbackHandled = true
+        callbackStopTimer.restart()
+        failLogin("Google sign-in could not be verified. Please try again", true)
+        return
+      }
+      listenerRestarting = true
+      callbackStopTimer.restart()
+      return
+    }
     callbackHandled = true
     authTimeout.stop()
-    var callback = OAuth.parseCallbackRequestLine(line, OAuth.CALLBACK_PATH)
-    // A mismatched state means this response did not come from the request
-    // this process started, so the code in it is not exchanged.
-    if (!callback.ok || callback.state !== oauthState) {
-      callbackListener.write(OAuth.failureResponse(callbackTheme, callback.error))
+    if (verdict.action === "fail") {
+      callbackListener.write(OAuth.failureResponse(callbackTheme, verdict.error))
       callbackStopTimer.restart()
-      failLogin(callback.ok
-        ? "Google sign-in could not be verified. Please try again"
-        : callback.error, true)
+      failLogin(verdict.error, true)
       return
     }
     callbackListener.write(OAuth.successResponse(callbackTheme))
     callbackStopTimer.restart()
-    exchangeAuthorizationCode(callback.code)
+    exchangeAuthorizationCode(verdict.code)
+  }
+
+  // socat is one-shot: the connection it answered was not the callback, so a
+  // fresh one takes its place on the same port for the rest of the timeout.
+  function restartCallbackListener() {
+    listenerRestarting = false
+    // socat may have exited on its own before the stop timer fired. Left
+    // running, that timer would stop the listener that replaces it.
+    callbackStopTimer.stop()
+    if (!loginBusy || callbackHandled || exchangingCode || oauthState === "") return
+    callbackListener.running = true
   }
 
   function exchangeAuthorizationCode(code) {
@@ -489,6 +529,7 @@ Item {
   function failLogin(reason, listenerAlreadyAnswered) {
     lastError = safeError(reason || "Google sign-in failed. Please try again")
     loginBusy = false
+    listenerRestarting = false
     exchangingCode = false
     authTimeout.stop()
     authOpenDelay.stop()
@@ -510,6 +551,8 @@ Item {
     loginBusy = false
     exchangingCode = false
     callbackHandled = false
+    listenerRestarting = false
+    authorizationOpened = false
     clearPkce()
   }
 
@@ -628,13 +671,29 @@ Item {
     stderr: StdioCollector { waitForEnd: true }
     // The browser only opens once the listener is actually accepting, or the
     // redirect races it and lands on a closed port.
-    onStarted: authOpenDelay.restart()
+    // A restarted listener finds the browser already open.
+    onStarted: if (!root.authorizationOpened) authOpenDelay.restart()
     onExited: function(exitCode) {
-      if (root.loginBusy && !root.callbackHandled && !root.exchangingCode)
-        root.failLogin(exitCode === 0
-          ? "The Google sign-in window closed before it finished"
-          : "Could not listen on port " + OAuth.normalizedPort(root.oauthPort)
-            + ". Close whatever is using it, or change the port in settings")
+      // Stopped on purpose after answering a request that was not the
+      // callback. Restarted on the next turn of the event loop rather than
+      // from inside the exit handler of the process being restarted.
+      if (root.listenerRestarting) {
+        Qt.callLater(root.restartCallbackListener)
+        return
+      }
+      if (!root.loginBusy || root.callbackHandled || root.exchangingCode) return
+      // A clean exit with no request line read is a connection that opened
+      // and closed without saying anything — which any local process can do.
+      // It is one more knock that was not the callback, not a reason to stop.
+      if (exitCode === 0 && root.callbackAttempts + 1 < OAuth.MAX_CALLBACK_ATTEMPTS) {
+        root.callbackAttempts++
+        Qt.callLater(root.restartCallbackListener)
+        return
+      }
+      root.failLogin(exitCode === 0
+        ? "Google sign-in could not be verified. Please try again"
+        : "Could not listen on port " + OAuth.normalizedPort(root.oauthPort)
+          + ". Close whatever is using it, or change the port in settings")
     }
   }
 

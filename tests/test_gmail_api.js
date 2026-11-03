@@ -190,6 +190,35 @@ assert.strictEqual(api.sendAsFor(null, "me@example.com"), null)
     assert.ok(headers.indexOf(row) >= 0, row + " is what a list row draws")
 }
 
+// -------------------------------------------------------------- size cap
+//
+// `format=full` is read whole into the GUI thread's engine before anything can
+// look at it, so a full fetch is decided by `sizeEstimate` first: refused when
+// it is over the cap, probed with `format=minimal` when nothing has reported
+// it yet.
+
+const imapProtocol = load("providers/ImapProtocol.js")
+assert.strictEqual(api.MAX_MESSAGE_OCTETS, 25 * 1024 * 1024)
+assert.strictEqual(api.MAX_MESSAGE_OCTETS, imapProtocol.MAX_MESSAGE_OCTETS,
+  "both providers refuse the same messages")
+assert.strictEqual(api.TOO_LARGE_MESSAGE, imapProtocol.TOO_LARGE_MESSAGE, "with the same words")
+assert.strictEqual(api.TOO_LARGE_MESSAGE,
+  "This message is too large to open here (over 25 MB). Open it in your webmail.")
+
+assert.strictEqual(api.fullFetchDecision(-1), "probe", "an unknown size is asked for first")
+assert.strictEqual(api.fullFetchDecision(undefined), "probe")
+assert.strictEqual(api.fullFetchDecision(2048), "fetch")
+assert.strictEqual(api.fullFetchDecision(api.MAX_MESSAGE_OCTETS), "fetch", "the cap itself is allowed")
+assert.strictEqual(api.fullFetchDecision(api.MAX_MESSAGE_OCTETS + 1), "refuse")
+
+assert.strictEqual(api.sizeEstimateOf({ sizeEstimate: 1234 }), 1234)
+assert.strictEqual(api.sizeEstimateOf({ sizeEstimate: "1234" }), 1234)
+assert.strictEqual(api.sizeEstimateOf({ sizeEstimate: 0 }), 0)
+assert.strictEqual(api.sizeEstimateOf({}), -1, "no size is unknown, not zero")
+assert.strictEqual(api.sizeEstimateOf({ sizeEstimate: "nonsense" }), -1)
+assert.strictEqual(api.sizeEstimateOf(null), -1)
+deepEqual(api.minimalQuery(), { format: "minimal" })
+
 // -------------------------------------------------------------- browsing
 
 assert.strictEqual(api.webMessageUrl("18f3a", 0), "https://mail.google.com/mail/u/0/#all/18f3a")

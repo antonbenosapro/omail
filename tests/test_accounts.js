@@ -677,4 +677,49 @@ assert.strictEqual(accounts.count(accounts.discardDraftAt(pendingList, 0)), 3)
   assert.strictEqual(edited.keysMade, true)
 }
 
+// ------------------------------------------------------ what removal deletes
+//
+// Removing an account purges its keyring entries, its list store and its body
+// cache, from the entry captured at removal — never from the account's object,
+// which the Instantiator rebinds to the next account.
+{
+  const cache = load("cache/Cache.js")
+  const K = "0123456789abcdef0123456789abcd01"
+  const DIR = "/home/u/.cache/omail"
+  const gmail = { id: "jane@example.org", email: "jane@example.org", provider: "gmail", keyId: K }
+  const jobs = accounts.removalJobs(gmail, true, "/plugin", DIR)
+  assert.strictEqual(jobs.length, 3)
+  deepEqual(jobs[0].command, ["/plugin/scripts/keyring-migrate.sh"])
+  assert.strictEqual(jobs[0].input, "purge refresh-token " + K + " jane@example.org\n")
+  deepEqual(jobs[1].command, ["/plugin/scripts/body-cache.sh", "forget-store", DIR, K])
+  assert.strictEqual(jobs[1].input, cache.legacyFileName("jane@example.org") + "\n")
+  deepEqual(jobs[2].command, ["/plugin/scripts/body-cache.sh", "retire", DIR + "/bodies/account-" + K])
+
+  // The address is on stdin and in no argument, whatever the provider.
+  const imap = { id: "imap:jane@example.org", email: "jane@example.org", provider: "imap", keyId: K }
+  for (const entry of [gmail, imap]) {
+    for (const job of accounts.removalJobs(entry, true, "/plugin", DIR)) {
+      for (const arg of job.command) assert.ok(arg.indexOf("jane") < 0, "address in an argument: " + arg)
+    }
+  }
+  assert.strictEqual(accounts.removalJobs(imap, true, "/plugin", DIR)[0].input,
+    "purge imap-password " + K + " imap:jane@example.org\n")
+
+  // A duplicate row's address is the other row's: only its own key goes.
+  const duplicate = accounts.removalJobs(gmail, false, "/plugin", DIR)
+  assert.strictEqual(duplicate[0].input, "purge refresh-token " + K + " -\n")
+  assert.strictEqual(duplicate[1].input, "-\n")
+
+  // Without a key there is nothing of this account's to name, and a clear
+  // with no key would be the parent of every account's bodies.
+  deepEqual(accounts.removalJobs(Object.assign({}, gmail, { keyId: "" }), true, "/plugin", DIR), [])
+  deepEqual(accounts.removalJobs(Object.assign({}, gmail, { keyId: "jane@example.org" }), true, "/plugin", DIR), [])
+  deepEqual(accounts.removalJobs(gmail, true, "/plugin", ""), [])
+  deepEqual(accounts.removalJobs(null, true, "/plugin", DIR), [])
+
+  // An address the line format cannot carry is sent as "-", never raw.
+  const odd = { id: "a'b@example.org", provider: "gmail", keyId: K }
+  assert.strictEqual(accounts.removalJobs(odd, true, "/plugin", DIR)[0].input, "purge refresh-token " + K + " -\n")
+}
+
 console.log("test_accounts.js ok")

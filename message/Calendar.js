@@ -175,9 +175,13 @@ function parse(text) {
       // `lines` has to be its complete source or the VTIMEZONE a reply carries
       // back is a header with its rules missing — which is a reply the
       // organiser's server cannot place in time.
+      // Appended in place: rebuilding the parent's array with `concat` copied
+      // every line before it on every close, which a sender filling 512 KiB
+      // with empty siblings turned into seconds of a frozen desktop.
       if (parent) {
-        parent.lines = parent.lines
-          .concat(["BEGIN:" + closing.name], closing.lines, ["END:" + closing.name])
+        parent.lines.push("BEGIN:" + closing.name)
+        for (var c = 0; c < closing.lines.length; c++) parent.lines.push(closing.lines[c])
+        parent.lines.push("END:" + closing.name)
       }
       if (closing !== root && stack.length === 0) break
       continue
@@ -924,13 +928,11 @@ function normalizedResponse(value) {
 function foldIcsLine(line) {
   var text = String(line || "")
   if (text.length <= 72) return text
-  var out = text.substring(0, 72)
-  var rest = text.substring(72)
-  while (rest.length > 71) {
-    out += "\r\n " + rest.substring(0, 71)
-    rest = rest.substring(71)
-  }
-  return rest === "" ? out : out + "\r\n " + rest
+  // Walked by index. Cutting the remainder off each time copied the rest of a
+  // sender's SUMMARY once per fold.
+  var pieces = [text.substring(0, 72)]
+  for (var at = 72; at < text.length; at += 71) pieces.push(text.substring(at, at + 71))
+  return pieces.join("\r\n ")
 }
 
 function icsTimestamp(ms) {
@@ -954,7 +956,10 @@ function buildReply(invite, me, response, nowMs) {
   var lines = ["BEGIN:VCALENDAR", "PRODID:-//Omail//Omail//EN", "VERSION:2.0", "METHOD:REPLY"]
 
   var zones = invite.source && Array.isArray(invite.source.timezones) ? invite.source.timezones : []
-  for (var z = 0; z < zones.length; z++) lines = lines.concat(zones[z].split("\r\n"))
+  for (var z = 0; z < zones.length; z++) {
+    var zoneLines = zones[z].split("\r\n")
+    for (var l = 0; l < zoneLines.length; l++) lines.push(zoneLines[l])
+  }
 
   lines.push("BEGIN:VEVENT")
   lines.push("UID:" + escapeText(invite.uid))
@@ -1000,8 +1005,14 @@ function quoteParam(value) {
 // none, and none means the card offers no answer at all.
 var SINGLE_ADDRESS = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/
 
+// No address is longer (RFC 5321), and the length is checked first because the
+// pattern is not linear: the domain's two runs both match a dot, so a long one
+// with no ending is tried at every split.
+var MAX_ADDRESS_LENGTH = 254
+
 function replyRecipient(invite) {
   var email = invite && invite.organizer ? String(invite.organizer.email || "").trim() : ""
+  if (email.length > MAX_ADDRESS_LENGTH) return ""
   return SINGLE_ADDRESS.test(email) ? email : ""
 }
 

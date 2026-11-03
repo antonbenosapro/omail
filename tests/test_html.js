@@ -767,4 +767,31 @@ assert.ok(bare.indexOf("x</body>") > 0)
     "and the sanitizer applies it")
 }
 
+// An image comes from the ports the web serves images on. A name that resolves
+// to this machine passes every check a URL can be put to, so the port is what
+// keeps a printer, a router or a development server out of a sender's reach.
+assert.strictEqual(html.imageSourceKind("https://cdn.example.com/a.png"), "remote")
+assert.strictEqual(html.imageSourceKind("https://cdn.example.com:443/a.png"), "remote")
+assert.strictEqual(html.imageSourceKind("http://cdn.example.com:80/a.png"), "remote")
+assert.strictEqual(html.imageSourceKind("http://127.0.0.1.nip.io:8080/api/delete"), "unsafe")
+assert.strictEqual(html.imageSourceKind("//printer.example.com:631/jobs"), "unsafe")
+assert.strictEqual(html.imageSourceKind("https://gmail.com@cdn.example.com:22/a.png"), "unsafe")
+assert.strictEqual(html.imageSourceKind("data:image/png;base64," + "A".repeat(3 * 1024 * 1024)), "unsafe",
+  "a data: image past any size a message needs is not decoded")
+
+// Trims that a run of white space cannot turn quadratic. Each of these took
+// seconds at this size when it was /^\s+|\s+$/ or /[^\S\n]+\n/.
+{
+  const size = 200000
+  const within = (label, run) => {
+    const started = Date.now()
+    run()
+    const spent = Date.now() - started
+    assert.ok(spent < 500, label + " took " + spent + "ms")
+  }
+  within("a style value of spaces", () => html.sanitize("<p style=\"color:red" + " ".repeat(size) + "x\">y</p>"))
+  within("a paragraph of no-break spaces", () => html.readPlainText("<p>" + "\u00a0".repeat(size) + "x</p>"))
+  within("a source padded with spaces", () => html.imageSourceKind(" ".repeat(size) + "x "))
+}
+
 console.log("test_html.js ok")

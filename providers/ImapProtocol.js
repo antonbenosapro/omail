@@ -406,10 +406,60 @@ function summaryFetchCommand(uids) {
 
 // Takes one UID or a list of them, because opening a message and refilling a
 // page of bodies from the cache are the same request at different sizes.
+//
+// A partial fetch, cut one octet past the size cap. The cap is normally
+// enforced before this is sent, from the RFC822.SIZE the list fetch reported
+// (`refuseOversized`); this is for a message opened before its size was known.
+// The server then sends at most the cap and one octet more, which is enough to
+// see that the message is over it and never enough to put a 200 MB string on
+// the GUI thread.
 function fullFetchCommand(uids) {
   var set = sequenceSet(Array.isArray(uids) ? uids : [uids])
   if (set === "") return ""
-  return "UID FETCH " + set + " (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[])"
+  return "UID FETCH " + set + " (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]<0."
+    + (MAX_MESSAGE_OCTETS + 1) + ">)"
+}
+
+// ---------------------------------------------------------- the size cap
+//
+// Everything a message becomes on the way to the reader — the base64 response,
+// the latin1 string, the MIME parse, the sanitiser — happens on the GUI thread
+// of the shell that draws the whole desktop. A message of a few hundred
+// megabytes froze it for as long as that took, or ran it out of memory. 25 MB
+// is what the large providers accept for a message in the first place, so a
+// message over it is one the user's webmail is the right place to open.
+
+var MAX_MESSAGE_OCTETS = 25 * 1024 * 1024
+var TOO_LARGE_MESSAGE = "This message is too large to open here (over 25 MB). Open it in your webmail."
+
+function isTooLarge(octets) {
+  var size = Number(octets)
+  return isFinite(size) && size > MAX_MESSAGE_OCTETS
+}
+
+// Splits the ids a full fetch was asked for into those worth fetching and those
+// already known to be over the cap. `sizes` maps a message id to the
+// RFC822.SIZE an earlier fetch reported; an id it does not know is fetched,
+// and `fullFetchCommand`'s partial fetch bounds what that can cost.
+function refuseOversized(ids, sizes) {
+  var list = Array.isArray(ids) ? ids : []
+  var known = sizes || {}
+  var out = { fetch: [], refused: [] }
+  for (var i = 0; i < list.length; i++) {
+    var id = String(list[i])
+    if (known.hasOwnProperty(id) && isTooLarge(known[id])) out.refused.push(id)
+    else out.fetch.push(id)
+  }
+  return out
+}
+
+// Whether a fetched entry is over the cap — by the size the server declared,
+// or by what actually arrived, since the partial fetch stops one octet past
+// the cap however large the message claimed to be. Checked before the entry
+// is parsed, because the parse is the cost being avoided.
+function entryTooLarge(entry) {
+  if (!entry) return false
+  return isTooLarge(entry.size) || String(entry.raw || "").length > MAX_MESSAGE_OCTETS
 }
 
 function storeCommand(uids, addFlags, removeFlags) {
@@ -547,15 +597,133 @@ function parseSearch(text) {
   return uids
 }
 
-// Reads the value of one FETCH data item out of a response line. The items are
-// unordered and a server may send ones nobody asked for, so each is found by
-// name rather than by position.
+// The data items of one FETCH response, read as IMAP lays them out: a
+// parenthesised list of name/value pairs at the top level, where a value is an
+// atom, a quoted string, a nested list or a literal.
+//
+// Read by walking the list rather than by searching the line, because the line
+// carries the message. `splitResponse` folds every literal into the response
+// that announced it, so a header fetch is the sender's text sitting in the
+// middle of the server's — and a search for "UID" or "FLAGS (" finds the first
+// one, which is whichever came first. A header reading
+// `X-Evil: FLAGS (\Seen) UID 999` in a literal ahead of the real items gave the
+// row another message's id, marked it read and redated it. A literal is skipped
+// here by its octet count, which is the one boundary the sender cannot move.
+//
+// Returns a map from the upper-cased item name to `{ kind, value }`, where kind
+// is "atom", "string", "list" or "literal" and value is the unquoted string,
+// the list's inner text, or the literal's octets. The first of a repeated name
+// is kept, so nothing later on the line can replace an item already read.
+function fetchItems(line) {
+  var text = String(line || "")
+  var items = {}
+  var head = text.match(/^\*[ \t]+\d+[ \t]+FETCH[ \t]+\(/i)
+  if (!head) return items
+  var index = head[0].length
+  var length = text.length
+
+  function isSpace(c) { return c === " " || c === "\t" || c === "\r" || c === "\n" }
+
+  // A literal's announcement `{n}` or `{n+}`, the CRLF that ends its line, and
+  // n octets. Returns where the literal starts and ends, or null when `at` is
+  // not one.
+  function literalAt(at) {
+    if (text.charAt(at) !== "{") return null
+    // Digits scanned by hand rather than by looking for the "}": a run of "{"
+    // with no "}" after it would otherwise search to the end of the line once
+    // per brace, and the line can be a whole message.
+    var close = at + 1
+    while (close < length && text.charAt(close) >= "0" && text.charAt(close) <= "9") close++
+    var count = text.substring(at + 1, close)
+    if (text.charAt(close) === "+") close++
+    if (count === "" || text.charAt(close) !== "}") return null
+    var begin = close + 1
+    if (text.substr(begin, 2) === "\r\n") begin += 2
+    var size = Math.floor(Number(count))
+    return { begin: begin, end: Math.min(length, begin + size) }
+  }
+
+  // The end of a quoted string that opens at `at`, past its closing quote.
+  function quotedEnd(at) {
+    var i = at + 1
+    while (i < length) {
+      var c = text.charAt(i)
+      if (c === "\\") { i += 2; continue }
+      if (c === "\"") return i + 1
+      i++
+    }
+    return length
+  }
+
+  while (index < length) {
+    while (index < length && isSpace(text.charAt(index))) index++
+    if (index >= length || text.charAt(index) === ")") break
+
+    // The name: an atom, with a section in brackets and a partial origin in
+    // angle brackets when it is a body. A section holds spaces and parentheses
+    // of its own — BODY[HEADER.FIELDS (FROM TO)] — so it is read to its "]".
+    var nameStart = index
+    while (index < length) {
+      var ch = text.charAt(index)
+      if (ch === "[") {
+        var bracket = text.indexOf("]", index)
+        index = bracket < 0 ? length : bracket + 1
+        continue
+      }
+      if (isSpace(ch) || ch === "(" || ch === ")" || ch === "{" || ch === "\"") break
+      index++
+    }
+    var name = text.substring(nameStart, index).toUpperCase()
+    if (name === "") {
+      // Something that is not a name where one belongs. Nothing after it can
+      // be placed with confidence, so the walk stops with what it has.
+      break
+    }
+    while (index < length && (text.charAt(index) === " " || text.charAt(index) === "\t")) index++
+
+    var item = null
+    var c0 = text.charAt(index)
+    var literal = literalAt(index)
+    if (literal) {
+      item = { kind: "literal", value: text.substring(literal.begin, literal.end) }
+      index = literal.end
+    } else if (c0 === "\"") {
+      var stop = quotedEnd(index)
+      item = { kind: "string", value: unquoteImap(text.substring(index, stop)) }
+      index = stop
+    } else if (c0 === "(") {
+      // A nested list — FLAGS, or an ENVELOPE or BODYSTRUCTURE nobody asked
+      // for — may hold quoted strings and literals of its own, and a ")" inside
+      // either of those does not close it.
+      var depth = 0
+      var open = index
+      while (index < length) {
+        var cn = text.charAt(index)
+        if (cn === "\"") { index = quotedEnd(index); continue }
+        var inner = literalAt(index)
+        if (inner) { index = inner.end; continue }
+        index++
+        if (cn === "(") depth++
+        else if (cn === ")") {
+          depth--
+          if (depth === 0) break
+        }
+      }
+      item = { kind: "list", value: text.substring(open + 1, Math.max(open + 1, index - 1)) }
+    } else {
+      var atomStart = index
+      while (index < length && !isSpace(text.charAt(index)) && text.charAt(index) !== ")") index++
+      item = { kind: "atom", value: text.substring(atomStart, index) }
+    }
+    if (!items.hasOwnProperty(name)) items[name] = item
+  }
+  return items
+}
+
+// The value of one top-level FETCH item, or "" when the response has none.
 function fetchItem(line, name) {
-  var index = line.indexOf(name)
-  if (index < 0) return ""
-  var rest = line.substring(index + name.length)
-  var match = rest.match(/^\s*("(?:[^"\\]|\\.)*"|\S+)/)
-  return match ? match[1] : ""
+  var item = fetchItems(line)[String(name || "").toUpperCase()]
+  return item ? item.value : ""
 }
 
 function unquoteImap(value) {
@@ -565,11 +733,10 @@ function unquoteImap(value) {
   return text
 }
 
-// The flag list of one FETCH response: FLAGS (\Seen \Flagged).
-function parseFlags(line) {
-  var match = String(line || "").match(/FLAGS\s*\(([^)]*)\)/i)
-  if (!match) return []
-  var flags = match[1].split(/\s+/)
+function flagsOf(items) {
+  var item = items.FLAGS
+  if (!item || item.kind !== "list") return []
+  var flags = item.value.split(/\s+/)
   var out = []
   for (var i = 0; i < flags.length; i++) {
     if (trimmed(flags[i]) !== "") out.push(trimmed(flags[i]))
@@ -577,22 +744,29 @@ function parseFlags(line) {
   return out
 }
 
-// The body of a FETCH item that arrived as a literal. Everything this client
-// asks for — headers and whole messages — comes back that way, because servers
-// send anything with a CRLF in it as a literal.
-function parseLiteralBody(line) {
-  var match = String(line || "").match(/BODY\[[^\]]*\]\s*(?:<\d+>)?\s*\{(\d+)\+?\}\r\n([\s\S]*)$/)
-  if (!match) {
-    // A short body may arrive as a quoted string instead.
-    var quoted = String(line || "").match(/BODY\[[^\]]*\]\s*("(?:[^"\\]|\\.)*")/)
-    return quoted ? unquoteImap(quoted[1]) : ""
+// The flag list of one FETCH response: FLAGS (\Seen \Flagged).
+function parseFlags(line) {
+  return flagsOf(fetchItems(line))
+}
+
+// The body of the BODY[...] item. Everything this client asks for — headers
+// and whole messages — comes back as a literal, because servers send anything
+// with a CRLF in it that way; a short one may arrive as a quoted string, and
+// an absent one as NIL. A literal is cut to its declared size by
+// `fetchItems`, which is what keeps the FETCH response's closing ")" out of
+// the message — and is why the octet count had to survive the transport.
+function bodyOf(items) {
+  for (var name in items) {
+    if (name.indexOf("BODY[") !== 0) continue
+    var item = items[name]
+    if (item.kind === "literal" || item.kind === "string") return item.value
+    return ""
   }
-  var size = Math.floor(Number(match[1]))
-  var payload = match[2]
-  // The closing ")" of the FETCH response follows the literal. Cutting to the
-  // declared size is what leaves it out — and is why the octet count had to
-  // survive the transport intact.
-  return payload.substring(0, size)
+  return ""
+}
+
+function parseLiteralBody(line) {
+  return bodyOf(fetchItems(line))
 }
 
 var MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
@@ -608,7 +782,12 @@ var MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
 // shell, because Node parses the same string happily. Arithmetic is the only
 // form that means the same thing in both.
 function parseInternalDate(line) {
-  var value = unquoteImap(fetchItem(line, "INTERNALDATE")).trim()
+  return internalDateOf(fetchItems(line))
+}
+
+function internalDateOf(items) {
+  var item = items.INTERNALDATE
+  var value = item ? trimmed(item.value) : ""
   if (value === "") return 0
 
   var match = value.match(
@@ -641,14 +820,17 @@ function parseFetch(text) {
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i]
     if (!/^\*\s+\d+\s+FETCH\s/i.test(line)) continue
-    var uid = Math.floor(Number(fetchItem(line, "UID")))
+    var items = fetchItems(line)
+    var uid = items.UID && items.UID.kind === "atom" ? Math.floor(Number(items.UID.value)) : 0
     if (!isFinite(uid) || uid < 1) continue
+    var size = items["RFC822.SIZE"] && items["RFC822.SIZE"].kind === "atom"
+      ? Math.floor(Number(items["RFC822.SIZE"].value)) : 0
     out.push({
       uid: uid,
-      flags: parseFlags(line),
-      internalDate: parseInternalDate(line),
-      size: Math.max(0, Math.floor(Number(fetchItem(line, "RFC822.SIZE"))) || 0),
-      raw: parseLiteralBody(line)
+      flags: flagsOf(items),
+      internalDate: internalDateOf(items),
+      size: Math.max(0, size) || 0,
+      raw: bodyOf(items)
     })
   }
   return out
@@ -865,6 +1047,9 @@ function responseError(status, detail, fallback) {
   if (code === 35) return "A secure connection to the mail server could not be established"
   if (code === 60 || code === 51)
     return "The mail server's security certificate could not be verified"
+  // 63 is curl's "maximum file size exceeded", and mail-transport.sh answers
+  // with it too when a response is larger than the panel will take.
+  if (code === 63) return TOO_LARGE_MESSAGE
   if (code === 67 || /AUTHENTICATIONFAILED|invalid credentials|login failed/i.test(text))
     return "The server rejected that username or password"
   if (/\[ALERT\]/i.test(text)) {
@@ -880,6 +1065,81 @@ function responseError(status, detail, fallback) {
   return fallback || "The mail server could not complete this request"
 }
 
+// ----------------------------------------------------------- the envelope
+//
+// SMTP takes the sender and each recipient as a command argument of its own —
+// `RCPT TO:<address>` — and curl writes the value between the brackets as it
+// was given. So an address carrying a ">" ends the argument early and whatever
+// follows is a parameter: `a@b.com> NOTIFY=NEVER`. One carrying a CR or an LF
+// is a second command. The addresses are read off the message's own headers,
+// and a reply copies those from mail a stranger wrote, where an encoded word
+// can decode to anything at all.
+//
+// So every envelope address must be one plain address and nothing else, and a
+// message with any that is not is refused whole. Dropping the bad one and
+// sending to the rest would deliver a message to fewer people than its To line
+// says, which nobody would find out about until somebody asked.
+
+// The same shape `Calendar.js` accepts for an organiser: a local part, an "@",
+// and a domain with a dot in it, none of them holding anything SMTP or an
+// address list would read as syntax. The length is checked first, which is the
+// SMTP limit for a path and also what keeps the pattern's backtracking over a
+// domain of dots from costing anything.
+var SINGLE_ADDRESS = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/
+var MAX_ADDRESS_LENGTH = 254
+
+function isEnvelopeAddress(value) {
+  var text = String(value === undefined || value === null ? "" : value)
+  if (text === "" || text.length > MAX_ADDRESS_LENGTH) return false
+  // Control characters are not whitespace to `\s`, and NUL ends a C string
+  // inside curl.
+  if (/[\x00-\x1f\x7f]/.test(text)) return false
+  return SINGLE_ADDRESS.test(text)
+}
+
+// The sender is the username the account signs in with, which a server may
+// accept without an "@" in it. So it is held to what the command needs — no
+// whitespace, no brackets, no separators, no control characters — rather than
+// to the shape of an address.
+function isEnvelopeSender(value) {
+  var text = String(value === undefined || value === null ? "" : value)
+  if (text === "" || text.length > MAX_ADDRESS_LENGTH) return false
+  return !/[\s<>,;"\x00-\x1f\x7f]/.test(text)
+}
+
+// What the user sees about an address that was refused. It is the address
+// they or a sender typed, so it is shown — it is the thing to correct — but
+// with its control characters gone and its length bounded, because it is
+// about to be a label.
+function shownAddress(value) {
+  var text = String(value === undefined || value === null ? "" : value)
+    .replace(/[\x00-\x1f\x7f]+/g, " ").trim()
+  return text.length > 80 ? text.substring(0, 80) + "…" : text
+}
+
+// The envelope for a message, or the reason there is none. `recipients` is the
+// list of addresses read off To, Cc and Bcc.
+function envelopeFor(sender, recipients) {
+  var list = Array.isArray(recipients) ? recipients : []
+  if (!isEnvelopeSender(sender))
+    return { ok: false, error: "This mailbox's username cannot be used as a sender address, so nothing was sent", from: "", recipients: [] }
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var address = String(list[i] === undefined || list[i] === null ? "" : list[i])
+    if (!isEnvelopeAddress(address)) {
+      return {
+        ok: false,
+        error: "Nothing was sent: \u201c" + shownAddress(address) + "\u201d is not a single plain email address",
+        from: "",
+        recipients: []
+      }
+    }
+    if (out.indexOf(address) < 0) out.push(address)
+  }
+  if (out.length === 0) return { ok: false, error: "Add a recipient first", from: "", recipients: [] }
+  return { ok: true, error: "", from: String(sender), recipients: out }
+}
+
 // A password can end up in a curl error line, in a server's echo of a failed
 // LOGIN, or in a URL. Nothing that could carry one reaches a label without
 // passing through here — the same gate `OAuth.redact` is for Google.
@@ -889,8 +1149,13 @@ function redact(text) {
     // server chose to quote back.
     .replace(/\b(LOGIN)\s+\S+\s+\S+/gi, "$1 [redacted]")
     .replace(/\b(AUTHENTICATE)\s+\w+\s+\S+/gi, "$1 [redacted]")
-    // A password inside a URL's userinfo, which is how curl prints one.
-    .replace(/(imaps?|smtps?):\/\/[^\s/@]*:[^\s/@]*@/gi, "$1://[redacted]@")
+    // A password inside a URL's userinfo, which is how curl prints one. The
+    // whole userinfo goes, colon or not: matching "user:pass" as two runs
+    // either side of a colon let the engine try every colon in a long run of
+    // them as the split, and a server line of 60,000 colons held the shell's
+    // GUI thread for over a second. One run up to the "@" is linear, and a
+    // username on its own is not worth that.
+    .replace(/(imaps?|smtps?):\/\/[^\s\/@]*@/gi, "$1://[redacted]@")
     .replace(/(password|pass|pwd)\s*[=:]\s*\S+/gi, "$1=[redacted]")
 }
 

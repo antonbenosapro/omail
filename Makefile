@@ -50,6 +50,7 @@ test-js:
 	node tests/test_message.js
 	node tests/test_calendar.js
 	node tests/test_unsubscribe.js
+	node tests/test_link.js
 	node tests/test_html.js
 	node tests/test_cache.js
 	node tests/test_model.js
@@ -67,6 +68,7 @@ test-shell:
 	bash tests/test_install.sh
 	bash tests/test_transport.sh
 	bash tests/test_save_attachment.sh
+	sh tests/test_body_cache.sh
 	sh tests/test_keyring_migrate.sh
 
 # Focus ownership and key routing cannot be tested without a focus scope, and a

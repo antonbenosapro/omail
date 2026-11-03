@@ -5,8 +5,10 @@
 #
 # What it proves: entries keyed by address under every old service name are
 # re-keyed to the keyId with their secret intact, only the first mailbox may
-# claim a client-only token, nobody else's entry moves, `forget` removes what
-# it should — and no address is ever an argument to gdbus or secret-tool.
+# claim a client-only token, nobody else's entry moves, `forget` and `purge`
+# remove what they should and only under Omail's own service name — so the
+# separate omamail plugin keeps its sign-in — and no address is ever an
+# argument to gdbus or secret-tool.
 #
 # Skipped, not failed, where there is no keyring to start: a CI runner has no
 # gnome-keyring, and the plugin's own machine does.
@@ -92,6 +94,40 @@ check 'the old entry is gone' \
   "$(secret-tool lookup service omail kind refresh-token client-id CID account carol@example.org)" ''
 check 'and the re-keyed one is not touched' \
   "$(secret-tool lookup service omail kind refresh-token client-id CID account $K2)" 'tok bob'
+
+# Upstream omamail is a separate plugin that may still be installed. Signing
+# out of Omail must not sign anybody out of it.
+store 'tok upstream' service omamail kind refresh-token client-id CID account carol@example.org
+check 'forget leaves another plugin alone' "$(migrate "forget refresh-token carol@example.org CID")" ''
+check 'its entry is still there' \
+  "$(secret-tool lookup service omamail kind refresh-token client-id CID account carol@example.org)" 'tok upstream'
+
+# Removing an account: everything under its keyId, and its own old entry.
+K5=0123456789abcdef0123456789abcd05
+store 'tok dan' service omail kind refresh-token client-id CID account $K5
+store 'tok dan2' service omail kind refresh-token client-id CID9 account $K5
+store 'tok dan old' service omail kind refresh-token client-id CID account dan@example.org
+store 'pw dan' service omail kind imap-password account imap:dan@example.org
+store 'tok dan upstream' service omamail kind refresh-token client-id CID account dan@example.org
+check 'purge prints nothing' "$(migrate "purge refresh-token $K5 dan@example.org")" ''
+check 'the keyed token is gone' \
+  "$(secret-tool lookup service omail kind refresh-token client-id CID account $K5)" ''
+check 'under every client' \
+  "$(secret-tool lookup service omail kind refresh-token client-id CID9 account $K5)" ''
+check 'and the old one keyed by its address' \
+  "$(secret-tool lookup service omail kind refresh-token client-id CID account dan@example.org)" ''
+check 'an IMAP account at the same address is another account' \
+  "$(secret-tool lookup service omail kind imap-password account imap:dan@example.org)" 'pw dan'
+check 'the other plugin keeps its own' \
+  "$(secret-tool lookup service omamail kind refresh-token client-id CID account dan@example.org)" 'tok dan upstream'
+check 'and another account keeps its own' \
+  "$(secret-tool lookup service omail kind refresh-token client-id CID account $K2)" 'tok bob'
+store 'tok erin' service omail kind refresh-token client-id CID account erin@example.org
+migrate "purge refresh-token $K5 -" >/dev/null
+check 'with no address, only the key is purged' \
+  "$(secret-tool lookup service omail kind refresh-token client-id CID account erin@example.org)" 'tok erin'
+check 'a purge needs a real key' "$(migrate "purge refresh-token nothex erin@example.org"; \
+  secret-tool lookup service omail kind refresh-token client-id CID account erin@example.org)" 'tok erin'
 
 # Refused before anything runs.
 check 'a malformed keyId is refused' "$(migrate "adopt imap-password nothex imap:x@example.org - 0")" ''
