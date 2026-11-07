@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "components"
 
@@ -17,7 +18,7 @@ BarWidget {
   // `barForeground` belongs to qs.Ui.Panel, not to BarWidget: reading it here
   // yields undefined, and assigning undefined to a colour leaves the icon
   // unpainted. The bar itself is the source.
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
 
   // The service is a singleton shared with the window, and the shell hands
   // plugin settings to the bar widget rather than to the service, so the
@@ -63,7 +64,7 @@ BarWidget {
 
     // The bar's own `active` is left alone on purpose: it exists to recolour a
     // glyph, and this widget draws its own.
-    readonly property color openFill: Style.selectedFillFor(root.foreground, Color.accent)
+    readonly property color openFill: Style.selectedFillFor(root.foreground, Commons.Color.accent)
 
     iconComponent: Component {
       Item {

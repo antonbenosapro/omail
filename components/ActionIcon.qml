@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // The app's icon set, drawn rather than rasterised from SVG assets: these
 // render at 13–16px, where Qt's SVG renderer smears strokes. The shell's own
@@ -11,7 +12,7 @@ Canvas {
   id: root
 
   property string name: ""
-  property color color: Color.foreground
+  property color color: Commons.Color.foreground
 
   property real iconSize: Style.font.icon
   property real strokeScale: 1.4

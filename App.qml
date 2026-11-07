@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Window
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 import "account/Model.js" as Model
@@ -28,16 +29,16 @@ Item {
   readonly property string pluginId: manifest && manifest.id
     ? String(manifest.id) : "omail"
 
-  readonly property color foreground: Color.foreground
-  readonly property color background: Color.background
-  readonly property color accent: Color.accent
-  readonly property color urgent: Color.urgent
+  readonly property color foreground: Commons.Color.foreground
+  readonly property color background: Commons.Color.background
+  readonly property color accent: Commons.Color.accent
+  readonly property color urgent: Commons.Color.urgent
   // Destructive controls consume a role named for their meaning. Omarchy's
   // foundational palette currently calls that source `urgent`; keeping the
   // mapping here stops account pages from confusing urgency with danger.
-  readonly property color danger: Color.urgent
-  readonly property color popupBackground: Color.popups.background
-  readonly property color popupBorder: Color.popups.border
+  readonly property color danger: Commons.Color.urgent
+  readonly property color popupBackground: Commons.Color.popups.background
+  readonly property color popupBorder: Commons.Color.popups.border
   // Mixed toward the ground rather than Qt.darker: on a light theme darkening
   // an almost-black foreground makes secondary text heavier than body text.
   readonly property color dim: Qt.rgba(

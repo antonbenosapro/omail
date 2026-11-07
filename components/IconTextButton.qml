@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // A bordered button carrying a drawn icon beside its label.
@@ -14,8 +15,8 @@ Rectangle {
   property string iconName: ""
   property string text: ""
   property string tooltipText: ""
-  property color foreground: Color.foreground
-  property color accent: Color.accent
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property bool bordered: true
   // Held while this button is the chosen one of a set — the RSVP row, where
   // three buttons stand for three answers and one of them is the answer given.
